@@ -1,0 +1,52 @@
+# AWS region (default: us-east-1 for cost optimization)
+aws_region = "us-east-1"
+
+# Project configuration
+project_name = "elasticache-perf-test"
+environment  = "test"
+
+# REQUIRED: Your existing VPC and subnets
+vpc_id     = "vpc-xxxxxxxxx"           # Replace with your VPC ID
+subnet_ids = ["subnet-xxxxx", "subnet-yyyyy"]  # Replace with your subnet IDs
+
+# ElastiCache configuration
+engine_type           = "redis"         # Options: redis, valkey
+engine_version        = "7.1"
+node_type            = "cache.t4g.micro"  # Start with cheapest instance
+cluster_mode_enabled = false            # Set to true for cluster mode testing
+
+# Non-cluster mode settings
+num_cache_nodes = 1                     # Number of nodes (1 = single node, 2+ = primary + replicas)
+
+# Cluster mode settings (only used when cluster_mode_enabled = true)
+num_node_groups         = 1             # Number of shards
+replicas_per_node_group = 0             # Replicas per shard
+
+# Network and security
+port = 6379
+# allowed_cidr_blocks = ["10.0.0.0/16"]  # Uncomment to restrict access, defaults to VPC CIDR
+
+# Performance settings (optional)
+# parameter_group_settings = {
+#   "maxmemory-policy" = "allkeys-lru"
+#   "timeout"          = "300"
+# }
+
+# Backup and maintenance
+snapshot_retention_limit = 0            # Disable snapshots for testing
+automatic_failover_enabled = false      # Set to true for multi-node with automatic failover
+
+# Security (optional for testing)
+at_rest_encryption_enabled = false
+transit_encryption_enabled = false
+# auth_token = "your-secret-token"      # Uncomment if transit_encryption_enabled = true
+
+# CloudWatch
+cloudwatch_log_retention_days = 7
+enable_cloudwatch_dashboard   = true
+
+# Additional tags (optional)
+tags = {
+  CostCenter = "Engineering"
+  Owner      = "Performance-Team"
+}
