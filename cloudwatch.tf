@@ -7,18 +7,75 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
     widgets = [
       # Header with cluster info
       {
-        type = "text"
-        width = 24
+        type   = "text"
+        width  = 24
         height = 1
         properties = {
-          markdown = "# ElastiCache Performance Dashboard - ${var.engine_type} ${var.engine_version}\n**Instance Type:** ${var.node_type} | **Mode:** ${var.cluster_mode_enabled ? "Cluster" : "Non-Cluster"} | **Nodes:** ${var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes}"
+          markdown = "# ElastiCache Performance Dashboard - ${var.engine_type} ${var.engine_version}\\n**Instance Type:** ${var.node_type} | **Mode:** ${var.cluster_mode_enabled ? "Cluster" : "Non-Cluster"} | **Nodes:** ${var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes}"
+        }
+      },
+
+      # Load Generator Target Info
+      {
+        type   = "text"
+        width  = 24
+        height = 1
+        properties = {
+          markdown = "## 🎯 Load Generator Target\\n**Endpoint:** `${local.elasticache_endpoint}:${var.port}` | **Tasks:** ${var.loadgen_task_count} | **Threads:** ${var.loadgen_memtier_threads} | **Clients:** ${var.loadgen_memtier_clients} | **Test Duration:** ${var.loadgen_memtier_test_time}s"
+        }
+      },
+
+      # Load Generator Metrics
+      {
+        type   = "metric"
+        width  = 12
+        height = 6
+        properties = {
+          metrics = [
+            ["AWS/ECS", "CPUUtilization", "ClusterName", "${local.cluster_id}-loadgen", "ServiceName", "${local.cluster_id}-loadgen", { stat = "Average" }]
+          ]
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          title   = "Load Generator CPU Utilization"
+          period  = 60
+          yAxis = {
+            left = {
+              label = "Percent"
+              min   = 0
+              max   = 100
+            }
+          }
+        }
+      },
+
+      {
+        type   = "metric"
+        width  = 12
+        height = 6
+        properties = {
+          metrics = [
+            ["AWS/ECS", "MemoryUtilization", "ClusterName", "${local.cluster_id}-loadgen", "ServiceName", "${local.cluster_id}-loadgen", { stat = "Average" }]
+          ]
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          title   = "Load Generator Memory Utilization"
+          period  = 60
+          yAxis = {
+            left = {
+              label = "Percent"
+              min   = 0
+              max   = 100
+            }
+          }
         }
       },
 
       # Network Performance Section Header
       {
-        type = "text"
-        width = 24
+        type   = "text"
+        width  = 24
         height = 1
         properties = {
           markdown = "## 📊 Network Performance (Primary Focus)"
@@ -58,7 +115,7 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
                     )
                   )
                 )
-                fill = "above"
+                fill  = "above"
                 color = "#ff7f0e"
               }
             ]
@@ -99,7 +156,7 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
                     )
                   )
                 )
-                fill = "above"
+                fill  = "above"
                 color = "#ff7f0e"
               }
             ]
@@ -143,7 +200,7 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
                     )
                   )
                 )
-                fill = "above"
+                fill  = "above"
                 color = "#d62728"
               }
             ]
@@ -153,8 +210,8 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
 
       # Performance Metrics Section Header
       {
-        type = "text"
-        width = 24
+        type   = "text"
+        width  = 24
         height = 1
         properties = {
           markdown = "## ⚡ Performance Metrics"
@@ -277,8 +334,8 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
 
       # Operations & Connections Section Header
       {
-        type = "text"
-        width = 24
+        type   = "text"
+        width  = 24
         height = 1
         properties = {
           markdown = "## 🔄 Operations & Connections"
@@ -388,8 +445,8 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
 
       # Additional Metrics Section Header
       {
-        type = "text"
-        width = 24
+        type   = "text"
+        width  = 24
         height = 1
         properties = {
           markdown = "## 📈 Additional Metrics"
