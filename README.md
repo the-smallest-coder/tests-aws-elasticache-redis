@@ -94,8 +94,8 @@ After `terraform apply`:
 
 | Data | Format | Location |
 |------|--------|----------|
-| CloudWatch Metrics | CSV | `s3://{bucket}/exports/metrics/{date}.csv` |
-| memtier Logs | Plain text | `s3://{bucket}/exports/logs/{date}.txt` |
+| CloudWatch Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster_id}.csv` |
+| memtier Logs | Plain text | `s3://{bucket}/exports/{timestamp}/logs/{cluster_id}.txt` |
 
 ---
 

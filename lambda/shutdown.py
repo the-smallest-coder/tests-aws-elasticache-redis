@@ -43,13 +43,15 @@ def handler(event, context):
     
     try:
         # 1. Export CloudWatch metrics to CSV
-        metrics_key = f"{s3_prefix}metrics/{cluster_id}-{timestamp}.csv"
+        # Structure: {prefix}/{timestamp}/metrics/{cluster_id}.csv
+        metrics_key = f"{s3_prefix}{timestamp}/metrics/{cluster_id}.csv"
         results['metrics_export'] = export_metrics_to_s3(
             elasticache_id, s3_bucket, metrics_key, aws_region
         )
         
         # 2. Export memtier logs to plain text
-        logs_key = f"{s3_prefix}logs/{cluster_id}-{timestamp}.txt"
+        # Structure: {prefix}/{timestamp}/logs/{cluster_id}.txt
+        logs_key = f"{s3_prefix}{timestamp}/logs/{cluster_id}.txt"
         results['logs_export'] = export_logs_to_s3(
             log_group, s3_bucket, logs_key
         )
