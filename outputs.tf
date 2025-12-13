@@ -71,27 +71,6 @@ output "configuration_summary" {
   }
 }
 
-output "connection_instructions" {
-  description = "Instructions for connecting to the cluster"
-  sensitive   = true
-  value       = <<-EOT
-    
-    Connection Details:
-    -------------------
-    Endpoint: ${var.cluster_mode_enabled ? aws_elasticache_replication_group.main.configuration_endpoint_address : aws_elasticache_replication_group.main.primary_endpoint_address}
-    Port: ${var.port}
-    Engine: ${var.engine_type} ${var.engine_version}
-    Mode: ${var.cluster_mode_enabled ? "Cluster Mode Enabled" : "Non-Cluster Mode"}
-    
-    ${var.cluster_mode_enabled ? "Using redis-cli:" : "Using redis-cli:"}
-    redis-cli -h ${var.cluster_mode_enabled ? aws_elasticache_replication_group.main.configuration_endpoint_address : aws_elasticache_replication_group.main.primary_endpoint_address} -p ${var.port}${var.cluster_mode_enabled ? " -c" : ""}${var.transit_encryption_enabled ? " --tls" : ""}
-    
-    ${var.transit_encryption_enabled && var.auth_token != null ? "Note: AUTH token required for authentication" : ""}
-    
-    Security Group ID (add to ECS task SG): ${aws_security_group.elasticache.id}
-  EOT
-}
-
 # Load Generator Outputs
 output "loadgen_cluster_name" {
   description = "ECS cluster name for load generators"
