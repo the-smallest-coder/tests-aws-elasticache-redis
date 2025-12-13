@@ -73,6 +73,7 @@ output "configuration_summary" {
 
 output "connection_instructions" {
   description = "Instructions for connecting to the cluster"
+  sensitive   = true
   value       = <<-EOT
     
     Connection Details:

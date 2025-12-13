@@ -1,109 +1,82 @@
 # AWS ElastiCache Performance Testing Infrastructure
 
-This repository contains Terraform code to provision **ephemeral** AWS ElastiCache resources (Redis/Valkey) for performance testing and network throughput analysis.
+Terraform infrastructure for **automated** ElastiCache (Redis/Valkey) performance testing.
 
-The idea is simple:
-
-> `terraform apply` → auto-run load tests → auto-export metrics → auto-stop infrastructure → `terraform destroy`.
-
-Nothing in this stack is meant to be long-lived; you spin it up when you want to run a benchmark campaign and then tear it down.
+> `terraform apply` → auto-run load tests → auto-export metrics → auto-stop → `terraform destroy`
 
 ---
 
-## ⚠️ IMPORTANT: S3 Bucket Required
+## 🚀 Quick Start
 
-> **`metrics_export_s3_bucket` is REQUIRED.** Terraform will error if not configured.
->
-> Create an S3 bucket before running `terraform apply`:
-> ```bash
-> aws s3 mb s3://my-elasticache-perf-exports
-> ```
+```bash
+# 1. Create S3 bucket for exports (REQUIRED)
+aws s3 mb s3://my-elasticache-perf-exports
 
----
+# 2. Configure
+cp terraform.tfvars.example terraform.tfvars
+# Edit: vpc_id, subnet_ids, metrics_export_s3_bucket
 
-## 🎯 Project Goals
+# 3. Deploy
+terraform init
+terraform apply
 
-- **Performance Testing**  
-  Provision ElastiCache configurations (engine, topology, instance type) to test how they behave under synthetic workloads.
+# 4. Cleanup (after test auto-completes)
+terraform destroy
+```
 
-- **Automated Lifecycle**  
-  After `terraform apply`:
-  1. Load tests start automatically
-  2. Run for configurable duration (default: 1 hour)
-  3. Export metrics (CSV) and logs (text) to S3
-  4. Stop ECS and ElastiCache
-
-- **Observability**  
-  CloudWatch dashboards and log groups for real-time monitoring.
+> ⚠️ **`metrics_export_s3_bucket` is required** - Terraform will error if not set.
 
 ---
 
 ## 📋 Prerequisites
 
-- **Terraform**: >= 1.0  
-- **AWS CLI**: configured with appropriate credentials  
-- **Existing VPC**: VPC + private subnets  
-- **S3 Bucket**: for metrics export (REQUIRED)
+- Terraform >= 1.0
+- AWS CLI configured
+- Existing VPC + private subnets
+- S3 bucket for exports
 
 ---
 
-## 🏗️ Architecture Overview
+## 🎯 What It Does
+
+1. **Provisions** ElastiCache (Redis/Valkey) + ECS load generators
+2. **Runs** memtier_benchmark for configurable duration (default: 1 hour)
+3. **Exports** metrics (CSV) + logs (text) to S3
+4. **Stops** ECS and ElastiCache automatically
+
+---
+
+## 🏗️ Architecture
 
 ```mermaid
-graph TB
-    subgraph VPC["Existing VPC"]
-        subgraph Cache["ElastiCache"]
-            Node1["Redis / Valkey"]
-        end
-        
-        subgraph ECS["ECS Load Generators"]
-            Client1[memtier Tasks]
-        end
-        
-        Client1 -.->|load test| Node1
-    end
-    
-    subgraph AWS["AWS Services"]
-        EventBridge[EventBridge<br/>Scheduled Trigger]
-        Lambda[Lambda<br/>Shutdown + Export]
-        S3[(S3 Bucket<br/>Metrics Export)]
-    end
-    
-    EventBridge -->|after duration| Lambda
-    Lambda -->|export metrics CSV| S3
-    Lambda -->|export logs text| S3
-    Lambda -->|scale to 0| ECS
-    Lambda -->|stop| Cache
-
-    style VPC fill:#e1f5ff,stroke:#0066cc
-    style AWS fill:#fff4e6,stroke:#ff9800
+graph LR
+    ECS[ECS memtier] -->|load test| EC[ElastiCache]
+    EB[EventBridge] -->|after duration| Lambda
+    Lambda -->|export| S3[(S3)]
+    Lambda -->|stop| ECS
+    Lambda -->|stop| EC
 ```
 
 ---
 
-## 🔧 Monitoring Test Runs
+## � Exports
 
-After `terraform apply`:
-
-1. **Monitor**: CloudWatch Dashboard (`terraform output cloudwatch_dashboard_url`)
-2. **Wait**: Test runs for `test_duration_minutes` (default: 60)
-3. **Auto-export**: Metrics and logs exported to S3
-4. **Auto-stop**: ECS and ElastiCache stopped
-
-### Export Format
-
-| Data | Format | Location |
-|------|--------|----------|
-| CloudWatch Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster_id}.csv` |
-| memtier Logs | Plain text | `s3://{bucket}/exports/{timestamp}/logs/{cluster_id}.txt` |
+| Data | Format | Path |
+|------|--------|------|
+| Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster}.csv` |
+| Logs | Text | `s3://{bucket}/exports/{timestamp}/logs/{cluster}.txt` |
 
 ---
 
-## 🧹 Cleanup
+## 🔧 Configuration
 
-After tests complete, run:
+Key variables in `terraform.tfvars`:
 
-```bash
-terraform destroy
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `test_duration_minutes` | 60 | Minutes before auto-shutdown |
+| `loadgen_task_count` | 1 | ECS tasks (scale factor) |
+| `node_type` | cache.t4g.micro | ElastiCache instance |
+| `engine_type` | redis | redis or valkey |
 
+See `terraform.tfvars.example` for all options.
