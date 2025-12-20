@@ -24,7 +24,6 @@ resource "aws_lambda_function" "shutdown" {
       S3_BUCKET      = var.metrics_export_s3_bucket
       S3_PREFIX      = var.metrics_export_s3_prefix
       LOG_GROUP      = aws_cloudwatch_log_group.loadgen.name
-      AWS_REGION     = var.aws_region
     }
   }
 
