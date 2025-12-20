@@ -78,7 +78,7 @@ resource "aws_elasticache_replication_group" "main" {
   replicas_per_node_group = var.cluster_mode_enabled ? var.replicas_per_node_group : null
 
   # Parameter group
-  parameter_group_name = length(var.parameter_group_settings) > 0 ? aws_elasticache_parameter_group.main[0].name : local.parameter_group_family
+  parameter_group_name = length(var.parameter_group_settings) > 0 ? aws_elasticache_parameter_group.main[0].name : "default.${local.parameter_group_family}"
 
   # Network configuration
   subnet_group_name  = aws_elasticache_subnet_group.main.name
