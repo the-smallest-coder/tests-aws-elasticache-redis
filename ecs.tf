@@ -86,7 +86,9 @@ resource "aws_ecs_service" "loadgen" {
   network_configuration {
     subnets          = var.subnet_ids
     security_groups  = [aws_security_group.loadgen.id]
-    assign_public_ip = false
+    # Workaround only: enable when subnets have no NAT/egress for Docker Hub pulls.
+    # Not recommended for normal use; prefer private subnets with NAT or ECR.
+    assign_public_ip = var.loadgen_assign_public_ip
   }
 
   # Allow tasks to complete without being rescheduled

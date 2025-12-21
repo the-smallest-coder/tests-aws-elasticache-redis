@@ -209,6 +209,12 @@ variable "loadgen_memory" {
   }
 }
 
+variable "loadgen_assign_public_ip" {
+  description = "Assign a public IP to the load generator tasks (workaround for no NAT/egress; not recommended for normal use)"
+  type        = bool
+  default     = false
+}
+
 # memtier_benchmark Configuration
 variable "loadgen_memtier_threads" {
   description = "Number of threads per memtier task"
