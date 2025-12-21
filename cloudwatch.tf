@@ -9,9 +9,9 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
       {
         type   = "text"
         width  = 24
-        height = 1
+        height = 2
         properties = {
-          markdown = "# ElastiCache Performance Dashboard - ${var.engine_type} ${var.engine_version}\\n**Instance Type:** ${var.node_type} | **Mode:** ${var.cluster_mode_enabled ? "Cluster" : "Non-Cluster"} | **Nodes:** ${var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes}"
+          markdown = "## ElastiCache Performance Dashboard\nEngine: ${var.engine_type} ${var.engine_version} | Instance: ${var.node_type} | Mode: ${var.cluster_mode_enabled ? "Cluster" : "Non-Cluster"} | Nodes: ${var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes}"
         }
       },
 
@@ -19,9 +19,9 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
       {
         type   = "text"
         width  = 24
-        height = 1
+        height = 2
         properties = {
-          markdown = "## 🎯 Load Generator Target\\n**Endpoint:** `${local.elasticache_endpoint}:${var.port}` | **Tasks:** ${var.loadgen_task_count} | **Threads:** ${var.loadgen_memtier_threads} | **Clients:** ${var.loadgen_memtier_clients} | **Test Duration:** ${var.loadgen_memtier_test_time}s"
+          markdown = "## Load Generator Target\nEndpoint: `${local.elasticache_endpoint}:${var.port}` | Tasks: ${var.loadgen_task_count} | Threads: ${var.loadgen_memtier_threads} | Clients: ${var.loadgen_memtier_clients} | Duration: ${var.loadgen_memtier_test_time}s"
         }
       },
 
@@ -78,7 +78,7 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
         width  = 24
         height = 1
         properties = {
-          markdown = "## 📊 Network Performance (Primary Focus)"
+          markdown = "## Network Performance"
         }
       },
 
@@ -214,7 +214,7 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
         width  = 24
         height = 1
         properties = {
-          markdown = "## ⚡ Performance Metrics"
+          markdown = "## Performance Metrics"
         }
       },
 
@@ -338,7 +338,7 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
         width  = 24
         height = 1
         properties = {
-          markdown = "## 🔄 Operations & Connections"
+          markdown = "## Operations and Connections"
         }
       },
 
@@ -449,7 +449,7 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
         width  = 24
         height = 1
         properties = {
-          markdown = "## 📈 Additional Metrics"
+          markdown = "## Additional Metrics"
         }
       },
 
