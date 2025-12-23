@@ -7,6 +7,12 @@ resource "aws_ecs_cluster" "loadgen" {
     value = "enabled"
   }
 
+  configuration {
+    execute_command_configuration {
+      logging = "DEFAULT"
+    }
+  }
+
   tags = {
     Name = "${local.cluster_id}-loadgen"
   }
