@@ -48,3 +48,38 @@ resource "aws_vpc_security_group_egress_rule" "elasticache_egress" {
   ip_protocol = "-1"
   cidr_ipv4   = "0.0.0.0/0"
 }
+
+# Security group for ECS load generator tasks
+resource "aws_security_group" "loadgen" {
+  name_prefix = "${var.project_name}-${var.environment}-loadgen-"
+  description = "Security group for ECS load generator tasks"
+  vpc_id      = var.vpc_id
+
+  tags = {
+    Name = "${var.project_name}-${var.environment}-loadgen"
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Allow all outbound traffic from load generator (to reach ElastiCache)
+resource "aws_vpc_security_group_egress_rule" "loadgen_egress" {
+  security_group_id = aws_security_group.loadgen.id
+  description       = "Allow all outbound traffic"
+
+  ip_protocol = "-1"
+  cidr_ipv4   = "0.0.0.0/0"
+}
+
+# Allow ECS load generator tasks to connect to ElastiCache
+resource "aws_vpc_security_group_ingress_rule" "elasticache_from_loadgen" {
+  security_group_id            = aws_security_group.elasticache.id
+  description                  = "Allow ${var.engine_type} access from load generator tasks"
+  referenced_security_group_id = aws_security_group.loadgen.id
+
+  from_port   = var.port
+  to_port     = var.port
+  ip_protocol = "tcp"
+}

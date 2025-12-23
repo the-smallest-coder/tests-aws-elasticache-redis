@@ -71,22 +71,55 @@ output "configuration_summary" {
   }
 }
 
-output "connection_instructions" {
-  description = "Instructions for connecting to the cluster"
-  value = <<-EOT
-    
-    Connection Details:
-    -------------------
-    Endpoint: ${var.cluster_mode_enabled ? aws_elasticache_replication_group.main.configuration_endpoint_address : aws_elasticache_replication_group.main.primary_endpoint_address}
-    Port: ${var.port}
-    Engine: ${var.engine_type} ${var.engine_version}
-    Mode: ${var.cluster_mode_enabled ? "Cluster Mode Enabled" : "Non-Cluster Mode"}
-    
-    ${var.cluster_mode_enabled ? "Using redis-cli:" : "Using redis-cli:"}
-    redis-cli -h ${var.cluster_mode_enabled ? aws_elasticache_replication_group.main.configuration_endpoint_address : aws_elasticache_replication_group.main.primary_endpoint_address} -p ${var.port}${var.cluster_mode_enabled ? " -c" : ""}${var.transit_encryption_enabled ? " --tls" : ""}
-    
-    ${var.transit_encryption_enabled && var.auth_token != null ? "Note: AUTH token required for authentication" : ""}
-    
-    Security Group ID (add to ECS task SG): ${aws_security_group.elasticache.id}
-  EOT
+# Load Generator Outputs
+output "loadgen_cluster_name" {
+  description = "ECS cluster name for load generators"
+  value       = aws_ecs_cluster.loadgen.name
+}
+
+output "loadgen_service_name" {
+  description = "ECS service name for load generators"
+  value       = aws_ecs_service.loadgen.name
+}
+
+output "loadgen_log_group_name" {
+  description = "CloudWatch log group for load generator output"
+  value       = aws_cloudwatch_log_group.loadgen.name
+}
+
+output "loadgen_security_group_id" {
+  description = "Security group ID for load generator tasks"
+  value       = aws_security_group.loadgen.id
+}
+
+output "loadgen_configuration" {
+  description = "Summary of load generator configuration"
+  value = {
+    task_count  = var.loadgen_task_count
+    cpu         = var.loadgen_cpu
+    memory      = var.loadgen_memory
+    threads     = var.loadgen_memtier_threads
+    clients     = var.loadgen_memtier_clients
+    pipeline    = var.loadgen_memtier_pipeline
+    data_size   = var.loadgen_memtier_data_size
+    ratio       = var.loadgen_memtier_ratio
+    test_time   = var.loadgen_memtier_test_time
+    key_pattern = var.loadgen_memtier_key_pattern
+  }
+}
+
+# Shutdown and Export Outputs
+output "scheduled_shutdown_minutes" {
+  description = "Minutes until auto-shutdown triggers"
+  value       = var.test_duration_minutes
+}
+
+output "metrics_export_location" {
+  description = "S3 location where metrics and logs will be exported"
+  value       = "s3://${var.metrics_export_s3_bucket}/${var.metrics_export_s3_prefix}"
+}
+
+output "shutdown_lambda_name" {
+  description = "Lambda function name for shutdown orchestration"
+  value       = aws_lambda_function.shutdown.function_name
 }

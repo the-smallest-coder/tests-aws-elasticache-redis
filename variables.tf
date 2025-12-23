@@ -179,3 +179,109 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+# Load Generator Configuration
+variable "loadgen_task_count" {
+  description = "Number of ECS tasks running memtier_benchmark (scale factor)"
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.loadgen_task_count >= 1 && var.loadgen_task_count <= 100
+    error_message = "Load generator task count must be between 1 and 100."
+  }
+}
+
+variable "loadgen_cpu" {
+  description = "Fargate CPU units (256 = 0.25 vCPU, 512 = 0.5 vCPU, 1024 = 1 vCPU)"
+  type        = number
+  default     = 256
+}
+
+variable "loadgen_memory" {
+  description = "Fargate memory in MB (minimum 512)"
+  type        = number
+  default     = 512
+
+  validation {
+    condition     = var.loadgen_memory >= 512
+    error_message = "Fargate requires minimum 512 MB memory."
+  }
+}
+
+variable "loadgen_assign_public_ip" {
+  description = "Assign a public IP to the load generator tasks (workaround for no NAT/egress; not recommended for normal use)"
+  type        = bool
+  default     = false
+}
+
+# memtier_benchmark Configuration
+variable "loadgen_memtier_threads" {
+  description = "Number of threads per memtier task"
+  type        = number
+  default     = 1
+}
+
+variable "loadgen_memtier_clients" {
+  description = "Number of clients per thread"
+  type        = number
+  default     = 1
+}
+
+variable "loadgen_memtier_pipeline" {
+  description = "Pipeline depth (number of concurrent requests)"
+  type        = number
+  default     = 1
+}
+
+variable "loadgen_memtier_data_size" {
+  description = "Data size in bytes for SET operations"
+  type        = number
+  default     = 32
+}
+
+variable "loadgen_memtier_ratio" {
+  description = "SET:GET ratio (e.g., '1:10' means 1 SET for every 10 GETs)"
+  type        = string
+  default     = "1:10"
+}
+
+variable "loadgen_memtier_test_time" {
+  description = "Test duration in seconds (default: 3600 = 1 hour)"
+  type        = number
+  default     = 3600
+}
+
+variable "loadgen_memtier_key_pattern" {
+  description = "Key access pattern (R:R = random, S:S = sequential, G:G = gaussian)"
+  type        = string
+  default     = "R:R"
+}
+
+# Metrics Export Configuration
+variable "metrics_export_s3_bucket" {
+  description = "S3 bucket for exporting metrics and logs (REQUIRED)"
+  type        = string
+
+  validation {
+    condition     = length(var.metrics_export_s3_bucket) > 0
+    error_message = "metrics_export_s3_bucket is required. Create an S3 bucket before running terraform apply."
+  }
+}
+
+variable "metrics_export_s3_prefix" {
+  description = "S3 key prefix for exported data"
+  type        = string
+  default     = "exports/"
+}
+
+variable "test_duration_minutes" {
+  description = "Test duration in minutes before auto-shutdown (default: 60)"
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.test_duration_minutes >= 1 && var.test_duration_minutes <= 1440
+    error_message = "Test duration must be between 1 and 1440 minutes (24 hours)."
+  }
+}

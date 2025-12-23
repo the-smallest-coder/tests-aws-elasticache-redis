@@ -50,3 +50,20 @@ tags = {
   CostCenter = "Engineering"
   Owner      = "Performance-Team"
 }
+
+# Load Generator Configuration
+loadgen_task_count        = 1      # Number of ECS tasks (scale for more load)
+loadgen_memtier_test_time = 3600   # Test duration in seconds (1 hour)
+# loadgen_assign_public_ip = false  # Workaround for no NAT/egress; not recommended
+
+# memtier_benchmark defaults (minimal config, scale up as needed)
+# loadgen_memtier_threads   = 1
+# loadgen_memtier_clients   = 1
+# loadgen_memtier_pipeline  = 1
+# loadgen_memtier_data_size = 32
+# loadgen_memtier_ratio     = "1:10"
+
+# REQUIRED: Metrics Export Configuration
+metrics_export_s3_bucket = "my-elasticache-perf-exports"  # REQUIRED - create bucket first!
+metrics_export_s3_prefix = "exports/"                      # Optional, default: exports/
+test_duration_minutes    = 60                              # Minutes before auto-shutdown

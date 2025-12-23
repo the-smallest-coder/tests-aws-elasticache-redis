@@ -1,90 +1,135 @@
 # AWS ElastiCache Performance Testing Infrastructure
 
-This repository contains Terraform code to provision **ephemeral** AWS ElastiCache resources (Redis/Valkey) for performance testing and network throughput analysis.
+Terraform infrastructure for **automated** ElastiCache (Redis/Valkey) performance testing.
 
-The idea is simple:
-
-> `terraform apply` → run 1-hour ECS-driven load tests → export metrics/plots for the blog → `terraform destroy`.
-
-Nothing in this stack is meant to be long-lived; you spin it up when you want to run a benchmark campaign and then tear it down.
+> `terraform apply` → auto-run load tests → auto-export metrics → auto-stop → `terraform destroy`
 
 ---
 
-## 🎯 Project Goals
+## 🚀 Quick Start
 
-- **Performance Testing**  
-  Provision ElastiCache configurations (engine, topology, instance type) to test how they behave under 1-hour synthetic workloads.
+```bash
+# 1. Create S3 bucket for exports (REQUIRED)
+aws s3 mb s3://my-elasticache-perf-exports
 
-- **Network & Resource Analysis**  
-  Observe actual network throughput, CPU and memory usage and compare them with documented limits for the underlying instance types.
+# 2. Configure
+cp terraform.tfvars.example terraform.tfvars
+# Edit: vpc_id, subnet_ids, metrics_export_s3_bucket
 
-- **Decision Support**  
-  Generate graphs and summaries that can feed into blog posts about how to choose:
-  - Redis vs Valkey  
-  - single instance vs cluster  
-  - instance sizes for different workload patterns
+# 3. Deploy
+terraform init
+terraform apply
 
-- **Flexibility**  
-  Support both Redis and Valkey engines, cluster and non-cluster modes, and allow you to sweep through multiple instance types and configurations via variables.
+# 4. Cleanup (after test auto-completes)
+terraform destroy
+```
 
-- **Observability**  
-  Provision CloudWatch log groups and dashboards so you can:
-  - monitor 1-hour test runs in real time  
-  - export metrics for offline visualisation (PNG/PDF) and blog content.
+> ⚠️ **`metrics_export_s3_bucket` is required** - Terraform will error if not set.
 
 ---
 
 ## 📋 Prerequisites
 
-- **Terraform**: >= 1.0  
-- **AWS CLI**: configured with appropriate credentials  
-- **Existing VPC**: VPC + private subnets where ElastiCache will live  
-- **AWS Region**: default is `us-east-1` (cheap for testing; override if you prefer another region)
-
-> This repo only manages ElastiCache-side infrastructure and basic observability.  
-> Load generation (ECS tasks running tools like `memtier_benchmark`) lives in a separate repository.
+- Terraform >= 1.0
+- AWS CLI configured
+- Existing VPC + private subnets
+- S3 bucket for exports
 
 ---
 
-## 🏗️ Architecture Overview
+## 🎯 What It Does
+
+1. **Provisions** ElastiCache (Redis/Valkey) + ECS load generators
+2. **Runs** memtier_benchmark for configurable duration (default: 1 hour)
+3. **Exports** metrics (CSV) + logs (text) to S3
+4. **Stops** ECS and ElastiCache automatically
+
+---
+
+## 🏗️ Architecture
 
 ```mermaid
-graph TB
-    subgraph VPC["Existing VPC (your VPC)"]
-        subgraph Subnets["Subnet Group"]
-            S1[Subnet 1]
-            S2[Subnet 2]
+flowchart TB
+    subgraph VPC["VPC"]
+        subgraph Subnets["Private Subnets"]
+            subgraph ECS_Cluster["ECS Cluster (Fargate)"]
+                ECS_Tasks["memtier_benchmark<br/>Tasks"]
+            end
+            subgraph ElastiCache_Cluster["ElastiCache"]
+                Redis["Redis/Valkey<br/>Replication Group"]
+            end
         end
-        
-        subgraph Cache["ElastiCache (Redis / Valkey)"]
-            direction LR
-            Node1["Replication Group<br/>Single-node or Cluster"]
-        end
-        
-        SG["Security Group<br/>Allows VPC Access"]
-        
-        subgraph ECS["ECS Load Generators (separate repo)"]
-            Client1[memtier Task 1]
-            Client2[memtier Task 2]
-            ClientN["memtier Task N (>=5)"]
-        end
-        
-        Client1 -.->|connects to| Node1
-        Client2 -.->|connects to| Node1
-        ClientN -.->|connects to| Node1
-        SG -->|controls access| Node1
-        Subnets -->|hosts| Node1
+        SG_ECS["Security Group<br/>Load Generator"]
+        SG_EC["Security Group<br/>ElastiCache"]
     end
     
-    subgraph CloudWatch["AWS CloudWatch"]
-        Logs[Log Groups<br/>ElastiCache & Loadgen]
-        Dashboard["Dashboard<br/>Key Metrics"]
+    subgraph AWS_Services["AWS Services"]
+        EventBridge["EventBridge<br/>Scheduler"]
+        Lambda["Lambda<br/>Shutdown"]
+        CloudWatch["CloudWatch<br/>Logs & Metrics"]
+        S3["S3<br/>Exports"]
     end
     
-    Node1 -->|sends metrics| Dashboard
-    Node1 -->|sends logs| Logs
+    ECS_Tasks -->|"port 6379"| Redis
+    SG_ECS -.->|allows| ECS_Tasks
+    SG_EC -.->|allows from SG_ECS| Redis
+    ECS_Tasks -->|logs| CloudWatch
+    Redis -->|metrics| CloudWatch
+    EventBridge -->|triggers| Lambda
+    Lambda -->|reads| CloudWatch
+    Lambda -->|exports| S3
+```
 
-    style VPC fill:#e1f5ff,stroke:#0066cc,stroke-width:2px
-    style Cache fill:#fff4e6,stroke:#ff9800,stroke-width:2px
-    style CloudWatch fill:#f3e5f5,stroke:#9c27b0,stroke-width:2px
-    style ECS fill:#e8f5e9,stroke:#4caf50,stroke-width:2px,stroke-dasharray: 5 5
+---
+
+## 🔄 Workflow
+
+```mermaid
+flowchart LR
+    subgraph Start["terraform apply"]
+        S1[Create ElastiCache] --> S2[Create ECS Cluster]
+        S2 --> S3[Start memtier Tasks]
+        S3 --> S4[Schedule EventBridge]
+    end
+    
+    subgraph Run["Load Test"]
+        R1[ECS memtier] -->|load test| R2[ElastiCache]
+        R2 -->|metrics| R3[CloudWatch]
+    end
+    
+    subgraph Stop["After Duration"]
+        T1[EventBridge] -->|triggers| T2[Lambda]
+        T2 -->|export logs| T3[S3]
+        T2 -->|export metrics| T3
+        T2 -->|stop| T4[ECS Service]
+        T2 -->|stop| T5[ElastiCache]
+    end
+    
+    Start --> Run --> Stop
+```
+
+---
+
+## � Exports
+
+| Data | Format | Path |
+|------|--------|------|
+| ElastiCache Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster}.csv` |
+| ECS Task Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster}-ecs.csv` |
+| Logs | Text | `s3://{bucket}/exports/{timestamp}/logs/{cluster}.txt` |
+
+---
+
+## 🔧 Configuration
+
+Key variables in `terraform.tfvars`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `test_duration_minutes` | 60 | Minutes before auto-shutdown |
+| `loadgen_task_count` | 1 | ECS tasks (scale factor) |
+| `node_type` | cache.t4g.micro | ElastiCache instance |
+| `engine_type` | redis | redis or valkey |
+
+See `terraform.tfvars.example` for all options.
+
