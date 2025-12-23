@@ -15,70 +15,186 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
         }
       },
 
-      # Load Generator Target Info
-      {
-        type   = "text"
-        width  = 24
-        height = 2
-        properties = {
-          markdown = "## Load Generator Target\nEndpoint: `${local.elasticache_endpoint}:${var.port}` | Tasks: ${var.loadgen_task_count} | Threads: ${var.loadgen_memtier_threads} | Clients: ${var.loadgen_memtier_clients} | Duration: ${var.loadgen_memtier_test_time}s"
-        }
-      },
-
-      # Load Generator Metrics
-      {
-        type   = "metric"
-        width  = 12
-        height = 6
-        properties = {
-          metrics = [
-            ["AWS/ECS", "CPUUtilization", "ClusterName", "${local.cluster_id}-loadgen", "ServiceName", "${local.cluster_id}-loadgen", { stat = "Average" }]
-          ]
-          view    = "timeSeries"
-          stacked = false
-          region  = var.aws_region
-          title   = "Load Generator CPU Utilization"
-          period  = 60
-          yAxis = {
-            left = {
-              label = "Percent"
-              min   = 0
-              max   = 100
-            }
-          }
-        }
-      },
-
-      {
-        type   = "metric"
-        width  = 12
-        height = 6
-        properties = {
-          metrics = [
-            ["AWS/ECS", "MemoryUtilization", "ClusterName", "${local.cluster_id}-loadgen", "ServiceName", "${local.cluster_id}-loadgen", { stat = "Average" }]
-          ]
-          view    = "timeSeries"
-          stacked = false
-          region  = var.aws_region
-          title   = "Load Generator Memory Utilization"
-          period  = 60
-          yAxis = {
-            left = {
-              label = "Percent"
-              min   = 0
-              max   = 100
-            }
-          }
-        }
-      },
-
-      # Network Performance Section Header
+      # Load Generator Section Header
       {
         type   = "text"
         width  = 24
         height = 1
         properties = {
-          markdown = "## Network Performance"
+          markdown = "## Load Generator (ECS Tasks)\nEndpoint: `${local.elasticache_endpoint}:${var.port}` | Tasks: ${var.loadgen_task_count} | Threads: ${var.loadgen_memtier_threads} | Clients: ${var.loadgen_memtier_clients} | Duration: ${var.loadgen_memtier_test_time}s"
+        }
+      },
+
+      # Load Generator Service-Level CPU
+      {
+        type   = "metric"
+        width  = 8
+        height = 6
+        properties = {
+          metrics = [
+            ["AWS/ECS", "CPUUtilization", "ClusterName", "${local.cluster_id}-loadgen", "ServiceName", "${local.cluster_id}-loadgen", { stat = "Average", label = "Service Average" }]
+          ]
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          title   = "Load Gen Service CPU %"
+          period  = 60
+          yAxis = {
+            left = {
+              label = "Percent"
+              min   = 0
+              max   = 100
+            }
+          }
+        }
+      },
+
+      # Load Generator Service-Level Memory
+      {
+        type   = "metric"
+        width  = 8
+        height = 6
+        properties = {
+          metrics = [
+            ["AWS/ECS", "MemoryUtilization", "ClusterName", "${local.cluster_id}-loadgen", "ServiceName", "${local.cluster_id}-loadgen", { stat = "Average", label = "Service Average" }]
+          ]
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          title   = "Load Gen Service Memory %"
+          period  = 60
+          yAxis = {
+            left = {
+              label = "Percent"
+              min   = 0
+              max   = 100
+            }
+          }
+        }
+      },
+
+      # Running Tasks Count
+      {
+        type   = "metric"
+        width  = 8
+        height = 6
+        properties = {
+          metrics = [
+            ["ECS/ContainerInsights", "RunningTaskCount", "ClusterName", "${local.cluster_id}-loadgen", { stat = "Average" }]
+          ]
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          title   = "Running Tasks"
+          period  = 60
+          yAxis = {
+            left = {
+              label = "Count"
+              min   = 0
+            }
+          }
+        }
+      },
+
+      # Task-Level CPU Utilized (Container Insights)
+      {
+        type   = "metric"
+        width  = 12
+        height = 6
+        properties = {
+          metrics = [
+            ["ECS/ContainerInsights", "CpuUtilized", "ClusterName", "${local.cluster_id}-loadgen", { stat = "Average", label = "Avg CPU (millicores)" }],
+            ["...", { stat = "Maximum", label = "Max CPU (millicores)" }]
+          ]
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          title   = "Task-Level CPU Utilized"
+          period  = 60
+          yAxis = {
+            left = {
+              label = "Millicores"
+            }
+          }
+        }
+      },
+
+      # Task-Level Memory Utilized (Container Insights)
+      {
+        type   = "metric"
+        width  = 12
+        height = 6
+        properties = {
+          metrics = [
+            ["ECS/ContainerInsights", "MemoryUtilized", "ClusterName", "${local.cluster_id}-loadgen", { stat = "Average", label = "Avg Memory (MB)" }],
+            ["...", { stat = "Maximum", label = "Max Memory (MB)" }]
+          ]
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          title   = "Task-Level Memory Utilized"
+          period  = 60
+          yAxis = {
+            left = {
+              label = "MB"
+            }
+          }
+        }
+      },
+
+      # Task-Level Network Tx (Container Insights)
+      {
+        type   = "metric"
+        width  = 12
+        height = 6
+        properties = {
+          metrics = [
+            ["ECS/ContainerInsights", "NetworkTxBytes", "ClusterName", "${local.cluster_id}-loadgen", { stat = "Sum", id = "m1", visible = false }],
+            [{ expression = "m1/PERIOD(m1)/1024/1024", label = "Tx Rate (MB/s)", id = "e1" }]
+          ]
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          title   = "Task Network Tx Rate"
+          period  = 60
+          yAxis = {
+            left = {
+              label = "MB/s"
+            }
+          }
+        }
+      },
+
+      # Task-Level Network Rx (Container Insights)
+      {
+        type   = "metric"
+        width  = 12
+        height = 6
+        properties = {
+          metrics = [
+            ["ECS/ContainerInsights", "NetworkRxBytes", "ClusterName", "${local.cluster_id}-loadgen", { stat = "Sum", id = "m1", visible = false }],
+            [{ expression = "m1/PERIOD(m1)/1024/1024", label = "Rx Rate (MB/s)", id = "e1" }]
+          ]
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          title   = "Task Network Rx Rate"
+          period  = 60
+          yAxis = {
+            left = {
+              label = "MB/s"
+            }
+          }
+        }
+      },
+
+      # ElastiCache Network Performance Section Header
+      {
+        type   = "text"
+        width  = 24
+        height = 1
+        properties = {
+          markdown = "## ElastiCache Network Performance"
         }
       },
 
@@ -214,7 +330,7 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
         width  = 24
         height = 1
         properties = {
-          markdown = "## Performance Metrics"
+          markdown = "## ElastiCache Performance Metrics"
         }
       },
 
@@ -338,7 +454,7 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
         width  = 24
         height = 1
         properties = {
-          markdown = "## Operations and Connections"
+          markdown = "## ElastiCache Operations and Connections"
         }
       },
 
@@ -449,7 +565,7 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
         width  = 24
         height = 1
         properties = {
-          markdown = "## Additional Metrics"
+          markdown = "## ElastiCache Additional Metrics"
         }
       },
 
