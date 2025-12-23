@@ -32,6 +32,11 @@ resource "aws_lambda_function" "shutdown" {
       S3_BUCKET      = var.metrics_export_s3_bucket
       S3_PREFIX      = var.metrics_export_s3_prefix
       LOG_GROUP      = aws_cloudwatch_log_group.loadgen.name
+      CONTAINER_INSIGHTS_LOG_GROUP = aws_cloudwatch_log_group.container_insights.name
+      ELASTICACHE_LOG_GROUP        = aws_cloudwatch_log_group.elasticache.name
+      LAMBDA_SHUTDOWN_LOG_GROUP    = "/aws/lambda/${local.cluster_id}-shutdown"
+      LAMBDA_SCHEDULER_LOG_GROUP   = "/aws/lambda/${local.cluster_id}-shutdown-scheduler"
+      TEST_DURATION_MINUTES        = var.test_duration_minutes
     }
   }
 
@@ -149,7 +154,8 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
           "logs:CreateLogStream",
           "logs:PutLogEvents",
           "logs:DescribeLogStreams",
-          "logs:GetLogEvents"
+          "logs:GetLogEvents",
+          "logs:FilterLogEvents"
         ]
         Resource = "*"
       },
@@ -189,6 +195,13 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
           "elasticache:ModifyReplicationGroup"
         ]
         Resource = aws_elasticache_replication_group.main.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticache:DescribeReplicationGroups"
+        ]
+        Resource = "*"
       }
     ]
   })
