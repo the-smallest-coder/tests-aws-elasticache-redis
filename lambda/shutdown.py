@@ -36,17 +36,25 @@ def handler(event, context):
     
     results = {
         'metrics_export': None,
+        'ecs_metrics_export': None,
         'logs_export': None,
         'ecs_stopped': False,
         'elasticache_stopped': False
     }
     
     try:
-        # 1. Export CloudWatch metrics to CSV
+        # 1. Export ElastiCache CloudWatch metrics to CSV
         # Structure: {prefix}/{timestamp}/metrics/{cluster_id}.csv
         metrics_key = f"{s3_prefix}{timestamp}/metrics/{cluster_id}.csv"
         results['metrics_export'] = export_metrics_to_s3(
             elasticache_id, s3_bucket, metrics_key, aws_region
+        )
+        
+        # 1b. Export ECS task-level Container Insights metrics to CSV
+        # Structure: {prefix}/{timestamp}/metrics/{cluster_id}-ecs.csv
+        ecs_metrics_key = f"{s3_prefix}{timestamp}/metrics/{cluster_id}-ecs.csv"
+        results['ecs_metrics_export'] = export_ecs_task_metrics_to_s3(
+            ecs_cluster, s3_bucket, ecs_metrics_key
         )
         
         # 2. Export memtier logs to plain text
@@ -144,6 +152,136 @@ def export_metrics_to_s3(elasticache_id, bucket, key, region):
     print(f"Metrics exported to s3://{bucket}/{key}")
     return f"s3://{bucket}/{key}"
 
+
+def export_ecs_task_metrics_to_s3(cluster, bucket, key, region):
+    """Export ECS task-level Container Insights metrics to S3 as CSV"""
+    
+    # Time window
+    end_time = datetime.utcnow()
+    start_time = end_time - timedelta(hours=2)
+    
+    # Likely Container Insights metrics; handle missing metrics gracefully
+    metrics_to_export = [
+        'CpuUtilized',
+        'MemoryUtilized',
+        'NetworkTxBytes',
+        'NetworkRxBytes'
+    ]
+    
+    csv_buffer = io.StringIO()
+    writer = csv.writer(csv_buffer)
+    writer.writerow(['Timestamp', 'TaskId', 'MetricName', 'Value', 'Unit'])
+    
+    try:
+        # List tasks in the cluster
+        task_arns_resp = ecs.list_tasks(cluster=cluster)
+        task_arns = task_arns_resp.get('taskArns', [])
+        if not task_arns:
+            print(f"No running ECS tasks found in cluster {cluster}")
+        else:
+            # Describe tasks to get task ids
+            described = ecs.describe_tasks(cluster=cluster, tasks=task_arns)
+            for task in described.get('tasks', []):
+                task_arn = task.get('taskArn')
+                task_id = task_arn.split('/')[-1]
+
+                for metric_name in metrics_to_export:
+                    try:
+                        response = cloudwatch.get_metric_statistics(
+                            Namespace='ECS/ContainerInsights',
+                            MetricName=metric_name,
+                            Dimensions=[
+                                {'Name': 'ClusterName', 'Value': cluster},
+                                {'Name': 'TaskId', 'Value': task_id}
+                            ],
+                            StartTime=start_time,
+                            EndTime=end_time,
+                            Period=60,
+                            Statistics=['Average', 'Sum', 'Maximum']
+                        )
+                        for datapoint in response.get('Datapoints', []):
+                            ts = datapoint['Timestamp'].isoformat()
+                            value = datapoint.get('Average') or datapoint.get('Sum') or datapoint.get('Maximum', 0)
+                            unit = datapoint.get('Unit', 'None')
+                            writer.writerow([ts, task_id, metric_name, value, unit])
+                    except Exception as e:
+                        print(f"Error fetching ECS metric {metric_name} for task {task_id}: {e}")
+    except Exception as e:
+        print(f"Error listing or describing ECS tasks: {e}")
+
+    # Upload results (even if empty)
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=csv_buffer.getvalue(),
+        ContentType='text/csv'
+    )
+
+    print(f"ECS task metrics exported to s3://{bucket}/{key}")
+    return f"s3://{bucket}/{key}"
+
+def export_ecs_task_metrics_to_s3(cluster, bucket, key):
+    """Export ECS task-level Container Insights metrics to S3 as CSV"""
+    
+    end_time = datetime.utcnow()
+    start_time = end_time - timedelta(hours=2)
+    
+    metrics_to_export = [
+        'CpuUtilized',
+        'MemoryUtilized',
+        'NetworkTxBytes',
+        'NetworkRxBytes'
+    ]
+    
+    csv_buffer = io.StringIO()
+    writer = csv.writer(csv_buffer)
+    writer.writerow(['Timestamp', 'TaskId', 'MetricName', 'Value', 'Unit'])
+    
+    try:
+        task_arns_resp = ecs.list_tasks(cluster=cluster)
+        task_arns = task_arns_resp.get('taskArns', [])
+        
+        if not task_arns:
+            print(f"No running ECS tasks found in cluster {cluster}")
+        else:
+            described = ecs.describe_tasks(cluster=cluster, tasks=task_arns)
+            for task in described.get('tasks', []):
+                task_arn = task.get('taskArn')
+                task_id = task_arn.split('/')[-1]
+                
+                for metric_name in metrics_to_export:
+                    try:
+                        response = cloudwatch.get_metric_statistics(
+                            Namespace='ECS/ContainerInsights',
+                            MetricName=metric_name,
+                            Dimensions=[
+                                {'Name': 'ClusterName', 'Value': cluster},
+                                {'Name': 'TaskId', 'Value': task_id}
+                            ],
+                            StartTime=start_time,
+                            EndTime=end_time,
+                            Period=60,
+                            Statistics=['Average', 'Sum', 'Maximum']
+                        )
+                        for datapoint in response.get('Datapoints', []):
+                            ts = datapoint['Timestamp'].isoformat()
+                            value = datapoint.get('Average') or datapoint.get('Sum') or datapoint.get('Maximum', 0)
+                            unit = datapoint.get('Unit', 'None')
+                            writer.writerow([ts, task_id, metric_name, value, unit])
+                    except Exception as e:
+                        print(f"Error fetching ECS metric {metric_name} for task {task_id}: {e}")
+    except Exception as e:
+        print(f"Error listing or describing ECS tasks: {e}")
+    
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=csv_buffer.getvalue(),
+        ContentType='text/csv'
+    )
+    
+    print(f"ECS task metrics exported to s3://{bucket}/{key}")
+    return f"s3://{bucket}/{key}"
 
 def export_logs_to_s3(log_group, bucket, key):
     """Export CloudWatch Logs to S3 as plain text"""

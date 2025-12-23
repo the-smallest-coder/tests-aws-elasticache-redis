@@ -114,7 +114,8 @@ flowchart LR
 
 | Data | Format | Path |
 |------|--------|------|
-| Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster}.csv` |
+| ElastiCache Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster}.csv` |
+| ECS Task Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster}-ecs.csv` |
 | Logs | Text | `s3://{bucket}/exports/{timestamp}/logs/{cluster}.txt` |
 
 ---
