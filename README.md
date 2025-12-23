@@ -49,12 +49,63 @@ terraform destroy
 ## 🏗️ Architecture
 
 ```mermaid
-graph LR
-    ECS[ECS memtier] -->|load test| EC[ElastiCache]
-    EB[EventBridge] -->|after duration| Lambda
-    Lambda -->|export| S3[(S3)]
-    Lambda -->|stop| ECS
-    Lambda -->|stop| EC
+flowchart TB
+    subgraph VPC["VPC"]
+        subgraph Subnets["Private Subnets"]
+            subgraph ECS_Cluster["ECS Cluster (Fargate)"]
+                ECS_Tasks["memtier_benchmark<br/>Tasks"]
+            end
+            subgraph ElastiCache_Cluster["ElastiCache"]
+                Redis["Redis/Valkey<br/>Replication Group"]
+            end
+        end
+        SG_ECS["Security Group<br/>Load Generator"]
+        SG_EC["Security Group<br/>ElastiCache"]
+    end
+    
+    subgraph AWS_Services["AWS Services"]
+        EventBridge["EventBridge<br/>Scheduler"]
+        Lambda["Lambda<br/>Shutdown"]
+        CloudWatch["CloudWatch<br/>Logs & Metrics"]
+        S3["S3<br/>Exports"]
+    end
+    
+    ECS_Tasks -->|"port 6379"| Redis
+    SG_ECS -.->|allows| ECS_Tasks
+    SG_EC -.->|allows from SG_ECS| Redis
+    ECS_Tasks -->|logs| CloudWatch
+    Redis -->|metrics| CloudWatch
+    EventBridge -->|triggers| Lambda
+    Lambda -->|reads| CloudWatch
+    Lambda -->|exports| S3
+```
+
+---
+
+## 🔄 Workflow
+
+```mermaid
+flowchart LR
+    subgraph Start["terraform apply"]
+        S1[Create ElastiCache] --> S2[Create ECS Cluster]
+        S2 --> S3[Start memtier Tasks]
+        S3 --> S4[Schedule EventBridge]
+    end
+    
+    subgraph Run["Load Test"]
+        R1[ECS memtier] -->|load test| R2[ElastiCache]
+        R2 -->|metrics| R3[CloudWatch]
+    end
+    
+    subgraph Stop["After Duration"]
+        T1[EventBridge] -->|triggers| T2[Lambda]
+        T2 -->|export logs| T3[S3]
+        T2 -->|export metrics| T3
+        T2 -->|stop| T4[ECS Service]
+        T2 -->|stop| T5[ElastiCache]
+    end
+    
+    Start --> Run --> Stop
 ```
 
 ---
@@ -80,3 +131,4 @@ Key variables in `terraform.tfvars`:
 | `engine_type` | redis | redis or valkey |
 
 See `terraform.tfvars.example` for all options.
+
