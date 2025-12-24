@@ -9,7 +9,7 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
       {
         type   = "text"
         width  = 24
-        height = 3
+        height = 2
         properties = {
           markdown = "## ElastiCache Performance Dashboard\nEngine: ${var.engine_type} ${var.engine_version} | Instance: ${var.node_type}\nMode: ${var.cluster_mode_enabled ? "Cluster" : "Non-Cluster"} | Nodes: ${var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes}"
         }
@@ -19,9 +19,9 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
       {
         type   = "text"
         width  = 24
-        height = 3
+        height = 2
         properties = {
-          markdown = "## Load Generator (ECS Tasks)\nEndpoint: ${local.elasticache_endpoint}:${var.port}\nTasks: ${var.loadgen_task_count} | Threads: ${var.loadgen_memtier_threads} | Clients: ${var.loadgen_memtier_clients} | Duration: ${var.loadgen_memtier_test_time}s"
+          markdown = "## Load Generator (ECS Tasks)\nEndpoint: ${local.elasticache_endpoint}:${var.port}\nTasks: ${var.loadgen_task_count} | Threads: ${var.loadgen_memtier_threads} | Clients: ${var.loadgen_memtier_clients} | Duration: ${local.memtier_duration_label}"
         }
       },
 
