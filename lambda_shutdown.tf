@@ -61,6 +61,7 @@ resource "aws_lambda_function" "shutdown_scheduler" {
       ECS_SERVICE          = aws_ecs_service.loadgen.name
       SHUTDOWN_RULE_NAME   = aws_cloudwatch_event_rule.shutdown.name
       TEST_DURATION_MINUTES = var.test_duration_minutes
+      SHUTDOWN_RULE_PLACEHOLDER = "cron(0 0 1 1 ? 2099)"
     }
   }
 

@@ -41,6 +41,7 @@ def handler(event, context):
     service = os.environ["ECS_SERVICE"]
     rule_name = os.environ["SHUTDOWN_RULE_NAME"]
     duration_minutes = int(os.environ.get("TEST_DURATION_MINUTES", "60"))
+    placeholder_schedule = os.environ.get("SHUTDOWN_RULE_PLACEHOLDER", "cron(0 0 1 1 ? 2099)")
 
     resp = ecs.describe_services(cluster=cluster, services=[service])
     services = resp.get("services", [])
@@ -57,6 +58,9 @@ def handler(event, context):
 
     rule = events.describe_rule(Name=rule_name)
     schedule_expression = rule.get("ScheduleExpression", "")
+    if schedule_expression == placeholder_schedule:
+        schedule_expression = ""
+
     scheduled_at = _parse_cron_expression(schedule_expression)
     now = datetime.now(timezone.utc)
     if scheduled_at and scheduled_at > now + timedelta(minutes=1):
