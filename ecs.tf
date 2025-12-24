@@ -70,7 +70,7 @@ resource "aws_ecs_task_definition" "loadgen" {
           "--pipeline=${var.loadgen_memtier_pipeline}",
           "--data-size=${var.loadgen_memtier_data_size}",
           "--ratio=${var.loadgen_memtier_ratio}",
-          "--test-time=${var.loadgen_memtier_test_time}",
+          "--test-time=${local.memtier_test_time_seconds}",
           "--key-pattern=${var.loadgen_memtier_key_pattern}",
           "--hide-histogram"
         ],
@@ -129,4 +129,8 @@ locals {
     ) : (
     aws_elasticache_replication_group.main.primary_endpoint_address
   )
+
+  # Run effectively indefinitely when test time is 0.
+  memtier_test_time_seconds = var.loadgen_memtier_test_time > 0 ? var.loadgen_memtier_test_time : 2147483647
+  memtier_duration_label    = var.loadgen_memtier_test_time > 0 ? "${var.loadgen_memtier_test_time}s" : "until stopped"
 }

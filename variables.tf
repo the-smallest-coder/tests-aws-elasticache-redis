@@ -173,6 +173,18 @@ variable "enable_cloudwatch_dashboard" {
   default     = true
 }
 
+# ECS observability
+variable "ecs_container_insights_mode" {
+  description = "ECS Container Insights mode (enhanced required for task-level metrics; may increase cost)"
+  type        = string
+  default     = "enhanced"
+
+  validation {
+    condition     = contains(["enabled", "disabled", "enhanced"], var.ecs_container_insights_mode)
+    error_message = "ecs_container_insights_mode must be one of: enabled, disabled, enhanced."
+  }
+}
+
 # Tags
 variable "tags" {
   description = "Additional tags for resources"
@@ -247,9 +259,9 @@ variable "loadgen_memtier_ratio" {
 }
 
 variable "loadgen_memtier_test_time" {
-  description = "Test duration in seconds (default: 3600 = 1 hour)"
+  description = "Test duration in seconds (0 = run until ECS stops the task)"
   type        = number
-  default     = 3600
+  default     = 0
 }
 
 variable "loadgen_memtier_key_pattern" {
