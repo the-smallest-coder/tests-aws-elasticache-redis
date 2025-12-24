@@ -14,7 +14,7 @@ resource "aws_ecs_cluster" "loadgen" {
 
   setting {
     name  = "containerInsights"
-    value = "enabled"
+    value = var.ecs_container_insights_mode
   }
 
   configuration {
