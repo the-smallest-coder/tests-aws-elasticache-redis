@@ -24,32 +24,39 @@ def _time_window(duration_minutes):
 
 
 def _dimensions_to_str(dimensions):
-    return ";".join([f"{d['Name']}={d['Value']}" for d in dimensions])
+    return ";".join(
+        [f"{name}={value}" for name, value in sorted((d['Name'], d['Value']) for d in dimensions)]
+    )
 
 
-def _list_metric_names(namespace, dimensions):
-    names = set()
+def _list_metrics(namespace, filter_dimensions=None, metric_name_filter=None):
+    metrics = []
     token = None
 
     while True:
-        params = {
-            'Namespace': namespace,
-            'Dimensions': dimensions
-        }
+        params = {'Namespace': namespace}
+        if filter_dimensions:
+            params['Dimensions'] = filter_dimensions
         if token:
             params['NextToken'] = token
 
         response = cloudwatch.list_metrics(**params)
         for metric in response.get('Metrics', []):
             metric_name = metric.get('MetricName')
-            if metric_name:
-                names.add(metric_name)
+            if not metric_name:
+                continue
+            if metric_name_filter and metric_name not in metric_name_filter:
+                continue
+            metrics.append({
+                'MetricName': metric_name,
+                'Dimensions': metric.get('Dimensions', [])
+            })
 
         token = response.get('NextToken')
         if not token:
             break
 
-    return sorted(names)
+    return metrics
 
 
 def handler(event, context):
@@ -226,49 +233,58 @@ def export_metric_sources_to_s3(sources, bucket, key, start_time, end_time):
     writer = csv.writer(csv_buffer)
     writer.writerow(['Timestamp', 'Namespace', 'MetricName', 'Stat', 'Value', 'Unit', 'Dimensions'])
 
+    metric_map = {}
     for source in sources:
         namespace = source['namespace']
-        dimensions = source['dimensions']
+        filter_dimensions = source.get('dimensions') or []
+        metric_filter = set(source.get('metric_names', [])) if source.get('metric_names') else None
         try:
-            metric_names = source.get('metric_names') or _list_metric_names(namespace, dimensions)
+            metrics = _list_metrics(namespace, filter_dimensions, metric_filter)
         except Exception as e:
-            print(f"Error listing metrics for {namespace} {dimensions}: {e}")
+            print(f"Error listing metrics for {namespace} {filter_dimensions}: {e}")
             continue
+
+        for metric in metrics:
+            metric_name = metric['MetricName']
+            dimensions = metric.get('Dimensions', [])
+            dims_key = tuple(sorted((d['Name'], d['Value']) for d in dimensions))
+            metric_key = (namespace, metric_name, dims_key)
+            metric_map[metric_key] = dimensions
+
+    for (namespace, metric_name, _dims_key), dimensions in metric_map.items():
         dimensions_str = _dimensions_to_str(dimensions)
-
-        for metric_name in metric_names:
-            try:
-                response = cloudwatch.get_metric_statistics(
-                    Namespace=namespace,
-                    MetricName=metric_name,
-                    Dimensions=dimensions,
-                    StartTime=start_time,
-                    EndTime=end_time,
-                    Period=60,
-                    Statistics=STATISTICS
-                )
-            except Exception as e:
-                print(f"Error fetching metric {namespace}/{metric_name} for {dimensions_str}: {e}")
-                continue
-
-            datapoints = sorted(
-                response.get('Datapoints', []),
-                key=lambda d: d['Timestamp']
+        try:
+            response = cloudwatch.get_metric_statistics(
+                Namespace=namespace,
+                MetricName=metric_name,
+                Dimensions=dimensions,
+                StartTime=start_time,
+                EndTime=end_time,
+                Period=60,
+                Statistics=STATISTICS
             )
-            for datapoint in datapoints:
-                ts = datapoint['Timestamp'].isoformat()
-                unit = datapoint.get('Unit', 'None')
-                for stat in STATISTICS:
-                    if stat in datapoint:
-                        writer.writerow([
-                            ts,
-                            namespace,
-                            metric_name,
-                            stat,
-                            datapoint[stat],
-                            unit,
-                            dimensions_str
-                        ])
+        except Exception as e:
+            print(f"Error fetching metric {namespace}/{metric_name} for {dimensions_str}: {e}")
+            continue
+
+        datapoints = sorted(
+            response.get('Datapoints', []),
+            key=lambda d: d['Timestamp']
+        )
+        for datapoint in datapoints:
+            ts = datapoint['Timestamp'].isoformat()
+            unit = datapoint.get('Unit', 'None')
+            for stat in STATISTICS:
+                if stat in datapoint:
+                    writer.writerow([
+                        ts,
+                        namespace,
+                        metric_name,
+                        stat,
+                        datapoint[stat],
+                        unit,
+                        dimensions_str
+                    ])
 
     s3.put_object(
         Bucket=bucket,
