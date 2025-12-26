@@ -33,15 +33,11 @@ resource "aws_ecs_cluster" "loadgen" {
 
 # CloudWatch Log Group for load generator (date-stamped)
 resource "aws_cloudwatch_log_group" "loadgen" {
-  name              = "/aws/ecs/${local.cluster_id}/loadgen-${formatdate("YYYYMMDD", timestamp())}"
+  name              = "/aws/ecs/${local.cluster_id}/loadgen"
   retention_in_days = var.cloudwatch_log_retention_days
 
   tags = {
     Name = "${local.cluster_id}-loadgen-logs"
-  }
-
-  lifecycle {
-    ignore_changes = [name]
   }
 }
 
