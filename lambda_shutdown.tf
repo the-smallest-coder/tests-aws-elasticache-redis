@@ -34,8 +34,8 @@ resource "aws_lambda_function" "shutdown" {
       LOG_GROUP      = aws_cloudwatch_log_group.loadgen.name
       CONTAINER_INSIGHTS_LOG_GROUP = aws_cloudwatch_log_group.container_insights.name
       ELASTICACHE_LOG_GROUP        = aws_cloudwatch_log_group.elasticache.name
-      LAMBDA_SHUTDOWN_LOG_GROUP    = "/aws/lambda/${local.cluster_id}-shutdown"
-      LAMBDA_SCHEDULER_LOG_GROUP   = "/aws/lambda/${local.cluster_id}-shutdown-scheduler"
+      LAMBDA_SHUTDOWN_LOG_GROUP    = aws_cloudwatch_log_group.lambda_shutdown.name
+      LAMBDA_SCHEDULER_LOG_GROUP   = aws_cloudwatch_log_group.lambda_shutdown_scheduler.name
       TEST_DURATION_MINUTES        = var.test_duration_minutes
     }
   }
@@ -72,28 +72,20 @@ resource "aws_lambda_function" "shutdown_scheduler" {
 
 # Unique Lambda log group with date
 resource "aws_cloudwatch_log_group" "lambda_shutdown" {
-  name              = "/aws/lambda/${local.cluster_id}-shutdown-${formatdate("YYYYMMDD", timestamp())}"
+  name              = "/aws/lambda/${local.cluster_id}-shutdown"
   retention_in_days = var.cloudwatch_log_retention_days
 
   tags = {
     Name = "${local.cluster_id}-lambda-shutdown-logs"
   }
-
-  lifecycle {
-    ignore_changes = [name]
-  }
 }
 
 resource "aws_cloudwatch_log_group" "lambda_shutdown_scheduler" {
-  name              = "/aws/lambda/${local.cluster_id}-shutdown-scheduler-${formatdate("YYYYMMDD", timestamp())}"
+  name              = "/aws/lambda/${local.cluster_id}-shutdown-scheduler"
   retention_in_days = var.cloudwatch_log_retention_days
 
   tags = {
     Name = "${local.cluster_id}-lambda-shutdown-scheduler-logs"
-  }
-
-  lifecycle {
-    ignore_changes = [name]
   }
 }
 
