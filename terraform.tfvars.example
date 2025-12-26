@@ -3,7 +3,6 @@ aws_region = "us-east-1"
 
 # Project configuration
 project_name = "elasticache-perf-test"
-environment  = "test"
 
 # REQUIRED: Your existing VPC and subnets
 vpc_id     = "vpc-xxxxxxxxx"           # Replace with your VPC ID
