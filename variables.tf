@@ -10,11 +10,6 @@ variable "project_name" {
   default     = "elasticache-perf-test"
 }
 
-variable "environment" {
-  description = "Environment name (e.g., test, dev, prod)"
-  type        = string
-  default     = "test"
-}
 
 # VPC and Networking
 variable "vpc_id" {
