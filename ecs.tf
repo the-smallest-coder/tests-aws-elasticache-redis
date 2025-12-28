@@ -114,7 +114,11 @@ resource "aws_ecs_service" "loadgen" {
     Name = "${local.cluster_id}-loadgen"
   }
 
-  depends_on = [aws_elasticache_replication_group.main]
+  depends_on = [
+    aws_elasticache_replication_group.main,
+    aws_cloudwatch_event_target.shutdown_scheduler,
+    aws_lambda_permission.eventbridge_shutdown_scheduler
+  ]
 }
 
 

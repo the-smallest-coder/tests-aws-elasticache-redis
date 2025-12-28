@@ -13,6 +13,12 @@ data "archive_file" "shutdown_scheduler_lambda" {
 
 data "aws_caller_identity" "current" {}
 
+locals {
+  loadgen_cluster_name = "${local.cluster_id}-loadgen"
+  loadgen_service_name = "${local.cluster_id}-loadgen"
+  loadgen_service_arn  = "arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:service/${local.loadgen_cluster_name}/${local.loadgen_service_name}"
+}
+
 resource "aws_lambda_function" "shutdown" {
   filename         = data.archive_file.shutdown_lambda.output_path
   function_name    = "${local.cluster_id}-shutdown"
@@ -26,8 +32,8 @@ resource "aws_lambda_function" "shutdown" {
   environment {
     variables = {
       CLUSTER_ID     = local.cluster_id
-      ECS_CLUSTER    = aws_ecs_cluster.loadgen.name
-      ECS_SERVICE    = aws_ecs_service.loadgen.name
+      ECS_CLUSTER    = local.loadgen_cluster_name
+      ECS_SERVICE    = local.loadgen_service_name
       ELASTICACHE_ID = aws_elasticache_replication_group.main.id
       S3_BUCKET      = var.metrics_export_s3_bucket
       S3_PREFIX      = var.metrics_export_s3_prefix
@@ -57,8 +63,8 @@ resource "aws_lambda_function" "shutdown_scheduler" {
 
   environment {
     variables = {
-      ECS_CLUSTER          = aws_ecs_cluster.loadgen.name
-      ECS_SERVICE          = aws_ecs_service.loadgen.name
+      ECS_CLUSTER          = local.loadgen_cluster_name
+      ECS_SERVICE          = local.loadgen_service_name
       SHUTDOWN_RULE_NAME   = aws_cloudwatch_event_rule.shutdown.name
       TEST_DURATION_MINUTES = var.test_duration_minutes
       SHUTDOWN_RULE_PLACEHOLDER = "cron(0 0 1 1 ? 2099)"
@@ -241,17 +247,19 @@ resource "aws_iam_role_policy" "lambda_shutdown_scheduler_policy" {
   })
 }
 
-# EventBridge rule to invoke scheduler when ECS service is ready
+# EventBridge rule to invoke scheduler when ECS tasks are running
 resource "aws_cloudwatch_event_rule" "shutdown_scheduler" {
   name        = "${local.cluster_id}-shutdown-scheduler"
-  description = "Schedule shutdown when the ECS service reaches steady state"
+  description = "Schedule shutdown when ECS tasks enter RUNNING state"
 
   event_pattern = jsonencode({
     source = ["aws.ecs"],
-    "detail-type" = ["ECS Service Action"],
+    "detail-type" = ["ECS Task State Change"],
     detail = {
-      eventName  = ["SERVICE_STEADY_STATE"],
-      serviceArn = [aws_ecs_service.loadgen.id]
+      clusterArn    = [aws_ecs_cluster.loadgen.arn],
+      group         = ["service:${local.loadgen_service_name}"],
+      lastStatus    = ["RUNNING"],
+      desiredStatus = ["RUNNING"]
     }
   })
 }
