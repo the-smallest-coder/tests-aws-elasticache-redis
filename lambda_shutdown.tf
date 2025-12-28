@@ -191,7 +191,7 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
       {
         Effect = "Allow"
         Action = [
-          "elasticache:ModifyReplicationGroup"
+          "elasticache:DeleteReplicationGroup"
         ]
         Resource = aws_elasticache_replication_group.main.arn
       },

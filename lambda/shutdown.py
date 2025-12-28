@@ -153,14 +153,19 @@ def handler(event, context):
         print(f"ECS service {ecs_service} scaled to 0")
 
         try:
-            elasticache.modify_replication_group(
-                ReplicationGroupId=elasticache_id,
-                ApplyImmediately=True
-            )
+            delete_params = {
+                "ReplicationGroupId": elasticache_id,
+                "RetainPrimaryCluster": False
+            }
+            final_snapshot_id = os.environ.get("ELASTICACHE_FINAL_SNAPSHOT_ID")
+            if final_snapshot_id:
+                delete_params["FinalSnapshotIdentifier"] = final_snapshot_id
+
+            elasticache.delete_replication_group(**delete_params)
             results['elasticache_stopped'] = True
-            print(f"ElastiCache {elasticache_id} modification initiated")
+            print(f"ElastiCache {elasticache_id} delete initiated")
         except Exception as e:
-            print(f"ElastiCache stop note: {e}")
+            print(f"ElastiCache delete note: {e}")
             results['elasticache_stopped'] = str(e)
 
     except Exception as e:
