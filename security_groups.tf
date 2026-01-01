@@ -3,12 +3,12 @@ data "aws_vpc" "selected" {
 }
 
 resource "aws_security_group" "elasticache" {
-  name_prefix = "${var.project_name}-${var.environment}-"
+  name_prefix = "${local.cluster_id}-"
   description = "Security group for ElastiCache ${var.engine_type} cluster"
   vpc_id      = var.vpc_id
 
   tags = {
-    Name = "${var.project_name}-${var.environment}-elasticache"
+    Name = "${local.cluster_id}-elasticache"
   }
 
   lifecycle {
@@ -51,12 +51,12 @@ resource "aws_vpc_security_group_egress_rule" "elasticache_egress" {
 
 # Security group for ECS load generator tasks
 resource "aws_security_group" "loadgen" {
-  name_prefix = "${var.project_name}-${var.environment}-loadgen-"
+  name_prefix = "${local.cluster_id}-loadgen-"
   description = "Security group for ECS load generator tasks"
   vpc_id      = var.vpc_id
 
   tags = {
-    Name = "${var.project_name}-${var.environment}-loadgen"
+    Name = "${local.cluster_id}-loadgen"
   }
 
   lifecycle {

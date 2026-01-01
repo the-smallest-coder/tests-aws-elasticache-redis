@@ -110,7 +110,7 @@ flowchart LR
 
 ---
 
-## � Exports
+## 📦 Exports
 
 | Data | Format | Path |
 |------|--------|------|

@@ -3,7 +3,6 @@ aws_region = "us-east-1"
 
 # Project configuration
 project_name = "elasticache-perf-test"
-environment  = "test"
 
 # REQUIRED: Your existing VPC and subnets
 vpc_id     = "vpc-xxxxxxxxx"           # Replace with your VPC ID
@@ -44,6 +43,7 @@ transit_encryption_enabled = false
 # CloudWatch
 cloudwatch_log_retention_days = 7
 enable_cloudwatch_dashboard   = true
+ecs_container_insights_mode  = "enhanced"  # Required for task-level metrics (extra cost)
 
 # Additional tags (optional)
 tags = {
@@ -53,7 +53,7 @@ tags = {
 
 # Load Generator Configuration
 loadgen_task_count        = 1      # Number of ECS tasks (scale for more load)
-loadgen_memtier_test_time = 3600   # Test duration in seconds (1 hour)
+loadgen_memtier_test_time = 0      # 0 = run until ECS stops the task
 # loadgen_assign_public_ip = false  # Workaround for no NAT/egress; not recommended
 
 # memtier_benchmark defaults (minimal config, scale up as needed)

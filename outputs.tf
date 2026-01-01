@@ -71,6 +71,11 @@ output "configuration_summary" {
   }
 }
 
+output "run_timestamp" {
+  description = "Run timestamp used for naming"
+  value       = local.run_id_full
+}
+
 # Load Generator Outputs
 output "loadgen_cluster_name" {
   description = "ECS cluster name for load generators"

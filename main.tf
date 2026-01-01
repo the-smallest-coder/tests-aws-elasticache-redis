@@ -1,11 +1,17 @@
+resource "time_static" "run_id" {}
+
 locals {
   # Auto-determine parameter group family if not specified
   parameter_group_family = var.parameter_group_family != "" ? var.parameter_group_family : (
     var.engine_type == "redis" ? "redis${split(".", var.engine_version)[0]}" : "valkey${split(".", var.engine_version)[0]}"
   )
 
-  # Cluster identifier
-  cluster_id = "${var.project_name}-${var.environment}-${var.engine_type}"
+  # Run suffix (last 8 digits) keeps IDs within ElastiCache length limits.
+  run_id_full   = formatdate("YYYYMMDDhhmmss", time_static.run_id.rfc3339)
+  run_id_suffix = substr(local.run_id_full, length(local.run_id_full) - 8, 8)
+
+  # Cluster identifier (run-scoped)
+  cluster_id = "${var.project_name}-${var.engine_type}-${local.run_id_suffix}"
 
   # Common tags
   common_tags = {

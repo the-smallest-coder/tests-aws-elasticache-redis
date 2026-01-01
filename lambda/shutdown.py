@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import os
+import re
 from datetime import datetime, timedelta
 
 # Initialize clients
@@ -12,59 +13,130 @@ cloudwatch = boto3.client('cloudwatch')
 logs = boto3.client('logs')
 s3 = boto3.client('s3')
 
+STATISTICS = ['Average', 'Sum', 'Maximum', 'Minimum']
+EXPORT_BUFFER_MINUTES = 5
+
+
+def _time_window(duration_minutes):
+    end_time = datetime.utcnow()
+    lookback_minutes = max(duration_minutes, 1) + EXPORT_BUFFER_MINUTES
+    start_time = end_time - timedelta(minutes=lookback_minutes)
+    return start_time, end_time
+
+
+def _dimensions_to_str(dimensions):
+    return ";".join(
+        [f"{name}={value}" for name, value in sorted((d['Name'], d['Value']) for d in dimensions)]
+    )
+
+
+def _list_metrics(namespace, filter_dimensions=None, metric_name_filter=None):
+    metrics = []
+    token = None
+
+    while True:
+        params = {'Namespace': namespace}
+        if filter_dimensions:
+            params['Dimensions'] = filter_dimensions
+        if token:
+            params['NextToken'] = token
+
+        response = cloudwatch.list_metrics(**params)
+        for metric in response.get('Metrics', []):
+            metric_name = metric.get('MetricName')
+            if not metric_name:
+                continue
+            if metric_name_filter and metric_name not in metric_name_filter:
+                continue
+            metrics.append({
+                'MetricName': metric_name,
+                'Dimensions': metric.get('Dimensions', [])
+            })
+
+        token = response.get('NextToken')
+        if not token:
+            break
+
+    return metrics
+
 
 def handler(event, context):
     """
     Lambda handler for shutdown orchestration:
     1. Export CloudWatch metrics to S3 (CSV)
-    2. Export memtier logs to S3 (plain text)
+    2. Export CloudWatch Logs to S3 (text)
     3. Scale ECS service to 0
     4. Stop ElastiCache replication group
     """
-    
-    # Get configuration from environment
+
     cluster_id = os.environ['CLUSTER_ID']
     ecs_cluster = os.environ['ECS_CLUSTER']
     ecs_service = os.environ['ECS_SERVICE']
     elasticache_id = os.environ['ELASTICACHE_ID']
     s3_bucket = os.environ['S3_BUCKET']
     s3_prefix = os.environ.get('S3_PREFIX', 'exports/')
-    log_group = os.environ['LOG_GROUP']
-    aws_region = os.environ['AWS_REGION']
-    
-    timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
-    
+    loadgen_log_group = os.environ.get('LOADGEN_LOG_GROUP') or os.environ.get('LOG_GROUP')
+    container_insights_log_group = os.environ.get('CONTAINER_INSIGHTS_LOG_GROUP')
+    elasticache_log_group = os.environ.get('ELASTICACHE_LOG_GROUP')
+    lambda_shutdown_log_group = os.environ.get('LAMBDA_SHUTDOWN_LOG_GROUP')
+    lambda_scheduler_log_group = os.environ.get('LAMBDA_SCHEDULER_LOG_GROUP')
+    test_duration_minutes = int(os.environ.get('TEST_DURATION_MINUTES', '60'))
+
+    start_time, end_time = _time_window(test_duration_minutes)
+    timestamp = end_time.strftime('%Y%m%d-%H%M%S')
+
     results = {
         'metrics_export': None,
         'ecs_metrics_export': None,
-        'logs_export': None,
+        'log_exports': {},
         'ecs_stopped': False,
         'elasticache_stopped': False
     }
-    
+
     try:
-        # 1. Export ElastiCache CloudWatch metrics to CSV
-        # Structure: {prefix}/{timestamp}/metrics/{cluster_id}.csv
         metrics_key = f"{s3_prefix}{timestamp}/metrics/{cluster_id}.csv"
-        results['metrics_export'] = export_metrics_to_s3(
-            elasticache_id, s3_bucket, metrics_key, aws_region
+        results['metrics_export'] = export_elasticache_metrics_to_s3(
+            elasticache_id, s3_bucket, metrics_key, start_time, end_time
         )
-        
-        # 1b. Export ECS task-level Container Insights metrics to CSV
-        # Structure: {prefix}/{timestamp}/metrics/{cluster_id}-ecs.csv
+
         ecs_metrics_key = f"{s3_prefix}{timestamp}/metrics/{cluster_id}-ecs.csv"
-        results['ecs_metrics_export'] = export_ecs_task_metrics_to_s3(
-            ecs_cluster, s3_bucket, ecs_metrics_key
+        results['ecs_metrics_export'] = export_ecs_metrics_to_s3(
+            ecs_cluster, ecs_service, s3_bucket, ecs_metrics_key, start_time, end_time
         )
-        
-        # 2. Export memtier logs to plain text
-        # Structure: {prefix}/{timestamp}/logs/{cluster_id}.txt
-        logs_key = f"{s3_prefix}{timestamp}/logs/{cluster_id}.txt"
-        results['logs_export'] = export_logs_to_s3(
-            log_group, s3_bucket, logs_key
+
+        log_exports = results['log_exports']
+        log_exports['loadgen'] = export_logs_to_s3(
+            loadgen_log_group,
+            s3_bucket,
+            f"{s3_prefix}{timestamp}/logs/{cluster_id}.txt",
+            start_time,
+            end_time
         )
-        
-        # 3. Scale ECS service to 0
+
+        log_exports['container_insights'] = export_logs_to_s3(
+            container_insights_log_group,
+            s3_bucket,
+            f"{s3_prefix}{timestamp}/logs/container-insights/{cluster_id}.txt",
+            start_time,
+            end_time
+        )
+
+        log_exports['elasticache'] = export_logs_to_s3(
+            elasticache_log_group,
+            s3_bucket,
+            f"{s3_prefix}{timestamp}/logs/elasticache/{cluster_id}.txt",
+            start_time,
+            end_time
+        )
+
+        log_exports['lambda_shutdown_scheduler'] = export_logs_to_s3(
+            lambda_scheduler_log_group,
+            s3_bucket,
+            f"{s3_prefix}{timestamp}/logs/lambda-shutdown-scheduler/{cluster_id}.txt",
+            start_time,
+            end_time
+        )
+
         ecs.update_service(
             cluster=ecs_cluster,
             service=ecs_service,
@@ -72,262 +144,275 @@ def handler(event, context):
         )
         results['ecs_stopped'] = True
         print(f"ECS service {ecs_service} scaled to 0")
-        
-        # 4. Stop ElastiCache replication group
+
         try:
-            elasticache.modify_replication_group(
-                ReplicationGroupId=elasticache_id,
-                ApplyImmediately=True
-            )
-            # Note: ElastiCache doesn't have a "stop" - we just leave it
-            # User will terraform destroy to fully remove
+            delete_params = {
+                "ReplicationGroupId": elasticache_id,
+                "RetainPrimaryCluster": False
+            }
+            final_snapshot_id = os.environ.get("ELASTICACHE_FINAL_SNAPSHOT_ID")
+            if final_snapshot_id:
+                delete_params["FinalSnapshotIdentifier"] = final_snapshot_id
+
+            elasticache.delete_replication_group(**delete_params)
             results['elasticache_stopped'] = True
-            print(f"ElastiCache {elasticache_id} modification initiated")
+            print(f"ElastiCache {elasticache_id} delete initiated")
         except Exception as e:
-            print(f"ElastiCache stop note: {e}")
+            print(f"ElastiCache delete note: {e}")
             results['elasticache_stopped'] = str(e)
-        
+
+        # Send email notification if configured
+        try:
+            notification_result = send_notification(
+                results=results,
+                cluster_id=cluster_id,
+                elasticache_id=elasticache_id,
+                s3_bucket=s3_bucket,
+                s3_prefix=s3_prefix,
+                timestamp=timestamp
+            )
+            results['notification_sent'] = notification_result
+        except Exception as e:
+            print(f"Notification failed (non-fatal): {e}")
+            results['notification_sent'] = False
+
     except Exception as e:
         print(f"Error during shutdown: {e}")
         raise
-    
+
     return {
         'statusCode': 200,
         'body': json.dumps(results)
     }
 
 
-def export_metrics_to_s3(elasticache_id, bucket, key, region):
-    """Export ElastiCache CloudWatch metrics to S3 as CSV"""
+def send_notification(results, cluster_id, elasticache_id, s3_bucket, s3_prefix, timestamp):
+    """Send email notification via SES when shutdown completes."""
     
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(hours=2)  # Get last 2 hours of metrics
+    email = os.environ.get('NOTIFICATION_EMAIL', '')
+    ses_arn = os.environ.get('SES_IDENTITY_ARN', '')
     
-    metrics_to_export = [
-        'CPUUtilization',
-        'NetworkBytesIn',
-        'NetworkBytesOut',
-        'CurrConnections',
-        'CacheHits',
-        'CacheMisses',
-        'GetTypeCmds',
-        'SetTypeCmds',
-        'DatabaseMemoryUsagePercentage',
-        'Evictions'
+    if not email or not ses_arn:
+        print("Email notification disabled (NOTIFICATION_EMAIL or SES_IDENTITY_ARN not set)")
+        return None
+    
+    # Parse SES ARN: arn:aws:ses:{region}:{account}:identity/{domain}
+    arn_match = re.match(r'arn:aws:ses:([^:]+):[^:]+:identity/(.+)', ses_arn)
+    if not arn_match:
+        print(f"Invalid SES ARN format: {ses_arn}")
+        return False
+    
+    ses_region = arn_match.group(1)
+    domain = arn_match.group(2)
+    source_email = f"aws-elasticache-lab@{domain}"
+    
+    # Create SES client in the correct region
+    ses = boto3.client('ses', region_name=ses_region)
+    
+    # Build email content
+    ecs_status = "✓ Stopped (0 running tasks)" if results.get('ecs_stopped') else "✗ Failed to stop"
+    elasticache_status = "✓ Deleted" if results.get('elasticache_stopped') == True else f"✗ {results.get('elasticache_stopped', 'Unknown')}"
+    
+    metrics_path = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/metrics/"
+    logs_path = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/logs/"
+    
+    email_body = f"""ElastiCache Performance Test Complete
+
+Cluster: {cluster_id}
+
+=== Resource Status ===
+ECS Service: {ecs_status}
+ElastiCache ({elasticache_id}): {elasticache_status}
+
+=== Exports ===
+Metrics: {metrics_path}
+Logs: {logs_path}
+
+No billable resources remain from this test.
+"""
+    
+    response = ses.send_email(
+        Source=source_email,
+        Destination={'ToAddresses': [email]},
+        Message={
+            'Subject': {'Data': f'[ElastiCache Test Complete] {cluster_id}'},
+            'Body': {'Text': {'Data': email_body}}
+        }
+    )
+    
+    print(f"Notification sent to {email}, MessageId: {response['MessageId']}")
+    return True
+
+
+def export_elasticache_metrics_to_s3(replication_group_id, bucket, key, start_time, end_time):
+    """Export ElastiCache CloudWatch metrics to S3 as CSV."""
+
+    sources = [
+        {
+            'namespace': 'AWS/ElastiCache',
+            'dimensions': [{'Name': 'ReplicationGroupId', 'Value': replication_group_id}]
+        }
     ]
-    
-    # CSV buffer
+
+    try:
+        response = elasticache.describe_replication_groups(
+            ReplicationGroupId=replication_group_id
+        )
+        for group in response.get('ReplicationGroups', []):
+            for cluster_id in group.get('MemberClusters', []):
+                sources.append({
+                    'namespace': 'AWS/ElastiCache',
+                    'dimensions': [{'Name': 'CacheClusterId', 'Value': cluster_id}]
+                })
+    except Exception as e:
+        print(f"Error describing replication group {replication_group_id}: {e}")
+
+    return export_metric_sources_to_s3(sources, bucket, key, start_time, end_time)
+
+
+def export_ecs_metrics_to_s3(cluster, service, bucket, key, start_time, end_time):
+    """Export ECS and Container Insights metrics to S3 as CSV."""
+
+    sources = [
+        {
+            'namespace': 'AWS/ECS',
+            'dimensions': [
+                {'Name': 'ClusterName', 'Value': cluster},
+                {'Name': 'ServiceName', 'Value': service}
+            ]
+        },
+        {
+            'namespace': 'ECS/ContainerInsights',
+            'dimensions': [
+                {'Name': 'ClusterName', 'Value': cluster}
+            ]
+        },
+        {
+            'namespace': 'ECS/ContainerInsights',
+            'dimensions': [
+                {'Name': 'ClusterName', 'Value': cluster},
+                {'Name': 'ServiceName', 'Value': service}
+            ]
+        }
+    ]
+
+    return export_metric_sources_to_s3(sources, bucket, key, start_time, end_time)
+
+
+def export_metric_sources_to_s3(sources, bucket, key, start_time, end_time):
     csv_buffer = io.StringIO()
     writer = csv.writer(csv_buffer)
-    writer.writerow(['Timestamp', 'MetricName', 'Value', 'Unit'])
-    
-    for metric_name in metrics_to_export:
+    writer.writerow(['Timestamp', 'Namespace', 'MetricName', 'Stat', 'Value', 'Unit', 'Dimensions'])
+
+    metric_map = {}
+    for source in sources:
+        namespace = source['namespace']
+        filter_dimensions = source.get('dimensions') or []
+        metric_filter = set(source.get('metric_names', [])) if source.get('metric_names') else None
+        try:
+            metrics = _list_metrics(namespace, filter_dimensions, metric_filter)
+        except Exception as e:
+            print(f"Error listing metrics for {namespace} {filter_dimensions}: {e}")
+            continue
+
+        for metric in metrics:
+            metric_name = metric['MetricName']
+            dimensions = metric.get('Dimensions', [])
+            dims_key = tuple(sorted((d['Name'], d['Value']) for d in dimensions))
+            metric_key = (namespace, metric_name, dims_key)
+            metric_map[metric_key] = dimensions
+
+    for (namespace, metric_name, _dims_key), dimensions in metric_map.items():
+        dimensions_str = _dimensions_to_str(dimensions)
         try:
             response = cloudwatch.get_metric_statistics(
-                Namespace='AWS/ElastiCache',
+                Namespace=namespace,
                 MetricName=metric_name,
+                Dimensions=dimensions,
                 StartTime=start_time,
                 EndTime=end_time,
                 Period=60,
-                Statistics=['Average', 'Sum', 'Maximum']
+                Statistics=STATISTICS
             )
-            
-            for datapoint in response.get('Datapoints', []):
-                ts = datapoint['Timestamp'].isoformat()
-                value = datapoint.get('Average') or datapoint.get('Sum') or datapoint.get('Maximum', 0)
-                unit = datapoint.get('Unit', 'None')
-                writer.writerow([ts, metric_name, value, unit])
-                
         except Exception as e:
-            print(f"Error fetching metric {metric_name}: {e}")
-    
-    # Upload to S3
+            print(f"Error fetching metric {namespace}/{metric_name} for {dimensions_str}: {e}")
+            continue
+
+        datapoints = sorted(
+            response.get('Datapoints', []),
+            key=lambda d: d['Timestamp']
+        )
+        for datapoint in datapoints:
+            ts = datapoint['Timestamp'].isoformat()
+            unit = datapoint.get('Unit', 'None')
+            for stat in STATISTICS:
+                if stat in datapoint:
+                    writer.writerow([
+                        ts,
+                        namespace,
+                        metric_name,
+                        stat,
+                        datapoint[stat],
+                        unit,
+                        dimensions_str
+                    ])
+
     s3.put_object(
         Bucket=bucket,
         Key=key,
         Body=csv_buffer.getvalue(),
         ContentType='text/csv'
     )
-    
+
     print(f"Metrics exported to s3://{bucket}/{key}")
     return f"s3://{bucket}/{key}"
 
 
-def export_ecs_task_metrics_to_s3(cluster, bucket, key, region):
-    """Export ECS task-level Container Insights metrics to S3 as CSV"""
-    
-    # Time window
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(hours=2)
-    
-    # Likely Container Insights metrics; handle missing metrics gracefully
-    metrics_to_export = [
-        'CpuUtilized',
-        'MemoryUtilized',
-        'NetworkTxBytes',
-        'NetworkRxBytes'
-    ]
-    
-    csv_buffer = io.StringIO()
-    writer = csv.writer(csv_buffer)
-    writer.writerow(['Timestamp', 'TaskId', 'MetricName', 'Value', 'Unit'])
-    
-    try:
-        # List tasks in the cluster
-        task_arns_resp = ecs.list_tasks(cluster=cluster)
-        task_arns = task_arns_resp.get('taskArns', [])
-        if not task_arns:
-            print(f"No running ECS tasks found in cluster {cluster}")
-        else:
-            # Describe tasks to get task ids
-            described = ecs.describe_tasks(cluster=cluster, tasks=task_arns)
-            for task in described.get('tasks', []):
-                task_arn = task.get('taskArn')
-                task_id = task_arn.split('/')[-1]
+def export_logs_to_s3(log_group, bucket, key, start_time, end_time):
+    """Export CloudWatch Logs to S3 as plain text."""
 
-                for metric_name in metrics_to_export:
-                    try:
-                        response = cloudwatch.get_metric_statistics(
-                            Namespace='ECS/ContainerInsights',
-                            MetricName=metric_name,
-                            Dimensions=[
-                                {'Name': 'ClusterName', 'Value': cluster},
-                                {'Name': 'TaskId', 'Value': task_id}
-                            ],
-                            StartTime=start_time,
-                            EndTime=end_time,
-                            Period=60,
-                            Statistics=['Average', 'Sum', 'Maximum']
-                        )
-                        for datapoint in response.get('Datapoints', []):
-                            ts = datapoint['Timestamp'].isoformat()
-                            value = datapoint.get('Average') or datapoint.get('Sum') or datapoint.get('Maximum', 0)
-                            unit = datapoint.get('Unit', 'None')
-                            writer.writerow([ts, task_id, metric_name, value, unit])
-                    except Exception as e:
-                        print(f"Error fetching ECS metric {metric_name} for task {task_id}: {e}")
-    except Exception as e:
-        print(f"Error listing or describing ECS tasks: {e}")
+    if not log_group:
+        return None
 
-    # Upload results (even if empty)
-    s3.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=csv_buffer.getvalue(),
-        ContentType='text/csv'
-    )
+    start_time_ms = int(start_time.timestamp() * 1000)
+    end_time_ms = int(end_time.timestamp() * 1000)
 
-    print(f"ECS task metrics exported to s3://{bucket}/{key}")
-    return f"s3://{bucket}/{key}"
-
-def export_ecs_task_metrics_to_s3(cluster, bucket, key):
-    """Export ECS task-level Container Insights metrics to S3 as CSV"""
-    
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(hours=2)
-    
-    metrics_to_export = [
-        'CpuUtilized',
-        'MemoryUtilized',
-        'NetworkTxBytes',
-        'NetworkRxBytes'
-    ]
-    
-    csv_buffer = io.StringIO()
-    writer = csv.writer(csv_buffer)
-    writer.writerow(['Timestamp', 'TaskId', 'MetricName', 'Value', 'Unit'])
-    
-    try:
-        task_arns_resp = ecs.list_tasks(cluster=cluster)
-        task_arns = task_arns_resp.get('taskArns', [])
-        
-        if not task_arns:
-            print(f"No running ECS tasks found in cluster {cluster}")
-        else:
-            described = ecs.describe_tasks(cluster=cluster, tasks=task_arns)
-            for task in described.get('tasks', []):
-                task_arn = task.get('taskArn')
-                task_id = task_arn.split('/')[-1]
-                
-                for metric_name in metrics_to_export:
-                    try:
-                        response = cloudwatch.get_metric_statistics(
-                            Namespace='ECS/ContainerInsights',
-                            MetricName=metric_name,
-                            Dimensions=[
-                                {'Name': 'ClusterName', 'Value': cluster},
-                                {'Name': 'TaskId', 'Value': task_id}
-                            ],
-                            StartTime=start_time,
-                            EndTime=end_time,
-                            Period=60,
-                            Statistics=['Average', 'Sum', 'Maximum']
-                        )
-                        for datapoint in response.get('Datapoints', []):
-                            ts = datapoint['Timestamp'].isoformat()
-                            value = datapoint.get('Average') or datapoint.get('Sum') or datapoint.get('Maximum', 0)
-                            unit = datapoint.get('Unit', 'None')
-                            writer.writerow([ts, task_id, metric_name, value, unit])
-                    except Exception as e:
-                        print(f"Error fetching ECS metric {metric_name} for task {task_id}: {e}")
-    except Exception as e:
-        print(f"Error listing or describing ECS tasks: {e}")
-    
-    s3.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=csv_buffer.getvalue(),
-        ContentType='text/csv'
-    )
-    
-    print(f"ECS task metrics exported to s3://{bucket}/{key}")
-    return f"s3://{bucket}/{key}"
-
-def export_logs_to_s3(log_group, bucket, key):
-    """Export CloudWatch Logs to S3 as plain text"""
-    
-    end_time = int(datetime.utcnow().timestamp() * 1000)
-    start_time = end_time - (2 * 60 * 60 * 1000)  # Last 2 hours
-    
     logs_buffer = io.StringIO()
-    
+    logs_buffer.write(f"LogGroup: {log_group}\n")
+
+    next_token = None
     try:
-        # Get log streams
-        streams_response = logs.describe_log_streams(
-            logGroupName=log_group,
-            orderBy='LastEventTime',
-            descending=True,
-            limit=50
-        )
-        
-        for stream in streams_response.get('logStreams', []):
-            stream_name = stream['logStreamName']
-            logs_buffer.write(f"\n=== Stream: {stream_name} ===\n")
-            
-            # Get log events
-            events_response = logs.get_log_events(
-                logGroupName=log_group,
-                logStreamName=stream_name,
-                startTime=start_time,
-                endTime=end_time
-            )
-            
-            for event in events_response.get('events', []):
+        while True:
+            params = {
+                'logGroupName': log_group,
+                'startTime': start_time_ms,
+                'endTime': end_time_ms,
+                'interleaved': True
+            }
+            if next_token:
+                params['nextToken'] = next_token
+
+            response = logs.filter_log_events(**params)
+            for event in response.get('events', []):
                 ts = datetime.fromtimestamp(event['timestamp'] / 1000).isoformat()
-                message = event['message']
-                logs_buffer.write(f"[{ts}] {message}\n")
-                
+                stream = event.get('logStreamName', '')
+                message = event.get('message', '').rstrip('\n')
+                logs_buffer.write(f"[{ts}] [{stream}] {message}\n")
+
+            token = response.get('nextToken')
+            if not token or token == next_token:
+                break
+            next_token = token
     except Exception as e:
-        print(f"Error fetching logs: {e}")
-        logs_buffer.write(f"Error fetching logs: {e}\n")
-    
-    # Upload to S3
+        print(f"Error fetching logs from {log_group}: {e}")
+        logs_buffer.write(f"Error fetching logs from {log_group}: {e}\n")
+
     s3.put_object(
         Bucket=bucket,
         Key=key,
         Body=logs_buffer.getvalue(),
         ContentType='text/plain'
     )
-    
+
     print(f"Logs exported to s3://{bucket}/{key}")
     return f"s3://{bucket}/{key}"
