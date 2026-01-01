@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import os
+import re
 from datetime import datetime, timedelta
 
 # Initialize clients
@@ -128,14 +129,6 @@ def handler(event, context):
             end_time
         )
 
-        log_exports['lambda_shutdown'] = export_logs_to_s3(
-            lambda_shutdown_log_group,
-            s3_bucket,
-            f"{s3_prefix}{timestamp}/logs/lambda-shutdown/{cluster_id}.txt",
-            start_time,
-            end_time
-        )
-
         log_exports['lambda_shutdown_scheduler'] = export_logs_to_s3(
             lambda_scheduler_log_group,
             s3_bucket,
@@ -168,6 +161,21 @@ def handler(event, context):
             print(f"ElastiCache delete note: {e}")
             results['elasticache_stopped'] = str(e)
 
+        # Send email notification if configured
+        try:
+            notification_result = send_notification(
+                results=results,
+                cluster_id=cluster_id,
+                elasticache_id=elasticache_id,
+                s3_bucket=s3_bucket,
+                s3_prefix=s3_prefix,
+                timestamp=timestamp
+            )
+            results['notification_sent'] = notification_result
+        except Exception as e:
+            print(f"Notification failed (non-fatal): {e}")
+            results['notification_sent'] = False
+
     except Exception as e:
         print(f"Error during shutdown: {e}")
         raise
@@ -176,6 +184,64 @@ def handler(event, context):
         'statusCode': 200,
         'body': json.dumps(results)
     }
+
+
+def send_notification(results, cluster_id, elasticache_id, s3_bucket, s3_prefix, timestamp):
+    """Send email notification via SES when shutdown completes."""
+    
+    email = os.environ.get('NOTIFICATION_EMAIL', '')
+    ses_arn = os.environ.get('SES_IDENTITY_ARN', '')
+    
+    if not email or not ses_arn:
+        print("Email notification disabled (NOTIFICATION_EMAIL or SES_IDENTITY_ARN not set)")
+        return None
+    
+    # Parse SES ARN: arn:aws:ses:{region}:{account}:identity/{domain}
+    arn_match = re.match(r'arn:aws:ses:([^:]+):[^:]+:identity/(.+)', ses_arn)
+    if not arn_match:
+        print(f"Invalid SES ARN format: {ses_arn}")
+        return False
+    
+    ses_region = arn_match.group(1)
+    domain = arn_match.group(2)
+    source_email = f"aws-elasticache-lab@{domain}"
+    
+    # Create SES client in the correct region
+    ses = boto3.client('ses', region_name=ses_region)
+    
+    # Build email content
+    ecs_status = "✓ Stopped (0 running tasks)" if results.get('ecs_stopped') else "✗ Failed to stop"
+    elasticache_status = "✓ Deleted" if results.get('elasticache_stopped') == True else f"✗ {results.get('elasticache_stopped', 'Unknown')}"
+    
+    metrics_path = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/metrics/"
+    logs_path = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/logs/"
+    
+    email_body = f"""ElastiCache Performance Test Complete
+
+Cluster: {cluster_id}
+
+=== Resource Status ===
+ECS Service: {ecs_status}
+ElastiCache ({elasticache_id}): {elasticache_status}
+
+=== Exports ===
+Metrics: {metrics_path}
+Logs: {logs_path}
+
+No billable resources remain from this test.
+"""
+    
+    response = ses.send_email(
+        Source=source_email,
+        Destination={'ToAddresses': [email]},
+        Message={
+            'Subject': {'Data': f'[ElastiCache Test Complete] {cluster_id}'},
+            'Body': {'Text': {'Data': email_body}}
+        }
+    )
+    
+    print(f"Notification sent to {email}, MessageId: {response['MessageId']}")
+    return True
 
 
 def export_elasticache_metrics_to_s3(replication_group_id, bucket, key, start_time, end_time):

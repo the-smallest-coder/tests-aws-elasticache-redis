@@ -47,7 +47,7 @@ provider "registry.terraform.io/hashicorp/aws" {
 
 provider "registry.terraform.io/hashicorp/time" {
   version     = "0.13.1"
-  constraints = "~> 0.10"
+  constraints = "~> 0.13"
   hashes = [
     "h1:+W+DMrVoVnoXo3f3M4W+OpZbkCrUn6PnqDF33D2Cuf0=",
     "zh:02cb9aab1002f0f2a94a4f85acec8893297dc75915f7404c165983f720a54b74",
