@@ -43,6 +43,8 @@ resource "aws_lambda_function" "shutdown" {
       LAMBDA_SHUTDOWN_LOG_GROUP    = aws_cloudwatch_log_group.lambda_shutdown.name
       LAMBDA_SCHEDULER_LOG_GROUP   = aws_cloudwatch_log_group.lambda_shutdown_scheduler.name
       TEST_DURATION_MINUTES        = var.test_duration_minutes
+      NOTIFICATION_EMAIL           = var.notification_email
+      SES_IDENTITY_ARN             = var.notification_ses_identity_arn
     }
   }
 
@@ -201,6 +203,11 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
           "elasticache:DescribeReplicationGroups"
         ]
         Resource = "*"
+      },
+      {
+        Effect   = var.notification_ses_identity_arn != "" ? "Allow" : "Deny"
+        Action   = ["ses:SendEmail"]
+        Resource = var.notification_ses_identity_arn != "" ? var.notification_ses_identity_arn : "*"
       }
     ]
   })
