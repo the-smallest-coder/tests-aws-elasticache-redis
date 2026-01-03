@@ -292,3 +292,21 @@ variable "test_duration_minutes" {
     error_message = "Test duration must be between 1 and 1440 minutes (24 hours)."
   }
 }
+
+# Email Notification Configuration
+variable "notification_email" {
+  description = "Email address for shutdown completion notifications (optional; leave empty to disable)"
+  type        = string
+  default     = ""
+}
+
+variable "notification_ses_identity_arn" {
+  description = "SES verified domain identity ARN for sending notifications (required when notification_email is set)"
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = (var.notification_email == "" && var.notification_ses_identity_arn == "") || (var.notification_email != "" && var.notification_ses_identity_arn != "")
+    error_message = "Both notification_email and notification_ses_identity_arn must be set together, or both left empty."
+  }
+}
