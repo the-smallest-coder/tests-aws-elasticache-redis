@@ -351,11 +351,17 @@ resource "aws_iam_role_policy" "lambda_shutdown_verify_policy" {
       {
         Effect = "Allow"
         Action = [
-          "logs:CreateLogGroup",
+          "logs:CreateLogGroup"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
           "logs:CreateLogStream",
           "logs:PutLogEvents"
         ]
-        Resource = "*"
+        Resource = "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/${local.cluster_id}-shutdown-verify*:log-stream:*"
       },
       {
         Effect = "Allow"
