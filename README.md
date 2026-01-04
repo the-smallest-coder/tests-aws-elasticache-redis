@@ -133,3 +133,50 @@ Key variables in `terraform.tfvars`:
 
 See `terraform.tfvars.example` for all options.
 
+---
+
+## 📧 Email Notification (Optional)
+
+Receive email notifications when tests start, complete, or if resources fail to shut down.
+
+### Prerequisites
+
+1. **Verify an email address or domain in SES**:
+   ```bash
+   # Option 1: Verify a single email address (simplest)
+   aws ses verify-email-identity --email-address aws@example.com
+   
+   # Option 2: Verify entire domain (requires DNS records)
+   aws ses verify-domain-identity --domain example.com
+   ```
+
+2. **Get the SES Identity ARN**:
+   ```bash
+   # List verified identities
+   aws sesv2 list-email-identities
+   
+   # Get ARN for specific identity
+   aws sesv2 get-email-identity --email-identity aws@example.com
+   
+   # ARN format: arn:aws:ses:{region}:{account}:identity/{email-or-domain}
+   ```
+
+3. **SES Sandbox Mode**: New AWS accounts have SES in sandbox mode—only verified addresses can receive email. [Request production access](https://docs.aws.amazon.com/ses/latest/dg/request-production-access.html) to send to any address.
+
+### Configuration
+
+Add to `terraform.tfvars`:
+
+```hcl
+notification_email            = "your-email@example.com"
+notification_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/aws@example.com"
+```
+
+**Both variables must be set together.** Leave both empty to disable notifications.
+
+### Notifications Sent
+
+- **Test Started**: When ECS tasks begin running
+- **Test Complete**: After shutdown and export operations finish
+- **Verification Warning**: If resources are still running 15 minutes after scheduled shutdown
+- **Verification OK**: If all resources successfully shut down

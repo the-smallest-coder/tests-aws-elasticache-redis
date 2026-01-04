@@ -11,6 +11,12 @@ data "archive_file" "shutdown_scheduler_lambda" {
   output_path = "${path.module}/lambda/schedule_shutdown.zip"
 }
 
+data "archive_file" "shutdown_verify_lambda" {
+  type        = "zip"
+  source_file = "${path.module}/lambda/verify_shutdown.py"
+  output_path = "${path.module}/lambda/verify_shutdown.zip"
+}
+
 data "aws_caller_identity" "current" {}
 
 locals {
@@ -25,7 +31,7 @@ resource "aws_lambda_function" "shutdown" {
   role             = aws_iam_role.lambda_shutdown_role.arn
   handler          = "shutdown.handler"
   source_code_hash = data.archive_file.shutdown_lambda.output_base64sha256
-  runtime          = "python3.11"
+  runtime          = "python3.13"
   timeout          = 300
   memory_size      = 256
 
@@ -43,6 +49,8 @@ resource "aws_lambda_function" "shutdown" {
       LAMBDA_SHUTDOWN_LOG_GROUP    = aws_cloudwatch_log_group.lambda_shutdown.name
       LAMBDA_SCHEDULER_LOG_GROUP   = aws_cloudwatch_log_group.lambda_shutdown_scheduler.name
       TEST_DURATION_MINUTES        = var.test_duration_minutes
+      NOTIFICATION_EMAIL           = var.notification_email
+      SES_IDENTITY_ARN             = var.notification_ses_identity_arn
     }
   }
 
@@ -57,22 +65,53 @@ resource "aws_lambda_function" "shutdown_scheduler" {
   role             = aws_iam_role.lambda_shutdown_scheduler_role.arn
   handler          = "schedule_shutdown.handler"
   source_code_hash = data.archive_file.shutdown_scheduler_lambda.output_base64sha256
-  runtime          = "python3.11"
+  runtime          = "python3.13"
   timeout          = 60
   memory_size      = 128
 
   environment {
     variables = {
+      CLUSTER_ID           = local.cluster_id
       ECS_CLUSTER          = local.loadgen_cluster_name
       ECS_SERVICE          = local.loadgen_service_name
       SHUTDOWN_RULE_NAME   = aws_cloudwatch_event_rule.shutdown.name
+      VERIFY_RULE_NAME     = aws_cloudwatch_event_rule.shutdown_verify.name
       TEST_DURATION_MINUTES = var.test_duration_minutes
+      VERIFY_DELAY_MINUTES  = tostring(var.test_duration_minutes + 15)
       SHUTDOWN_RULE_PLACEHOLDER = "cron(0 0 1 1 ? 2099)"
+      NOTIFICATION_EMAIL    = var.notification_email
+      SES_IDENTITY_ARN      = var.notification_ses_identity_arn
     }
   }
 
   tags = {
     Name = "${local.cluster_id}-shutdown-scheduler"
+  }
+}
+
+resource "aws_lambda_function" "shutdown_verify" {
+  filename         = data.archive_file.shutdown_verify_lambda.output_path
+  function_name    = "${local.cluster_id}-shutdown-verify"
+  role             = aws_iam_role.lambda_shutdown_verify_role.arn
+  handler          = "verify_shutdown.handler"
+  source_code_hash = data.archive_file.shutdown_verify_lambda.output_base64sha256
+  runtime          = "python3.13"
+  timeout          = 60
+  memory_size      = 128
+
+  environment {
+    variables = {
+      CLUSTER_ID         = local.cluster_id
+      ECS_CLUSTER        = local.loadgen_cluster_name
+      ECS_SERVICE        = local.loadgen_service_name
+      ELASTICACHE_ID     = aws_elasticache_replication_group.main.id
+      NOTIFICATION_EMAIL = var.notification_email
+      SES_IDENTITY_ARN   = var.notification_ses_identity_arn
+    }
+  }
+
+  tags = {
+    Name = "${local.cluster_id}-shutdown-verify"
   }
 }
 
@@ -92,6 +131,15 @@ resource "aws_cloudwatch_log_group" "lambda_shutdown_scheduler" {
 
   tags = {
     Name = "${local.cluster_id}-lambda-shutdown-scheduler-logs"
+  }
+}
+
+resource "aws_cloudwatch_log_group" "lambda_shutdown_verify" {
+  name              = "/aws/lambda/${local.cluster_id}-shutdown-verify"
+  retention_in_days = var.cloudwatch_log_retention_days
+
+  tags = {
+    Name = "${local.cluster_id}-lambda-shutdown-verify-logs"
   }
 }
 
@@ -138,6 +186,27 @@ resource "aws_iam_role" "lambda_shutdown_scheduler_role" {
   }
 }
 
+resource "aws_iam_role" "lambda_shutdown_verify_role" {
+  name = "${local.cluster_id}-shutdown-verify"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${local.cluster_id}-shutdown-verify"
+  }
+}
+
 # Lambda permissions policy
 resource "aws_iam_role_policy" "lambda_shutdown_policy" {
   name = "${local.cluster_id}-lambda-shutdown-policy"
@@ -169,9 +238,21 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
       {
         Effect = "Allow"
         Action = [
-          "s3:PutObject"
+          "s3:PutObject",
+          "s3:CreateMultipartUpload",
+          "s3:UploadPart",
+          "s3:CompleteMultipartUpload",
+          "s3:AbortMultipartUpload",
+          "s3:ListMultipartUploadParts"
         ]
         Resource = "arn:aws:s3:::${var.metrics_export_s3_bucket}/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucketMultipartUploads"
+        ]
+        Resource = "arn:aws:s3:::${var.metrics_export_s3_bucket}"
       },
       {
         Effect = "Allow"
@@ -201,6 +282,11 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
           "elasticache:DescribeReplicationGroups"
         ]
         Resource = "*"
+      },
+      {
+        Effect   = var.notification_ses_identity_arn != "" ? "Allow" : "Deny"
+        Action   = ["ses:SendEmail"]
+        Resource = var.notification_ses_identity_arn != "" ? var.notification_ses_identity_arn : "*"
       }
     ]
   })
@@ -241,25 +327,76 @@ resource "aws_iam_role_policy" "lambda_shutdown_scheduler_policy" {
           "events:DescribeRule",
           "events:PutRule"
         ]
-        Resource = "arn:aws:events:${var.aws_region}:${data.aws_caller_identity.current.account_id}:rule/${aws_cloudwatch_event_rule.shutdown.name}"
+        Resource = [
+          "arn:aws:events:${var.aws_region}:${data.aws_caller_identity.current.account_id}:rule/${aws_cloudwatch_event_rule.shutdown.name}",
+          "arn:aws:events:${var.aws_region}:${data.aws_caller_identity.current.account_id}:rule/${aws_cloudwatch_event_rule.shutdown_verify.name}"
+        ]
+      },
+      {
+        Effect   = var.notification_ses_identity_arn != "" ? "Allow" : "Deny"
+        Action   = ["ses:SendEmail"]
+        Resource = var.notification_ses_identity_arn != "" ? var.notification_ses_identity_arn : "*"
       }
     ]
   })
 }
 
-# EventBridge rule to invoke scheduler when ECS tasks are running
+resource "aws_iam_role_policy" "lambda_shutdown_verify_policy" {
+  name = "${local.cluster_id}-shutdown-verify-policy"
+  role = aws_iam_role.lambda_shutdown_verify_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/${local.cluster_id}-shutdown-verify*:log-stream:*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecs:DescribeServices"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticache:DescribeReplicationGroups"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect   = var.notification_ses_identity_arn != "" ? "Allow" : "Deny"
+        Action   = ["ses:SendEmail"]
+        Resource = var.notification_ses_identity_arn != "" ? var.notification_ses_identity_arn : "*"
+      }
+    ]
+  })
+}
+
+# EventBridge rule to invoke scheduler when ECS deployment completes (service-level)
 resource "aws_cloudwatch_event_rule" "shutdown_scheduler" {
   name        = "${local.cluster_id}-shutdown-scheduler"
-  description = "Schedule shutdown when ECS tasks enter RUNNING state"
+  description = "Schedule shutdown when ECS deployment reaches COMPLETED state"
 
   event_pattern = jsonencode({
     source = ["aws.ecs"],
-    "detail-type" = ["ECS Task State Change"],
+    "detail-type" = ["ECS Deployment State Change"],
+    resources = [local.loadgen_service_arn],
     detail = {
-      clusterArn    = [aws_ecs_cluster.loadgen.arn],
-      group         = ["service:${local.loadgen_service_name}"],
-      lastStatus    = ["RUNNING"],
-      desiredStatus = ["RUNNING"]
+      eventName  = ["SERVICE_DEPLOYMENT_COMPLETED"]
     }
   })
 }
@@ -293,10 +430,30 @@ resource "aws_cloudwatch_event_rule" "shutdown" {
   }
 }
 
+resource "aws_cloudwatch_event_rule" "shutdown_verify" {
+  name                = "${local.cluster_id}-shutdown-verify"
+  description         = "Verify shutdown status after the test window"
+  schedule_expression = "cron(0 0 1 1 ? 2099)"
+
+  tags = {
+    Name = "${local.cluster_id}-shutdown-verify"
+  }
+
+  lifecycle {
+    ignore_changes = [schedule_expression]
+  }
+}
+
 resource "aws_cloudwatch_event_target" "shutdown" {
   rule      = aws_cloudwatch_event_rule.shutdown.name
   target_id = "shutdown-lambda"
   arn       = aws_lambda_function.shutdown.arn
+}
+
+resource "aws_cloudwatch_event_target" "shutdown_verify" {
+  rule      = aws_cloudwatch_event_rule.shutdown_verify.name
+  target_id = "shutdown-verify-lambda"
+  arn       = aws_lambda_function.shutdown_verify.arn
 }
 
 resource "aws_lambda_permission" "eventbridge" {
@@ -305,4 +462,12 @@ resource "aws_lambda_permission" "eventbridge" {
   function_name = aws_lambda_function.shutdown.function_name
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.shutdown.arn
+}
+
+resource "aws_lambda_permission" "eventbridge_shutdown_verify" {
+  statement_id  = "AllowEventBridgeInvokeShutdownVerify"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.shutdown_verify.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.shutdown_verify.arn
 }

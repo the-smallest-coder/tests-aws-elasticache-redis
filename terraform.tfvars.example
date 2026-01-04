@@ -67,3 +67,7 @@ loadgen_memtier_test_time = 0      # 0 = run until ECS stops the task
 metrics_export_s3_bucket = "my-elasticache-perf-exports"  # REQUIRED - create bucket first!
 metrics_export_s3_prefix = "exports/"                      # Optional, default: exports/
 test_duration_minutes    = 60                              # Minutes before auto-shutdown
+
+# Email Notification (optional)
+# notification_email           = "your-email@example.com"                              # Recipient email
+# notification_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/example.com"  # SES verified domain ARN

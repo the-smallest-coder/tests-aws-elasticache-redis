@@ -32,7 +32,9 @@ resource "aws_cloudwatch_dashboard" "elasticache" {
         height = 6
         properties = {
           metrics = [
-            ["AWS/ECS", "CPUUtilization", "ClusterName", "${local.cluster_id}-loadgen", "ServiceName", "${local.cluster_id}-loadgen", { stat = "Average", label = "Service Average" }]
+            ["AWS/ECS", "CPUUtilization", "ClusterName", "${local.cluster_id}-loadgen", "ServiceName", "${local.cluster_id}-loadgen", { stat = "Average", label = "Service Average" }],
+            ["...", { stat = "Minimum", label = "Service Minimum" }],
+            ["...", { stat = "Maximum", label = "Service Maximum" }]
           ]
           view    = "timeSeries"
           stacked = false
