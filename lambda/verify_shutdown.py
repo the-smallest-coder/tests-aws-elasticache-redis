@@ -19,8 +19,14 @@ def _ses_config():
         return None
 
     ses_region = arn_match.group(1)
-    domain = arn_match.group(2)
-    source_email = f"aws@{domain}"
+    identity = arn_match.group(2)
+    
+    # If identity is an email address, use it as-is; otherwise it's a domain
+    if "@" in identity:
+        source_email = identity
+    else:
+        source_email = f"aws-elasticache-lab@{identity}"
+    
     return {
         "client": boto3.client("ses", region_name=ses_region),
         "source": source_email,
