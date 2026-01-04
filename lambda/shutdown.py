@@ -15,6 +15,7 @@ s3 = boto3.client('s3')
 
 STATISTICS = ['Average', 'Sum', 'Maximum', 'Minimum']
 EXPORT_BUFFER_MINUTES = 5
+LOG_EXPORT_PART_SIZE = 6 * 1024 * 1024
 
 
 def _time_window(duration_minutes):
@@ -63,10 +64,10 @@ def _list_metrics(namespace, filter_dimensions=None, metric_name_filter=None):
 def handler(event, context):
     """
     Lambda handler for shutdown orchestration:
-    1. Export CloudWatch metrics to S3 (CSV)
-    2. Export CloudWatch Logs to S3 (text)
-    3. Scale ECS service to 0
-    4. Stop ElastiCache replication group
+    1. Scale ECS service to 0
+    2. Delete ElastiCache replication group
+    3. Export CloudWatch metrics to S3 (CSV)
+    4. Export CloudWatch Logs to S3 (text)
     """
 
     cluster_id = os.environ['CLUSTER_ID']
@@ -94,6 +95,34 @@ def handler(event, context):
     }
 
     try:
+        try:
+            ecs.update_service(
+                cluster=ecs_cluster,
+                service=ecs_service,
+                desiredCount=0
+            )
+            results['ecs_stopped'] = True
+            print(f"ECS service {ecs_service} scaled to 0")
+        except Exception as e:
+            print(f"ECS stop note: {e}")
+            results['ecs_stopped'] = str(e)
+
+        try:
+            delete_params = {
+                "ReplicationGroupId": elasticache_id,
+                "RetainPrimaryCluster": False
+            }
+            final_snapshot_id = os.environ.get("ELASTICACHE_FINAL_SNAPSHOT_ID")
+            if final_snapshot_id:
+                delete_params["FinalSnapshotIdentifier"] = final_snapshot_id
+
+            elasticache.delete_replication_group(**delete_params)
+            results['elasticache_stopped'] = True
+            print(f"ElastiCache {elasticache_id} delete initiated")
+        except Exception as e:
+            print(f"ElastiCache delete note: {e}")
+            results['elasticache_stopped'] = str(e)
+
         metrics_key = f"{s3_prefix}{timestamp}/metrics/{cluster_id}.csv"
         results['metrics_export'] = export_elasticache_metrics_to_s3(
             elasticache_id, s3_bucket, metrics_key, start_time, end_time
@@ -137,30 +166,6 @@ def handler(event, context):
             end_time
         )
 
-        ecs.update_service(
-            cluster=ecs_cluster,
-            service=ecs_service,
-            desiredCount=0
-        )
-        results['ecs_stopped'] = True
-        print(f"ECS service {ecs_service} scaled to 0")
-
-        try:
-            delete_params = {
-                "ReplicationGroupId": elasticache_id,
-                "RetainPrimaryCluster": False
-            }
-            final_snapshot_id = os.environ.get("ELASTICACHE_FINAL_SNAPSHOT_ID")
-            if final_snapshot_id:
-                delete_params["FinalSnapshotIdentifier"] = final_snapshot_id
-
-            elasticache.delete_replication_group(**delete_params)
-            results['elasticache_stopped'] = True
-            print(f"ElastiCache {elasticache_id} delete initiated")
-        except Exception as e:
-            print(f"ElastiCache delete note: {e}")
-            results['elasticache_stopped'] = str(e)
-
         # Send email notification if configured
         try:
             notification_result = send_notification(
@@ -196,22 +201,35 @@ def send_notification(results, cluster_id, elasticache_id, s3_bucket, s3_prefix,
         print("Email notification disabled (NOTIFICATION_EMAIL or SES_IDENTITY_ARN not set)")
         return None
     
-    # Parse SES ARN: arn:aws:ses:{region}:{account}:identity/{domain}
+    # Parse SES ARN: arn:aws:ses:{region}:{account}:identity/{domain-or-email}
     arn_match = re.match(r'arn:aws:ses:([^:]+):[^:]+:identity/(.+)', ses_arn)
     if not arn_match:
         print(f"Invalid SES ARN format: {ses_arn}")
         return False
     
     ses_region = arn_match.group(1)
-    domain = arn_match.group(2)
-    source_email = f"aws-elasticache-lab@{domain}"
+    identity = arn_match.group(2)
+    
+    # If identity is an email address, use it as-is; otherwise it's a domain
+    if "@" in identity:
+        source_email = identity
+    else:
+        source_email = f"aws-elasticache-lab@{identity}"
     
     # Create SES client in the correct region
     ses = boto3.client('ses', region_name=ses_region)
     
     # Build email content
-    ecs_status = "✓ Stopped (0 running tasks)" if results.get('ecs_stopped') else "✗ Failed to stop"
-    elasticache_status = "✓ Deleted" if results.get('elasticache_stopped') == True else f"✗ {results.get('elasticache_stopped', 'Unknown')}"
+    ecs_status = (
+        "OK - Stopped (0 running tasks)"
+        if results.get('ecs_stopped') is True
+        else f"FAILED - {results.get('ecs_stopped', 'Unknown')}"
+    )
+    elasticache_status = (
+        "OK - Deleted"
+        if results.get('elasticache_stopped') is True
+        else f"FAILED - {results.get('elasticache_stopped', 'Unknown')}"
+    )
     
     metrics_path = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/metrics/"
     logs_path = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/logs/"
@@ -228,7 +246,7 @@ ElastiCache ({elasticache_id}): {elasticache_status}
 Metrics: {metrics_path}
 Logs: {logs_path}
 
-No billable resources remain from this test.
+Review status above for any remaining resources.
 """
     
     response = ses.send_email(
@@ -369,7 +387,7 @@ def export_metric_sources_to_s3(sources, bucket, key, start_time, end_time):
 
 
 def export_logs_to_s3(log_group, bucket, key, start_time, end_time):
-    """Export CloudWatch Logs to S3 as plain text."""
+    """Export CloudWatch Logs to S3 as plain text (streamed)."""
 
     if not log_group:
         return None
@@ -377,8 +395,44 @@ def export_logs_to_s3(log_group, bucket, key, start_time, end_time):
     start_time_ms = int(start_time.timestamp() * 1000)
     end_time_ms = int(end_time.timestamp() * 1000)
 
-    logs_buffer = io.StringIO()
-    logs_buffer.write(f"LogGroup: {log_group}\n")
+    buffer = bytearray()
+    upload_id = None
+    parts = []
+    part_number = 1
+
+    def _start_multipart():
+        nonlocal upload_id
+        if upload_id is None:
+            resp = s3.create_multipart_upload(
+                Bucket=bucket,
+                Key=key,
+                ContentType='text/plain'
+            )
+            upload_id = resp['UploadId']
+
+    def _upload_part(data):
+        nonlocal part_number
+        _start_multipart()
+        resp = s3.upload_part(
+            Bucket=bucket,
+            Key=key,
+            UploadId=upload_id,
+            PartNumber=part_number,
+            Body=data
+        )
+        parts.append({"ETag": resp["ETag"], "PartNumber": part_number})
+        part_number += 1
+
+    def _flush(force=False):
+        nonlocal buffer
+        if not buffer:
+            return
+        if len(buffer) < LOG_EXPORT_PART_SIZE and not force:
+            return
+        _upload_part(bytes(buffer))
+        buffer = bytearray()
+
+    buffer.extend(f"LogGroup: {log_group}\n".encode("utf-8", "replace"))
 
     next_token = None
     try:
@@ -397,7 +451,10 @@ def export_logs_to_s3(log_group, bucket, key, start_time, end_time):
                 ts = datetime.fromtimestamp(event['timestamp'] / 1000).isoformat()
                 stream = event.get('logStreamName', '')
                 message = event.get('message', '').rstrip('\n')
-                logs_buffer.write(f"[{ts}] [{stream}] {message}\n")
+                line = f"[{ts}] [{stream}] {message}\n"
+                buffer.extend(line.encode("utf-8", "replace"))
+                if len(buffer) >= LOG_EXPORT_PART_SIZE:
+                    _flush()
 
             token = response.get('nextToken')
             if not token or token == next_token:
@@ -405,14 +462,27 @@ def export_logs_to_s3(log_group, bucket, key, start_time, end_time):
             next_token = token
     except Exception as e:
         print(f"Error fetching logs from {log_group}: {e}")
-        logs_buffer.write(f"Error fetching logs from {log_group}: {e}\n")
+        buffer.extend(f"Error fetching logs from {log_group}: {e}\n".encode("utf-8", "replace"))
 
-    s3.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=logs_buffer.getvalue(),
-        ContentType='text/plain'
-    )
+    if upload_id:
+        try:
+            _flush(force=True)
+            s3.complete_multipart_upload(
+                Bucket=bucket,
+                Key=key,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": parts}
+            )
+        except Exception:
+            s3.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+            raise
+    else:
+        s3.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=bytes(buffer),
+            ContentType='text/plain'
+        )
 
     print(f"Logs exported to s3://{bucket}/{key}")
     return f"s3://{bucket}/{key}"
