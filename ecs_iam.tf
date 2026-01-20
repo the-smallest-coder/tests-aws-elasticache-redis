@@ -47,9 +47,9 @@ resource "aws_iam_role" "ecs_task_role" {
   }
 }
 
-# Allow ECS task to write logs (in case execution role doesn't cover it)
-resource "aws_iam_role_policy" "ecs_task_logs" {
-  name = "${local.cluster_id}-ecs-task-logs"
+# Allow ECS task to write logs and access S3 for reports
+resource "aws_iam_role_policy" "ecs_task_permissions" {
+  name = "${local.cluster_id}-ecs-task-permissions"
   role = aws_iam_role.ecs_task_role.id
 
   policy = jsonencode({
@@ -62,6 +62,18 @@ resource "aws_iam_role_policy" "ecs_task_logs" {
           "logs:PutLogEvents"
         ]
         Resource = "${aws_cloudwatch_log_group.loadgen.arn}:*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          "arn:aws:s3:::${var.metrics_export_s3_bucket}",
+          "arn:aws:s3:::${var.metrics_export_s3_bucket}/*"
+        ]
       }
     ]
   })

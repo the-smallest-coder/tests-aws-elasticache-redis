@@ -134,3 +134,44 @@ locals {
   memtier_test_time_seconds = var.loadgen_memtier_test_time > 0 ? var.loadgen_memtier_test_time : 2147483647
   memtier_duration_label    = var.loadgen_memtier_test_time > 0 ? "${var.loadgen_memtier_test_time}s" : "until stopped"
 }
+
+# Upload report generator script to S3
+resource "aws_s3_object" "report_script" {
+  bucket = var.metrics_export_s3_bucket
+  key    = "${var.metrics_export_s3_prefix}scripts/report.py"
+  source = "${path.module}/report/report.py"
+  etag   = filemd5("${path.module}/report/report.py")
+}
+
+# ECS Task Definition for Report Generator
+resource "aws_ecs_task_definition" "report_gen" {
+  family                   = "${local.cluster_id}-report-gen"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 1024
+  memory                   = 2048
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+  task_role_arn            = aws_iam_role.ecs_task_role.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "report-gen"
+      image     = "python:3.9-slim"
+      essential = true
+      command   = ["/bin/sh", "-c", "pip install boto3 pandas plotly && python -c \"import boto3; boto3.client('s3').download_file('${var.metrics_export_s3_bucket}', '${var.metrics_export_s3_prefix}scripts/report.py', 'report.py')\" && python report.py"]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.loadgen.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "report-gen"
+        }
+      }
+    }
+  ])
+
+  tags = {
+    Name = "${local.cluster_id}-report-gen"
+  }
+}

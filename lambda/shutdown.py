@@ -166,6 +166,42 @@ def handler(event, context):
             end_time
         )
 
+        # Trigger report generator ECS task
+        try:
+            service_desc = ecs.describe_services(cluster=ecs_cluster, services=[ecs_service])['services'][0]
+            net_config = service_desc['networkConfiguration']['awsvpcConfiguration']
+
+            report_task = ecs.run_task(
+                cluster=ecs_cluster,
+                taskDefinition=f"{cluster_id}-report-gen",
+                launchType='FARGATE',
+                networkConfiguration={
+                    'awsvpcConfiguration': {
+                        'subnets': net_config['subnets'],
+                        'securityGroups': net_config['securityGroups'],
+                        'assignPublicIp': net_config['assignPublicIp']
+                    }
+                },
+                overrides={
+                    'containerOverrides': [
+                        {
+                            'name': 'report-gen',
+                            'environment': [
+                                {'name': 'S3_BUCKET', 'value': s3_bucket},
+                                {'name': 'S3_PREFIX', 'value': s3_prefix},
+                                {'name': 'CLUSTER_ID', 'value': cluster_id},
+                                {'name': 'TIMESTAMP', 'value': timestamp}
+                            ]
+                        }
+                    ]
+                }
+            )
+            results['report_task_arn'] = report_task['tasks'][0]['taskArn']
+            print(f"Report generator task started: {results['report_task_arn']}")
+        except Exception as e:
+            print(f"Report generator launch failed: {e}")
+            results['report_task_error'] = str(e)
+
         # Send email notification if configured
         try:
             notification_result = send_notification(
