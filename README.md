@@ -78,6 +78,8 @@ flowchart TB
     EventBridge -->|triggers| Lambda
     Lambda -->|reads| CloudWatch
     Lambda -->|exports| S3
+    Lambda -->|triggers| ReportTask["ECS Report Task"]
+    ReportTask -->|generates html| S3
 ```
 
 ---
@@ -101,6 +103,8 @@ flowchart LR
         T1[EventBridge] -->|triggers| T2[Lambda]
         T2 -->|export logs| T3[S3]
         T2 -->|export metrics| T3
+        T2 -->|triggers| Report["ECS Report Task"]
+        Report -->|upload html| T3
         T2 -->|stop| T4[ECS Service]
         T2 -->|stop| T5[ElastiCache]
     end
@@ -110,10 +114,21 @@ flowchart LR
 
 ---
 
+## 📊 HTML Reports
+
+An interactive HTML report is automatically generated and uploaded to S3 after the test completes.
+
+**Visualizations included:**
+- **Generated Load**: Operations per second (Get/Set)
+- **ElastiCache Metrics**: CPU Utilization, Network In/Out
+- **Load Generator Metrics**: ECS CPU Utilization
+- **Cache Performance**: Hits vs. Misses
+
 ## 📦 Exports
 
 | Data | Format | Path |
 |------|--------|------|
+| **HTML Report** | HTML | `s3://{bucket}/exports/{timestamp}/results_{timestamp}.html` |
 | ElastiCache Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster}.csv` |
 | ECS Task Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster}-ecs.csv` |
 | Logs | Text | `s3://{bucket}/exports/{timestamp}/logs/{cluster}.txt` |
