@@ -59,21 +59,6 @@ def parse_memtier_logs(log_content):
 def parse_metrics_csv(csv_content):
     # CSV Header: Timestamp,Namespace,MetricName,Stat,Value,Unit,Dimensions
     df = pd.read_csv(StringIO(csv_content))
-
-    required_columns = [
-        "Timestamp",
-        "Namespace",
-        "MetricName",
-        "Stat",
-        "Value",
-        "Unit",
-        "Dimensions",
-    ]
-    missing_columns = [col for col in required_columns if col not in df.columns]
-    if missing_columns:
-        raise ValueError(
-            f"Metrics CSV is missing required columns: {', '.join(missing_columns)}"
-        )
     df['Timestamp'] = pd.to_datetime(df['Timestamp'])
     return df
 

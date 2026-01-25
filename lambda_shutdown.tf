@@ -267,7 +267,7 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
         Action = [
           "ecs:RunTask"
         ]
-        Resource = aws_ecs_task_definition.reporter.arn
+        Resource = "arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task-definition/${aws_ecs_task_definition.reporter.family}:*"
       },
       {
         Effect = "Allow"
