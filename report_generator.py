@@ -2,6 +2,7 @@ import boto3
 import pandas as pd
 import plotly.graph_objects as go
 import os
+import io
 import sys
 
 def get_env_var(name):
@@ -27,22 +28,16 @@ def parse_dimensions(dim_str):
     if not isinstance(dim_str, str):
         return "Unknown"
 
-    # First parse into raw key/value pairs.
-    raw_dims = {}
+    dims = {}
     try:
         parts = dim_str.split(';')
         for part in parts:
             if '=' in part:
                 k, v = part.split('=', 1)
-                raw_dims[k] = v
-    except Exception:
+                dims[k] = v
+    except:
         pass
 
-    # Support CloudWatch-style "Name=X;Value=Y" as well as "X=Y".
-    if 'Name' in raw_dims and 'Value' in raw_dims:
-        dims = {raw_dims['Name']: raw_dims['Value']}
-    else:
-        dims = raw_dims
     if 'CacheClusterId' in dims:
         return f"Node: {dims['CacheClusterId']}"
     elif 'ReplicationGroupId' in dims:
@@ -269,7 +264,7 @@ def main():
 
     # --- ECS CPU ---
     ecs_cpu_mask = (
-        (df['Namespace'].str.contains('ECS', na=False)) &
+        (df['Namespace'].str.contains('ECS')) &
         (df['Stat'] == 'Average') &
         (df['MetricName'].isin(['CpuUtilized', 'CPUUtilization']))
     )
