@@ -166,6 +166,22 @@ def handler(event, context):
             end_time
         )
 
+        # Run reporter task
+        try:
+            reporter_result = run_reporter_task(
+                cluster_id=cluster_id,
+                ecs_cluster=ecs_cluster,
+                metrics_key=metrics_key,
+                logs_key=log_exports['loadgen'],
+                s3_bucket=s3_bucket,
+                s3_prefix=s3_prefix,
+                timestamp=timestamp
+            )
+            results['reporter_task'] = reporter_result
+        except Exception as e:
+            print(f"Reporter task launch failed: {e}")
+            results['reporter_task'] = str(e)
+
         # Send email notification if configured
         try:
             notification_result = send_notification(
@@ -384,6 +400,70 @@ def export_metric_sources_to_s3(sources, bucket, key, start_time, end_time):
 
     print(f"Metrics exported to s3://{bucket}/{key}")
     return f"s3://{bucket}/{key}"
+
+
+def run_reporter_task(cluster_id, ecs_cluster, metrics_key, logs_key, s3_bucket, s3_prefix, timestamp):
+    """Launch ECS task to generate HTML report."""
+
+    task_definition = os.environ.get('REPORTER_TASK_DEFINITION')
+    if not task_definition:
+        print("REPORTER_TASK_DEFINITION not set, skipping report generation.")
+        return None
+
+    if not metrics_key or not logs_key:
+        print("Missing metrics or logs key, skipping report generation.")
+        return None
+
+    # Get network configuration from the loadgen service to reuse subnets/security groups
+    # This assumes the loadgen service still exists (even if scaled to 0) which matches our flow
+    try:
+        service_desc = ecs.describe_services(
+            cluster=ecs_cluster,
+            services=[os.environ['ECS_SERVICE']]
+        )
+        network_config = service_desc['services'][0]['networkConfiguration']
+    except Exception as e:
+        print(f"Failed to get network config from service, using defaults: {e}")
+        # Fallback or fail? We need subnets to run Fargate.
+        # If we can't get them, we probably can't run the task.
+        raise e
+
+    # S3 keys passed to this function might be full s3:// paths returned by export functions
+    # or just keys. The export functions return "s3://bucket/key".
+    # The reporter script expects s3:// paths for input.
+
+    # metrics_key is like "s3://bucket/prefix/timestamp/metrics/cluster.csv"
+    # logs_key is like "s3://bucket/prefix/timestamp/logs/cluster.txt"
+
+    suffix = timestamp  # Use timestamp as suffix for the report file
+
+    response = ecs.run_task(
+        cluster=ecs_cluster,
+        taskDefinition=task_definition,
+        launchType='FARGATE',
+        networkConfiguration=network_config,
+        overrides={
+            'containerOverrides': [
+                {
+                    'name': 'reporter',
+                    'environment': [
+                        {'name': 'METRICS_CSV', 'value': metrics_key},
+                        {'name': 'LOGS_TXT', 'value': logs_key},
+                        {'name': 'OUTPUT_BUCKET', 'value': s3_bucket},
+                        {'name': 'OUTPUT_PREFIX', 'value': s3_prefix},
+                        {'name': 'SUFFIX', 'value': suffix},
+                        {'name': 'CLUSTER_ID', 'value': cluster_id}
+                    ]
+                }
+            ]
+        },
+        count=1,
+        startedBy='ShutdownLambda'
+    )
+
+    task_arn = response['tasks'][0]['taskArn']
+    print(f"Reporter task launched: {task_arn}")
+    return task_arn
 
 
 def export_logs_to_s3(log_group, bucket, key, start_time, end_time):

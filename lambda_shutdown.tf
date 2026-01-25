@@ -51,6 +51,7 @@ resource "aws_lambda_function" "shutdown" {
       TEST_DURATION_MINUTES        = var.test_duration_minutes
       NOTIFICATION_EMAIL           = var.notification_email
       SES_IDENTITY_ARN             = var.notification_ses_identity_arn
+      REPORTER_TASK_DEFINITION     = aws_ecs_task_definition.reporter.arn
     }
   }
 
@@ -260,6 +261,23 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
           "ecs:UpdateService"
         ]
         Resource = aws_ecs_service.loadgen.id
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecs:RunTask"
+        ]
+        Resource = aws_ecs_task_definition.reporter.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "iam:PassRole"
+        ]
+        Resource = [
+          aws_iam_role.ecs_task_execution_role.arn,
+          aws_iam_role.ecs_task_role.arn
+        ]
       },
       {
         Effect = "Allow"
