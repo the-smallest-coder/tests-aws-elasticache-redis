@@ -2,7 +2,6 @@ import boto3
 import pandas as pd
 import plotly.graph_objects as go
 import os
-import io
 import sys
 
 def get_env_var(name):
