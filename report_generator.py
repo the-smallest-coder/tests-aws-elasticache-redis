@@ -269,7 +269,7 @@ def main():
 
     # --- ECS CPU ---
     ecs_cpu_mask = (
-        (df['Namespace'].str.contains('ECS')) &
+        (df['Namespace'].str.contains('ECS', na=False)) &
         (df['Stat'] == 'Average') &
         (df['MetricName'].isin(['CpuUtilized', 'CPUUtilization']))
     )
