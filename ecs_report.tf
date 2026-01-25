@@ -35,10 +35,10 @@ resource "aws_ecs_task_definition" "report_gen" {
       essential = true
 
       # Inject execution environment:
-      # 1. Install dependencies (boto3, pandas, plotly)
+      # 1. Install dependencies (boto3)
       # 2. Download report script from S3
       # 3. Execute report script
-      command   = ["/bin/sh", "-c", "pip install boto3 pandas plotly && python -c \"import boto3; boto3.client('s3').download_file('${var.metrics_export_s3_bucket}', '${var.metrics_export_s3_prefix}scripts/report.py', 'report.py')\" && python report.py"]
+      command   = ["/bin/sh", "-c", "pip install boto3 && python -c \"import boto3; boto3.client('s3').download_file('${var.metrics_export_s3_bucket}', '${var.metrics_export_s3_prefix}scripts/report.py', 'report.py')\" && python report.py"]
 
       logConfiguration = {
         logDriver = "awslogs"

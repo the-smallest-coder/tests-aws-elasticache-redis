@@ -1,9 +1,17 @@
 import os
 import boto3
-import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import csv
+import json
 import io
+import datetime
+from collections import defaultdict
+
+def parse_csv(content):
+    reader = csv.DictReader(io.StringIO(content))
+    data = []
+    for row in reader:
+        data.append(row)
+    return data
 
 def main():
     s3_bucket = os.environ['S3_BUCKET']
@@ -13,104 +21,140 @@ def main():
 
     s3 = boto3.client('s3')
 
-    # Paths
-    # Note: s3_prefix usually ends with / if it's "exports/"
-    # shutdown.py uses: f"{s3_prefix}{timestamp}/metrics/{cluster_id}.csv"
-
     base_prefix = f"{s3_prefix}{timestamp}"
     metrics_key = f"{base_prefix}/metrics/{cluster_id}.csv"
     ecs_metrics_key = f"{base_prefix}/metrics/{cluster_id}-ecs.csv"
 
-    print(f"Downloading metrics from s3://{s3_bucket}/{metrics_key}")
+    metrics_data = []
+    ecs_data = []
 
-    # Download Metrics
+    print(f"Downloading metrics from s3://{s3_bucket}/{metrics_key}")
     try:
         obj = s3.get_object(Bucket=s3_bucket, Key=metrics_key)
-        df_metrics = pd.read_csv(obj['Body'])
-        df_metrics['Timestamp'] = pd.to_datetime(df_metrics['Timestamp'])
+        metrics_data = parse_csv(obj['Body'].read().decode('utf-8'))
     except Exception as e:
         print(f"Error reading metrics: {e}")
-        df_metrics = pd.DataFrame()
 
     try:
         obj = s3.get_object(Bucket=s3_bucket, Key=ecs_metrics_key)
-        df_ecs = pd.read_csv(obj['Body'])
-        df_ecs['Timestamp'] = pd.to_datetime(df_ecs['Timestamp'])
+        ecs_data = parse_csv(obj['Body'].read().decode('utf-8'))
     except Exception as e:
         print(f"Error reading ECS metrics: {e}")
-        df_ecs = pd.DataFrame()
 
-    # Generate Report
-    fig = make_subplots(
-        rows=4, cols=1,
-        subplot_titles=("Generated Load (Commands/sec)", "ElastiCache CPU & Network", "ECS Load Generator CPU", "ElastiCache Hits/Misses"),
-        specs=[[{"secondary_y": False}], [{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]]
-    )
+    # Process data for Chart.js
+    # Structure: { chart_id: { datasets: [{label: '...', data: [{x: ts, y: val}, ...]}], title: '...' } }
+
+    charts = {
+        'load': {'title': 'Generated Load (Ops/Sec)', 'datasets': []},
+        'cpu': {'title': 'ElastiCache CPU Utilization', 'datasets': []},
+        'network': {'title': 'ElastiCache Network Bytes In', 'datasets': []},
+        'ecs_cpu': {'title': 'ECS Load Generator CPU', 'datasets': []},
+        'hits': {'title': 'Cache Hits', 'datasets': []},
+        'misses': {'title': 'Cache Misses', 'datasets': []}
+    }
+
+    # Helper to group by metric name and dimension
+    def process_series(data_list, metric_name, stat, chart_key, label_prefix, scale=1.0):
+        grouped = defaultdict(list)
+        for row in data_list:
+            if row['MetricName'] == metric_name and row.get('Stat') == stat:
+                dim = row['Dimensions']
+                ts = row['Timestamp']
+                val = float(row['Value']) * scale
+                grouped[dim].append({'x': ts, 'y': val})
+
+        for dim, points in grouped.items():
+            points.sort(key=lambda p: p['x'])
+            charts[chart_key]['datasets'].append({
+                'label': f"{label_prefix} {dim}",
+                'data': points
+            })
 
     # 1. Generated Load (CmdGet + CmdSet)
-    if not df_metrics.empty:
-        # Sum of CmdGet and CmdSet per minute (Stat=Sum) divided by 60 to get ops/sec
-        # Or just plot Sum per minute. Let's plot Sum (Count).
-        # Actually, user wants "Generated Load". Ops/sec is better.
-        # But 'Sum' is count per 60s period (if period is 60s).
+    # We need to aggregate Get and Set if possible, or show them separately.
+    # Showing separately is easier for now without pandas.
+    # Ops/Sec: Value is Sum per minute? Div by 60.
+    process_series(metrics_data, 'CmdGet', 'Sum', 'load', 'Get', 1.0/60.0)
+    process_series(metrics_data, 'CmdSet', 'Sum', 'load', 'Set', 1.0/60.0)
 
-        cmds = df_metrics[df_metrics['MetricName'].isin(['CmdGet', 'CmdSet']) & (df_metrics['Stat'] == 'Sum')]
+    # 2. ElastiCache CPU
+    process_series(metrics_data, 'CPUUtilization', 'Average', 'cpu', 'CPU')
 
-        for name, group in cmds.groupby('Dimensions'):
-            # Aggregate if multiple metrics (Get+Set) for same dimension?
-            # Or just plot them.
-            # Let's plot total commands per dimension.
+    # 3. Network
+    process_series(metrics_data, 'NetworkBytesIn', 'Average', 'network', 'NetIn')
 
-            # Pivot to sum CmdGet + CmdSet
-            pivoted = group.pivot_table(index='Timestamp', columns='MetricName', values='Value', aggfunc='sum').fillna(0)
-            if 'CmdGet' in pivoted.columns and 'CmdSet' in pivoted.columns:
-                pivoted['Total'] = pivoted['CmdGet'] + pivoted['CmdSet']
-            elif 'CmdGet' in pivoted.columns:
-                pivoted['Total'] = pivoted['CmdGet']
-            elif 'CmdSet' in pivoted.columns:
-                pivoted['Total'] = pivoted['CmdSet']
-            else:
-                pivoted['Total'] = 0
+    # 4. ECS CPU
+    process_series(ecs_data, 'CpuUtilized', 'Average', 'ecs_cpu', 'ECS CPU')
 
-            # Convert to Ops/Sec (assuming 60s period)
-            pivoted['OpsSec'] = pivoted['Total'] / 60.0
+    # 5. Hits/Misses
+    process_series(metrics_data, 'CacheHits', 'Sum', 'hits', 'Hits')
+    process_series(metrics_data, 'CacheMisses', 'Sum', 'misses', 'Misses')
 
-            fig.add_trace(go.Scatter(x=pivoted.index, y=pivoted['OpsSec'], name=f'Ops/Sec {name}'), row=1, col=1)
+    # HTML Template
+    html_template = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Results: {cluster_id}</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon"></script>
+    <style>
+        body {{ font-family: sans-serif; margin: 20px; }}
+        .chart-container {{ width: 80%; margin: 20px auto; }}
+    </style>
+</head>
+<body>
+    <h1>Test Results: {cluster_id}</h1>
+    <p>Timestamp: {timestamp}</p>
 
-    # 2. ElastiCache CPU & Network
-    if not df_metrics.empty:
-        # Filter for CPUUtilization
-        cpu = df_metrics[(df_metrics['MetricName'] == 'CPUUtilization') & (df_metrics['Stat'] == 'Average')]
+    <div class="chart-container"><canvas id="loadChart"></canvas></div>
+    <div class="chart-container"><canvas id="cpuChart"></canvas></div>
+    <div class="chart-container"><canvas id="networkChart"></canvas></div>
+    <div class="chart-container"><canvas id="ecsCpuChart"></canvas></div>
+    <div class="chart-container"><canvas id="hitsChart"></canvas></div>
+    <div class="chart-container"><canvas id="missesChart"></canvas></div>
 
-        for name, group in cpu.groupby('Dimensions'):
-            fig.add_trace(go.Scatter(x=group['Timestamp'], y=group['Value'], name=f'CPU {name}'), row=2, col=1)
+    <script>
+        const chartData = {json_data};
 
-        # Filter for NetworkBytesIn
-        net_in = df_metrics[(df_metrics['MetricName'] == 'NetworkBytesIn') & (df_metrics['Stat'] == 'Average')]
-        for name, group in net_in.groupby('Dimensions'):
-            fig.add_trace(go.Scatter(x=group['Timestamp'], y=group['Value'], name=f'NetIn {name}', opacity=0.5), row=2, col=1, secondary_y=True)
+        function createChart(canvasId, dataKey) {{
+            const ctx = document.getElementById(canvasId).getContext('2d');
+            const data = chartData[dataKey];
+            if (data.datasets.length === 0) return;
 
-    # 3. ECS CPU
-    if not df_ecs.empty:
-        cpu = df_ecs[(df_ecs['MetricName'] == 'CpuUtilized') & (df_ecs['Stat'] == 'Average')]
-        for name, group in cpu.groupby('Dimensions'):
-            fig.add_trace(go.Scatter(x=group['Timestamp'], y=group['Value'], name=f'ECS CPU {name}'), row=3, col=1)
+            new Chart(ctx, {{
+                type: 'line',
+                data: {{ datasets: data.datasets }},
+                options: {{
+                    responsive: true,
+                    plugins: {{
+                        title: {{ display: true, text: data.title }}
+                    }},
+                    scales: {{
+                        x: {{ type: 'time' }}
+                    }}
+                }}
+            }});
+        }}
 
-    # 4. Cache Hits/Misses
-    if not df_metrics.empty:
-        hits = df_metrics[(df_metrics['MetricName'] == 'CacheHits') & (df_metrics['Stat'] == 'Sum')]
-        for name, group in hits.groupby('Dimensions'):
-            fig.add_trace(go.Scatter(x=group['Timestamp'], y=group['Value'], name=f'Hits {name}'), row=4, col=1)
+        createChart('loadChart', 'load');
+        createChart('cpuChart', 'cpu');
+        createChart('networkChart', 'network');
+        createChart('ecsCpuChart', 'ecs_cpu');
+        createChart('hitsChart', 'hits');
+        createChart('missesChart', 'misses');
+    </script>
+</body>
+</html>
+    """
 
-        misses = df_metrics[(df_metrics['MetricName'] == 'CacheMisses') & (df_metrics['Stat'] == 'Sum')]
-        for name, group in misses.groupby('Dimensions'):
-            fig.add_trace(go.Scatter(x=group['Timestamp'], y=group['Value'], name=f'Misses {name}'), row=4, col=1)
+    html_content = html_template.format(
+        cluster_id=cluster_id,
+        timestamp=timestamp,
+        json_data=json.dumps(charts)
+    )
 
-    fig.update_layout(height=1600, title_text=f"Test Results: {cluster_id} ({timestamp})")
-
-    html_content = fig.to_html(full_html=True, include_plotlyjs='cdn')
-
-    # Upload
     output_key = f"{base_prefix}/results_{timestamp}.html"
     print(f"Uploading report to s3://{s3_bucket}/{output_key}")
     s3.put_object(Bucket=s3_bucket, Key=output_key, Body=html_content.encode('utf-8'), ContentType='text/html')
