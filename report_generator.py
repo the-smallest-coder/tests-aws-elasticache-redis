@@ -27,16 +27,22 @@ def parse_dimensions(dim_str):
     if not isinstance(dim_str, str):
         return "Unknown"
 
-    dims = {}
+    # First parse into raw key/value pairs.
+    raw_dims = {}
     try:
         parts = dim_str.split(';')
         for part in parts:
             if '=' in part:
                 k, v = part.split('=', 1)
-                dims[k] = v
-    except:
+                raw_dims[k] = v
+    except Exception:
         pass
 
+    # Support CloudWatch-style "Name=X;Value=Y" as well as "X=Y".
+    if 'Name' in raw_dims and 'Value' in raw_dims:
+        dims = {raw_dims['Name']: raw_dims['Value']}
+    else:
+        dims = raw_dims
     if 'CacheClusterId' in dims:
         return f"Node: {dims['CacheClusterId']}"
     elif 'ReplicationGroupId' in dims:
