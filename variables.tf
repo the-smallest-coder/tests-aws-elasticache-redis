@@ -314,5 +314,5 @@ variable "notification_ses_identity_arn" {
 variable "report_container_image" {
   description = "Docker image for the report generator ECS task"
   type        = string
-  default     = "python:3.9-slim"
+  default     = "python:3.11-slim"
 }

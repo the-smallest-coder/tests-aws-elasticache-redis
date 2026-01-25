@@ -18,14 +18,6 @@ resource "aws_s3_object" "report_script" {
   etag   = filemd5("${path.module}/report/report.py")
 }
 
-# Upload requirements.txt to S3
-resource "aws_s3_object" "report_requirements" {
-  bucket = var.metrics_export_s3_bucket
-  key    = "${var.metrics_export_s3_prefix}scripts/requirements.txt"
-  source = "${path.module}/report/requirements.txt"
-  etag   = filemd5("${path.module}/report/requirements.txt")
-}
-
 # ECS Task Definition for Report Generator
 resource "aws_ecs_task_definition" "report_gen" {
   family                   = "${local.cluster_id}-report-gen"
@@ -42,15 +34,11 @@ resource "aws_ecs_task_definition" "report_gen" {
       image     = var.report_container_image
       essential = true
 
-      # If using the default python:3.9-slim image, we need to install dependencies.
-      # If the user provides a custom image (via variable), this command can be overridden or simply work
-      # if the image has the script and dependencies.
-      # Here we assume a "hybrid" approach: we check if requirements.txt exists locally (baked image)
-      # or download it.
-      # However, consistent with the sandbox limitations, we implement the dynamic download as the primary path
-      # for the default image case, but we structure it cleanly.
-
-      command   = ["/bin/sh", "-c", "if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install boto3 && python -c \"import boto3; s3 = boto3.client('s3'); s3.download_file('${var.metrics_export_s3_bucket}', '${var.metrics_export_s3_prefix}scripts/requirements.txt', 'requirements.txt'); s3.download_file('${var.metrics_export_s3_bucket}', '${var.metrics_export_s3_prefix}scripts/report.py', 'report.py')\" && pip install -r requirements.txt; fi && python report.py"]
+      # Inject execution environment:
+      # 1. Install dependencies (boto3, pandas, plotly)
+      # 2. Download report script from S3
+      # 3. Execute report script
+      command   = ["/bin/sh", "-c", "pip install boto3 pandas plotly && python -c \"import boto3; boto3.client('s3').download_file('${var.metrics_export_s3_bucket}', '${var.metrics_export_s3_prefix}scripts/report.py', 'report.py')\" && python report.py"]
 
       logConfiguration = {
         logDriver = "awslogs"
