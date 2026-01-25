@@ -1,7 +1,6 @@
 import boto3
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import os
 import io
 import sys
@@ -49,11 +48,125 @@ def parse_dimensions(dim_str):
         return f"ECS Cluster: {dims['ClusterName']}"
     return "Global"
 
+def generate_html_report(cluster_id, timestamp, summary_stats, throughput_div, cpu_div, ecs_div):
+    """
+    Constructs a complete HTML dashboard using a string template.
+    """
+
+    stats_rows = ""
+    for stat in summary_stats:
+        stats_rows += f"""
+        <div class="card">
+            <h3>{stat['label']}</h3>
+            <div class="value">{stat['value']}</div>
+        </div>
+        """
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Performance Report: {cluster_id}</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f5f7fa;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+        }}
+        .container {{
+            max_width: 1200px;
+            margin: 0 auto;
+        }}
+        header {{
+            margin-bottom: 30px;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 10px;
+        }}
+        h1 {{ margin: 0; color: #2c3e50; }}
+        .meta {{ color: #7f8c8d; font-size: 0.9em; margin-top: 5px; }}
+
+        .summary-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }}
+        .card {{
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            text-align: center;
+        }}
+        .card h3 {{
+            margin: 0 0 10px 0;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            color: #7f8c8d;
+            letter-spacing: 0.5px;
+        }}
+        .card .value {{
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #2c3e50;
+        }}
+
+        .chart-section {{
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            margin-bottom: 30px;
+        }}
+        .chart-section h2 {{
+            margin-top: 0;
+            font-size: 1.2em;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>ElastiCache Performance Report</h1>
+            <div class="meta">Cluster: {cluster_id} | Run ID: {timestamp}</div>
+        </header>
+
+        <section class="summary-grid">
+            {stats_rows}
+        </section>
+
+        <section class="chart-section">
+            <h2>Throughput (Ops/sec)</h2>
+            {throughput_div}
+        </section>
+
+        <section class="chart-section">
+            <h2>Server CPU Utilization (%)</h2>
+            {cpu_div}
+        </section>
+
+        <section class="chart-section">
+            <h2>Load Generator Health (CPU)</h2>
+            {ecs_div}
+        </section>
+    </div>
+</body>
+</html>
+    """
+    return html
+
 def main():
     # 1. Configuration
     BUCKET = get_env_var("S3_BUCKET")
-    PREFIX = get_env_var("S3_PREFIX") # e.g., "exports/"
-    TIMESTAMP = get_env_var("REPORT_TIMESTAMP") # e.g., "20231027-100000"
+    PREFIX = get_env_var("S3_PREFIX")
+    TIMESTAMP = get_env_var("REPORT_TIMESTAMP")
     CLUSTER_ID = get_env_var("CLUSTER_ID")
 
     # 2. Initialize S3
@@ -74,7 +187,6 @@ def main():
         sys.exit(1)
 
     # 4. Process Data
-    # Merge if both exist, or use whichever exists
     frames = []
     if df_ec is not None: frames.append(df_ec)
     if df_ecs is not None: frames.append(df_ecs)
@@ -84,24 +196,14 @@ def main():
         sys.exit(1)
 
     df = pd.concat(frames)
-
-    # Ensure timestamp is datetime
     df['Timestamp'] = pd.to_datetime(df['Timestamp'])
     df.sort_values('Timestamp', inplace=True)
-
-    # Extract readable source from Dimensions
     df['Source'] = df['Dimensions'].apply(parse_dimensions)
 
-    # 5. Create Visualization
-    fig = make_subplots(
-        rows=3, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.1,
-        subplot_titles=("Throughput (Ops/sec)", "Server CPU Utilization (%)", "Load Generator CPU (%)")
-    )
+    # 5. Build Charts & Stats
+    summary_stats = []
 
-    # --- Plot 1: Throughput (CmdSet + CmdGet) ---
-    # Filter: Namespace=AWS/ElastiCache, Stat=Sum, MetricName in [CmdSet, CmdGet]
+    # --- Throughput ---
     throughput_mask = (
         (df['Namespace'] == 'AWS/ElastiCache') &
         (df['Stat'] == 'Sum') &
@@ -109,28 +211,32 @@ def main():
     )
     df_throughput = df[throughput_mask].copy()
 
-    # We want to aggregate by Timestamp and Source (Cluster vs Node)
-    # Ideally, we look at Cluster level if available, else sum of nodes
-    # For simplicity, we plot each Source's line.
+    fig_throughput = go.Figure()
+    max_ops = 0
 
     for source in df_throughput['Source'].unique():
-        # Prefer Cluster level for total throughput
         if 'Cluster:' in source or 'Node:' in source:
             subset = df_throughput[df_throughput['Source'] == source]
-            # Pivot to sum CmdGet and CmdSet per timestamp
             pivoted = subset.pivot_table(index='Timestamp', columns='MetricName', values='Value', aggfunc='sum').fillna(0)
-            if 'CmdGet' in pivoted.columns and 'CmdSet' in pivoted.columns:
-                pivoted['Total'] = pivoted['CmdGet'] + pivoted['CmdSet']
-                # Convert sum/minute to ops/sec (divide by 60)
-                pivoted['OpsSec'] = pivoted['Total'] / 60.0
 
-                fig.add_trace(
-                    go.Scatter(x=pivoted.index, y=pivoted['OpsSec'], mode='lines', name=f"{source} (Ops/sec)"),
-                    row=1, col=1
-                )
+            # Robust calculation: use .get(0) to handle missing read or write metrics gracefully
+            # e.g. for read-only tests, CmdSet might be missing
+            pivoted['Total'] = pivoted.get('CmdGet', 0) + pivoted.get('CmdSet', 0)
+            pivoted['OpsSec'] = pivoted['Total'] / 60.0
 
-    # --- Plot 2: Server CPU ---
-    # Filter: Namespace=AWS/ElastiCache, Stat=Average, MetricName=EngineCPUUtilization (or CPUUtilization)
+            # Update max ops for summary
+            current_max = pivoted['OpsSec'].max()
+            if current_max > max_ops:
+                max_ops = current_max
+
+            fig_throughput.add_trace(
+                go.Scatter(x=pivoted.index, y=pivoted['OpsSec'], mode='lines', name=f"{source}")
+            )
+
+    fig_throughput.update_layout(height=400, margin=dict(l=20, r=20, t=20, b=20))
+    summary_stats.append({"label": "Peak Ops/Sec", "value": f"{int(max_ops):,}"})
+
+    # --- Server CPU ---
     cpu_mask = (
         (df['Namespace'] == 'AWS/ElastiCache') &
         (df['Stat'] == 'Average') &
@@ -138,20 +244,25 @@ def main():
     )
     df_cpu = df[cpu_mask]
 
+    fig_cpu = go.Figure()
+    max_cpu = 0
+
     for source in df_cpu['Source'].unique():
         subset = df_cpu[df_cpu['Source'] == source]
         for metric in subset['MetricName'].unique():
             metric_data = subset[subset['MetricName'] == metric]
-            fig.add_trace(
-                go.Scatter(x=metric_data['Timestamp'], y=metric_data['Value'], mode='lines', name=f"{source} {metric}"),
-                row=2, col=1
+            current_max = metric_data['Value'].max()
+            if current_max > max_cpu:
+                max_cpu = current_max
+
+            fig_cpu.add_trace(
+                go.Scatter(x=metric_data['Timestamp'], y=metric_data['Value'], mode='lines', name=f"{source} {metric}")
             )
 
-    # --- Plot 3: Load Generator Health ---
-    # Filter: Namespace=AWS/ECS, Stat=Average, MetricName=CpuUtilized
-    # Note: CpuUtilized in ECS is often sum of units? Or percent?
-    # ContainerInsights: CpuUtilized is units. CpuReserved is units.
-    # If we have basic ECS metrics, 'CPUUtilization' is percent.
+    fig_cpu.update_layout(height=400, margin=dict(l=20, r=20, t=20, b=20), yaxis_title="Percent")
+    summary_stats.append({"label": "Peak Server CPU", "value": f"{max_cpu:.1f}%"})
+
+    # --- ECS CPU ---
     ecs_cpu_mask = (
         (df['Namespace'].str.contains('ECS')) &
         (df['Stat'] == 'Average') &
@@ -159,18 +270,33 @@ def main():
     )
     df_ecs_cpu = df[ecs_cpu_mask]
 
+    fig_ecs = go.Figure()
+
     for source in df_ecs_cpu['Source'].unique():
         subset = df_ecs_cpu[df_ecs_cpu['Source'] == source]
-        fig.add_trace(
-            go.Scatter(x=subset['Timestamp'], y=subset['Value'], mode='lines', name=f"{source} CPU"),
-            row=3, col=1
+        fig_ecs.add_trace(
+            go.Scatter(x=subset['Timestamp'], y=subset['Value'], mode='lines', name=f"{source}")
         )
-
-    # Layout updates
-    fig.update_layout(height=1200, title_text=f"Performance Report: {CLUSTER_ID}")
+    fig_ecs.update_layout(height=400, margin=dict(l=20, r=20, t=20, b=20))
 
     # 6. Generate HTML
-    html_content = fig.to_html(full_html=True, include_plotlyjs='cdn')
+    # We output only the div string for the charts, excluding the JS (which is loaded once in head)
+    # Note: include_plotlyjs='cdn' in to_html usually puts the script tag.
+    # To embed multiple charts efficiently, we can use full_html=False and include_plotlyjs=False,
+    # then manually add the script tag in the template.
+
+    throughput_div = fig_throughput.to_html(full_html=False, include_plotlyjs=False)
+    cpu_div = fig_cpu.to_html(full_html=False, include_plotlyjs=False)
+    ecs_div = fig_ecs.to_html(full_html=False, include_plotlyjs=False)
+
+    html_report = generate_html_report(
+        CLUSTER_ID,
+        TIMESTAMP,
+        summary_stats,
+        throughput_div,
+        cpu_div,
+        ecs_div
+    )
 
     # 7. Upload to S3
     output_key = f"{PREFIX}{TIMESTAMP}/results_{TIMESTAMP}.html"
@@ -179,7 +305,7 @@ def main():
     s3.put_object(
         Bucket=BUCKET,
         Key=output_key,
-        Body=html_content,
+        Body=html_report,
         ContentType='text/html'
     )
     print("Done.")

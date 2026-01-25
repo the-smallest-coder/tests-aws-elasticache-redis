@@ -279,7 +279,8 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
         Effect = "Allow"
         Action = [
           "ecs:ListTasks",
-          "ecs:DescribeTasks"
+          "ecs:DescribeTasks",
+          "ecs:DescribeServices"
         ]
         Resource = "*"
       },
