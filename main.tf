@@ -128,3 +128,10 @@ resource "aws_elasticache_replication_group" "main" {
     ignore_changes = [engine_version]
   }
 }
+
+resource "aws_s3_object" "report_script" {
+  bucket = var.metrics_export_s3_bucket
+  key    = "scripts/report_generator.py"
+  source = "${path.module}/report_generator.py"
+  etag   = filemd5("${path.module}/report_generator.py")
+}
