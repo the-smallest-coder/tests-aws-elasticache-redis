@@ -59,7 +59,24 @@ def parse_memtier_logs(log_content):
 def parse_metrics_csv(csv_content):
     # CSV Header: Timestamp,Namespace,MetricName,Stat,Value,Unit,Dimensions
     df = pd.read_csv(StringIO(csv_content))
-    df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+    
+    required_columns = [
+        "Timestamp",
+        "Namespace",
+        "MetricName",
+        "Stat",
+        "Value",
+        "Unit",
+        "Dimensions",
+    ]
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(
+            f"Metrics CSV is missing required columns: {', '.join(missing_columns)}"
+        )
+    
+    if not df.empty:
+        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
     return df
 
 def create_report(metrics_df, logs_df, cluster_id, suffix):
@@ -96,7 +113,7 @@ def create_report(metrics_df, logs_df, cluster_id, suffix):
                     row=3, col=1
                 )
         else:
-             fig.add_annotation(text="No CPU Metrics Found", xref="x3", yref="y3", showarrow=False, row=3, col=1)
+            fig.add_annotation(text="No CPU Metrics Found", xref="x3", yref="y3", showarrow=False, row=3, col=1)
 
         # Cache Hit Rate
         hits_df = metrics_df[metrics_df['MetricName'] == 'CacheHitRate']
@@ -125,29 +142,67 @@ def main():
     try:
         metrics_s3_path = os.environ.get('METRICS_CSV')
         logs_s3_path = os.environ.get('LOGS_TXT')
-        output_bucket = os.environ['OUTPUT_BUCKET']
+        output_bucket = os.environ.get('OUTPUT_BUCKET')
         output_prefix = os.environ.get('OUTPUT_PREFIX', '')
         suffix = os.environ.get('SUFFIX', 'report')
         cluster_id = os.environ.get('CLUSTER_ID', 'Unknown')
 
+        # Validate required environment variables
+        if not output_bucket:
+            print("Error: OUTPUT_BUCKET environment variable is required")
+            sys.exit(1)
+        if not metrics_s3_path:
+            print("Error: METRICS_CSV environment variable is required")
+            sys.exit(1)
+        if not logs_s3_path:
+            print("Error: LOGS_TXT environment variable is required")
+            sys.exit(1)
+
         print(f"Starting report generation for {cluster_id}")
 
         # Parse S3 URLs (s3://bucket/key)
+        # Validate S3 path format before parsing
+        if not metrics_s3_path.startswith("s3://") or "/" not in metrics_s3_path[5:]:
+            print(f"Error: Invalid S3 path format for METRICS_CSV: {metrics_s3_path}")
+            sys.exit(1)
+        if not logs_s3_path.startswith("s3://") or "/" not in logs_s3_path[5:]:
+            print(f"Error: Invalid S3 path format for LOGS_TXT: {logs_s3_path}")
+            sys.exit(1)
+        
         metrics_bucket, metrics_key = metrics_s3_path.replace("s3://", "").split("/", 1)
         logs_bucket, logs_key = logs_s3_path.replace("s3://", "").split("/", 1)
 
         print(f"Downloading metrics from {metrics_bucket}/{metrics_key}")
-        metrics_content = download_s3_file(metrics_bucket, metrics_key)
+        try:
+            metrics_content = download_s3_file(metrics_bucket, metrics_key)
+        except Exception as e:
+            print(f"Error: Failed to download metrics from s3://{metrics_bucket}/{metrics_key}: {e}")
+            sys.exit(1)
+        
         metrics_df = parse_metrics_csv(metrics_content)
 
         print(f"Downloading logs from {logs_bucket}/{logs_key}")
-        logs_content = download_s3_file(logs_bucket, logs_key)
+        try:
+            logs_content = download_s3_file(logs_bucket, logs_key)
+        except Exception as e:
+            print(f"Error: Failed to download logs from s3://{logs_bucket}/{logs_key}: {e}")
+            sys.exit(1)
+        
         logs_df = parse_memtier_logs(logs_content)
 
         print("Generating report...")
         html_content = create_report(metrics_df, logs_df, cluster_id, suffix)
 
-        output_key = f"{output_prefix}results_{suffix}.html"
+        # Try to place the report alongside the metrics/logs under the timestamped directory.
+        # We look for a timestamp of the form YYYYMMDD-HHMMSS in the metrics S3 key.
+        timestamp_match = re.search(r'\d{8}-\d{6}', metrics_key or '')
+        if timestamp_match:
+            timestamp = timestamp_match.group(0)
+            output_key = f"{output_prefix}{timestamp}/results_{suffix}.html"
+        else:
+            # Fallback to previous behavior if no timestamp is found in the key.
+            output_key = f"{output_prefix}results_{suffix}.html"
+        
         print(f"Uploading report to s3://{output_bucket}/{output_key}")
 
         s3 = boto3.client('s3')

@@ -171,7 +171,7 @@ def handler(event, context):
             reporter_result = run_reporter_task(
                 cluster_id=cluster_id,
                 ecs_cluster=ecs_cluster,
-                metrics_key=metrics_key,
+                metrics_key=f"s3://{s3_bucket}/{metrics_key}",
                 logs_key=log_exports['loadgen'],
                 s3_bucket=s3_bucket,
                 s3_prefix=s3_prefix,
@@ -461,7 +461,12 @@ def run_reporter_task(cluster_id, ecs_cluster, metrics_key, logs_key, s3_bucket,
         startedBy='ShutdownLambda'
     )
 
-    task_arn = response['tasks'][0]['taskArn']
+    tasks = response.get('tasks', [])
+    if not tasks:
+        print(f"run_task did not return any tasks. Response failures: {response.get('failures')}")
+        return None
+
+    task_arn = tasks[0].get('taskArn')
     print(f"Reporter task launched: {task_arn}")
     return task_arn
 

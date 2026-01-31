@@ -278,12 +278,18 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
           aws_iam_role.ecs_task_execution_role.arn,
           aws_iam_role.ecs_task_role.arn
         ]
+        Condition = {
+          StringEquals = {
+            "iam:PassedToService" = "ecs-tasks.amazonaws.com"
+          }
+        }
       },
       {
         Effect = "Allow"
         Action = [
           "ecs:ListTasks",
-          "ecs:DescribeTasks"
+          "ecs:DescribeTasks",
+          "ecs:DescribeServices"
         ]
         Resource = "*"
       },
