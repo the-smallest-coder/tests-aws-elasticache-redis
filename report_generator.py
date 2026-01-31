@@ -21,7 +21,8 @@ def validate_csv_columns(df, csv_name):
         csv_name: name/path of the CSV file for error reporting
     
     Returns:
-        True if valid, False otherwise with error messages printed.
+        True if all required columns are present, False otherwise.
+        Prints error details to stdout when validation fails.
     """
     required_columns = ['Timestamp', 'Namespace', 'Stat', 'MetricName', 'Value', 'Dimensions']
     missing_columns = [col for col in required_columns if col not in df.columns]
