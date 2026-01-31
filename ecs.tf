@@ -165,7 +165,7 @@ resource "aws_ecs_task_definition" "report" {
       command = [
         "/bin/sh",
         "-c",
-        "set -e; pip install boto3 pandas plotly && python - << 'PY'\nimport boto3\nimport sys\n\ns3 = boto3.client('s3')\n\ntry:\n    s3.download_file('${var.metrics_export_s3_bucket}', 'scripts/report_generator.py', 'report_generator.py')\nexcept Exception as e:\n    print('Failed to download report_generator.py from S3 bucket ${var.metrics_export_s3_bucket} with key scripts/report_generator.py:', e, file=sys.stderr)\n    sys.exit(1)\nPY\npython report_generator.py"
+        "set -e; pip install boto3 pandas plotly && python - << 'PY'\nimport boto3\nimport sys\n\ns3 = boto3.client('s3')\n\ntry:\n    s3.download_file('${var.metrics_export_s3_bucket}', 'scripts/report_generator.py', 'report_generator.py')\nexcept Exception as e:\n    print(f'Failed to download report_generator.py from S3 bucket ${var.metrics_export_s3_bucket} with key scripts/report_generator.py: {e}', file=sys.stderr)\n    sys.exit(1)\nPY\npython report_generator.py"
       ]
 
       environment = [
