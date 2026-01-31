@@ -44,3 +44,22 @@ lambda/*.zip
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Binary files
+*.pyc
+*.pyo
+*.so
+*.dylib
+*.dll
+*.exe
+*.bin
+*.o
+*.a
+*.out
+*.class
+*.jar
+*.war
+*.ear
+*.lib
+*.obj
+*.pdb
