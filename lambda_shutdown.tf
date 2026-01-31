@@ -225,7 +225,7 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
           "logs:GetLogEvents",
           "logs:FilterLogEvents"
         ]
-        Resource = "*"
+        Resource = "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:*"
       },
       {
         Effect = "Allow"
@@ -266,14 +266,19 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
         Action = [
           "ecs:DescribeServices"
         ]
-        Resource = "*"
+        Resource = "arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:service/${local.loadgen_cluster_name}/*"
       },
       {
         Effect = "Allow"
         Action = [
           "ecs:RunTask"
         ]
-        Resource = "*"
+        Resource = "arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task-definition/${local.cluster_id}-report-gen:*"
+        Condition = {
+          ArnEquals = {
+            "ecs:cluster" = aws_ecs_cluster.loadgen.arn
+          }
+        }
       },
       {
         Effect = "Allow"
@@ -292,6 +297,11 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
           "ecs:DescribeTasks"
         ]
         Resource = "*"
+        Condition = {
+          ArnEquals = {
+            "ecs:cluster" = aws_ecs_cluster.loadgen.arn
+          }
+        }
       },
       {
         Effect = "Allow"
@@ -328,7 +338,7 @@ resource "aws_iam_role_policy" "lambda_shutdown_scheduler_policy" {
         Action = [
           "logs:CreateLogGroup"
         ]
-        Resource = "*"
+        Resource = "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:*"
       },
       {
         Effect = "Allow"
@@ -343,7 +353,7 @@ resource "aws_iam_role_policy" "lambda_shutdown_scheduler_policy" {
         Action = [
           "ecs:DescribeServices"
         ]
-        Resource = "*"
+        Resource = "arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:service/${local.loadgen_cluster_name}/*"
       },
       {
         Effect = "Allow"
@@ -377,7 +387,7 @@ resource "aws_iam_role_policy" "lambda_shutdown_verify_policy" {
         Action = [
           "logs:CreateLogGroup"
         ]
-        Resource = "*"
+        Resource = "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:*"
       },
       {
         Effect = "Allow"
@@ -392,7 +402,7 @@ resource "aws_iam_role_policy" "lambda_shutdown_verify_policy" {
         Action = [
           "ecs:DescribeServices"
         ]
-        Resource = "*"
+        Resource = "arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:service/${local.loadgen_cluster_name}/*"
       },
       {
         Effect = "Allow"

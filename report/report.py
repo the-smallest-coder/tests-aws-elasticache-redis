@@ -4,16 +4,30 @@ import csv
 import json
 import io
 import datetime
+import html
 from collections import defaultdict
 
 def parse_csv(content):
+    """Parse CSV content and validate required fields."""
     reader = csv.DictReader(io.StringIO(content))
     data = []
+    required_fields = {'MetricName', 'Stat', 'Dimensions', 'Timestamp', 'Value'}
+    
     for row in reader:
+        # Validate required fields exist
+        if not required_fields.issubset(row.keys()):
+            print(f"Warning: CSV row missing required fields. Expected: {required_fields}, Got: {set(row.keys())}")
+            continue
         data.append(row)
     return data
 
 def main():
+    # Validate required environment variables
+    required_env = ['S3_BUCKET', 'CLUSTER_ID', 'TIMESTAMP']
+    missing = [var for var in required_env if not os.environ.get(var)]
+    if missing:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+    
     s3_bucket = os.environ['S3_BUCKET']
     s3_prefix = os.environ.get('S3_PREFIX', 'exports/')
     cluster_id = os.environ['CLUSTER_ID']
@@ -32,12 +46,20 @@ def main():
     try:
         obj = s3.get_object(Bucket=s3_bucket, Key=metrics_key)
         metrics_data = parse_csv(obj['Body'].read().decode('utf-8'))
+    except s3.exceptions.NoSuchKey:
+        print(f"Warning: Metrics file not found: {metrics_key}")
+    except UnicodeDecodeError as e:
+        print(f"Error decoding metrics file: {e}")
     except Exception as e:
         print(f"Error reading metrics: {e}")
 
     try:
         obj = s3.get_object(Bucket=s3_bucket, Key=ecs_metrics_key)
         ecs_data = parse_csv(obj['Body'].read().decode('utf-8'))
+    except s3.exceptions.NoSuchKey:
+        print(f"Warning: ECS metrics file not found: {ecs_metrics_key}")
+    except UnicodeDecodeError as e:
+        print(f"Error decoding ECS metrics file: {e}")
     except Exception as e:
         print(f"Error reading ECS metrics: {e}")
 
@@ -60,7 +82,11 @@ def main():
             if row['MetricName'] == metric_name and row.get('Stat') == stat:
                 dim = row['Dimensions']
                 ts = row['Timestamp']
-                val = float(row['Value']) * scale
+                try:
+                    val = float(row['Value']) * scale
+                except (ValueError, TypeError) as e:
+                    print(f"Warning: Invalid value for {metric_name}: {row['Value']}")
+                    continue
                 grouped[dim].append({'x': ts, 'y': val})
 
         for dim, points in grouped.items():
@@ -89,6 +115,11 @@ def main():
     # 5. Hits/Misses
     process_series(metrics_data, 'CacheHits', 'Sum', 'hits', 'Hits')
     process_series(metrics_data, 'CacheMisses', 'Sum', 'misses', 'Misses')
+
+    # Validate we have some data to report
+    total_datasets = sum(len(chart['datasets']) for chart in charts.values())
+    if total_datasets == 0:
+        print("Warning: No data found to generate charts. Report will be empty.")
 
     # HTML Template
     html_template = """
@@ -132,7 +163,12 @@ def main():
                         title: {{ display: true, text: data.title }}
                     }},
                     scales: {{
-                        x: {{ type: 'time' }}
+                        x: {{ 
+                            type: 'time',
+                            time: {{
+                                parser: 'iso'
+                            }}
+                        }}
                     }}
                 }}
             }});
@@ -149,9 +185,10 @@ def main():
 </html>
     """
 
+    # Escape HTML to prevent XSS
     html_content = html_template.format(
-        cluster_id=cluster_id,
-        timestamp=timestamp,
+        cluster_id=html.escape(cluster_id),
+        timestamp=html.escape(timestamp),
         json_data=json.dumps(charts)
     )
 
