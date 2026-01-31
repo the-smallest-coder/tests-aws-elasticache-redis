@@ -161,7 +161,10 @@ resource "aws_ecs_task_definition" "report" {
       image     = "python:3.11-slim"
       essential = true
 
-      # Entry script wrapper: install deps -> download script -> run script
+      # Custom Execution Control:
+      # This command explicitly overrides the container default to inject the report generation logic.
+      # We install dependencies, fetch the script from S3, and execute it, maintaining full control
+      # over the runtime environment without requiring a custom Docker image build.
       command = [
         "/bin/sh",
         "-c",
