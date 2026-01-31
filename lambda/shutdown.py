@@ -177,7 +177,12 @@ def handler(event, context):
             # Lambda doesn't know the subnets/SGs directly unless passed.
             # However, we can describe the loadgen service to copy its configuration.
             service_desc = ecs.describe_services(cluster=ecs_cluster, services=[ecs_service])
-            network_config = service_desc['services'][0].get('networkConfiguration')
+            services = service_desc.get('services', [])
+            if services:
+                network_config = services[0].get('networkConfiguration')
+            else:
+                print("No ECS services returned when describing service for report task")
+                network_config = None
 
             if network_config:
                 ecs.run_task(
