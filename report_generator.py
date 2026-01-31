@@ -302,6 +302,8 @@ def main():
     output_key = f"{PREFIX}{TIMESTAMP}/results_{TIMESTAMP}.html"
     print(f"Uploading report to s3://{BUCKET}/{output_key}")
 
+    # Note: This upload does not grant public access. No public HTTPS URL is expected.
+    # The object is private by default and requires authenticated access (e.g., via Console or Presigned URL).
     s3.put_object(
         Bucket=BUCKET,
         Key=output_key,

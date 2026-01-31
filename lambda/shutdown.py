@@ -196,7 +196,8 @@ def handler(event, context):
                         ]
                     }
                 )
-                report_link = f"https://{s3_bucket}.s3.amazonaws.com/{s3_prefix}{timestamp}/results_{timestamp}.html"
+                # Using S3 URI as public HTTPS access is not expected
+                report_link = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/results_{timestamp}.html"
                 results['report_generator_triggered'] = True
             else:
                 print("Could not determine network configuration for report task")
