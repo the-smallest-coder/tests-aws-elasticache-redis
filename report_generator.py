@@ -15,7 +15,13 @@ def get_env_var(name):
 def validate_csv_columns(df, csv_name):
     """
     Validates that the DataFrame has all required columns for CloudWatch metrics.
-    Returns True if valid, False otherwise with error messages printed.
+    
+    Args:
+        df: pandas DataFrame to validate
+        csv_name: name/path of the CSV file for error reporting
+    
+    Returns:
+        True if valid, False otherwise with error messages printed.
     """
     required_columns = ['Timestamp', 'Namespace', 'Stat', 'MetricName', 'Value', 'Dimensions']
     missing_columns = [col for col in required_columns if col not in df.columns]
@@ -195,11 +201,13 @@ def main():
     print(f"Reading metrics from s3://{BUCKET}/{metrics_key}")
     df_ec = read_csv_from_s3(s3, BUCKET, metrics_key)
     if df_ec is not None and not validate_csv_columns(df_ec, metrics_key):
+        print("Validation failed. Exiting.")
         sys.exit(1)
 
     print(f"Reading ECS metrics from s3://{BUCKET}/{ecs_metrics_key}")
     df_ecs = read_csv_from_s3(s3, BUCKET, ecs_metrics_key)
     if df_ecs is not None and not validate_csv_columns(df_ecs, ecs_metrics_key):
+        print("Validation failed. Exiting.")
         sys.exit(1)
 
     if df_ec is None and df_ecs is None:
