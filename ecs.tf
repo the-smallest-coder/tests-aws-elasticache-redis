@@ -150,6 +150,8 @@ resource "aws_ecs_task_definition" "report" {
   family                   = "${local.cluster_id}-report"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
+  # Resource allocation: Starting with minimal resources (256 CPU, 512 MB memory).
+  # These will be increased only if core dumps or task exits occur during execution.
   cpu                      = 256
   memory                   = 512
   execution_role_arn       = aws_iam_role.report_task_execution_role.arn
