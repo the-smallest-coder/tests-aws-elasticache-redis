@@ -46,8 +46,6 @@ __pycache__/
 *$py.class
 
 # Binary files
-*.pyc
-*.pyo
 *.so
 *.dylib
 *.dll
