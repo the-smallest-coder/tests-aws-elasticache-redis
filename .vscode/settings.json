@@ -1,0 +1,6 @@
+{
+  "chat.tools.terminal.autoApprove": {
+    ".\\.venv\\Scripts\\pip": true,
+    ".\\.venv\\Scripts\\python": true
+  }
+}

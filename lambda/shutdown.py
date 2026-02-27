@@ -172,6 +172,7 @@ def handler(event, context):
                 cluster_id=cluster_id,
                 ecs_cluster=ecs_cluster,
                 metrics_key=f"s3://{s3_bucket}/{metrics_key}",
+                ecs_metrics_key=f"s3://{s3_bucket}/{ecs_metrics_key}",
                 logs_key=log_exports['loadgen'],
                 s3_bucket=s3_bucket,
                 s3_prefix=s3_prefix,
@@ -522,7 +523,7 @@ def export_metric_sources_to_s3(sources, bucket, key, start_time, end_time):
     return f"s3://{bucket}/{key}"
 
 
-def run_reporter_task(cluster_id, ecs_cluster, metrics_key, logs_key, s3_bucket, s3_prefix, timestamp):
+def run_reporter_task(cluster_id, ecs_cluster, metrics_key, ecs_metrics_key, logs_key, s3_bucket, s3_prefix, timestamp):
     """Launch ECS task to generate HTML report."""
 
     task_definition = os.environ.get('REPORTER_TASK_DEFINITION')
@@ -568,11 +569,13 @@ def run_reporter_task(cluster_id, ecs_cluster, metrics_key, logs_key, s3_bucket,
                     'name': 'reporter',
                     'environment': [
                         {'name': 'METRICS_CSV', 'value': metrics_key},
+                        {'name': 'ECS_METRICS_CSV', 'value': ecs_metrics_key or ''},
                         {'name': 'LOGS_TXT', 'value': logs_key},
                         {'name': 'OUTPUT_BUCKET', 'value': s3_bucket},
                         {'name': 'OUTPUT_PREFIX', 'value': s3_prefix},
                         {'name': 'SUFFIX', 'value': suffix},
-                        {'name': 'CLUSTER_ID', 'value': cluster_id}
+                        {'name': 'CLUSTER_ID', 'value': cluster_id},
+                        {'name': 'CLUSTER_MODE', 'value': os.environ.get('CLUSTER_MODE', 'false')}
                     ]
                 }
             ]

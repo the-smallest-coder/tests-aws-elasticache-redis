@@ -86,6 +86,7 @@ resource "aws_lambda_function" "shutdown_scheduler" {
       ENGINE_VERSION        = var.engine_version
       NODE_TYPE             = var.node_type
       NODE_COUNT            = tostring(var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes)
+      CLUSTER_MODE          = tostring(var.cluster_mode_enabled)
       LOADGEN_TASK_COUNT    = tostring(var.loadgen_task_count)
       AWS_REGION_NAME       = var.aws_region
     }
