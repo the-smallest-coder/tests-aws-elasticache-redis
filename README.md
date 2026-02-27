@@ -180,3 +180,48 @@ notification_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/aws
 - **Test Complete**: After shutdown and export operations finish
 - **Verification Warning**: If resources are still running 15 minutes after scheduled shutdown
 - **Verification OK**: If all resources successfully shut down
+
+---
+
+## 🛠️ Helper Scripts
+
+Bash scripts in `scripts/` for monitoring and retrieving results. Run from WSL or any bash shell with AWS CLI configured.
+
+### Check Status
+
+Shows current test phase, resource states, and time remaining:
+
+```bash
+./scripts/check_status.sh              # quick status
+./scripts/check_status.sh --detailed   # verbose (per-node, per-task details)
+```
+
+Displays:
+- ElastiCache cluster status
+- ECS load generator tasks (count, per-task status, elapsed time)
+- Reporter task status
+- Shutdown schedule with countdown
+- S3 results summary (file counts by type)
+- Overall phase: STARTING → RUNNING → SHUTTING DOWN → CLEANUP → COMPLETE
+
+### Download Results
+
+Downloads exported metrics, logs, and HTML reports to a local folder:
+
+```bash
+./scripts/download_results.sh                          # download everything to ./results/
+./scripts/download_results.sh --reports-only            # just HTML reports
+./scripts/download_results.sh --latest                  # most recent run only
+./scripts/download_results.sh --output-dir ./my-results # custom destination
+```
+
+Options can be combined:
+
+```bash
+./scripts/download_results.sh --latest --reports-only
+```
+
+### Requirements
+
+- **bash**, **jq**, **AWS CLI** configured with access to the S3 bucket
+- Run from the project root (scripts read config via `terraform output`)
