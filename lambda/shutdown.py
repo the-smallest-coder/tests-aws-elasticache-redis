@@ -94,6 +94,20 @@ def handler(event, context):
         'elasticache_stopped': False
     }
 
+    # Describe replication group NOW, before we initiate deletion, so we have
+    # the full member cluster list available for metric export regardless of
+    # whether describe_replication_groups races with the delete call later.
+    member_clusters = []
+    try:
+        rg_response = elasticache.describe_replication_groups(
+            ReplicationGroupId=elasticache_id
+        )
+        for group in rg_response.get('ReplicationGroups', []):
+            member_clusters = group.get('MemberClusters', [])
+        print(f"Pre-shutdown: found member clusters {member_clusters}")
+    except Exception as e:
+        print(f"Pre-shutdown describe failed (will retry inside export): {e}")
+
     try:
         try:
             ecs.update_service(
@@ -125,7 +139,8 @@ def handler(event, context):
 
         metrics_key = f"{s3_prefix}{timestamp}/metrics/{cluster_id}.csv"
         results['metrics_export'] = export_elasticache_metrics_to_s3(
-            elasticache_id, s3_bucket, metrics_key, start_time, end_time
+            elasticache_id, s3_bucket, metrics_key, start_time, end_time,
+            member_clusters=member_clusters
         )
 
         ecs_metrics_key = f"{s3_prefix}{timestamp}/metrics/{cluster_id}-ecs.csv"
@@ -399,9 +414,18 @@ Review status above for any remaining resources.
     return True
 
 
-def export_elasticache_metrics_to_s3(replication_group_id, bucket, key, start_time, end_time):
-    """Export ElastiCache CloudWatch metrics to S3 as CSV."""
+def export_elasticache_metrics_to_s3(replication_group_id, bucket, key, start_time, end_time,
+                                      member_clusters=None):
+    """Export all ElastiCache CloudWatch metrics to S3 as CSV.
 
+    Covers three dimension granularities published by ElastiCache:
+      1. ReplicationGroupId only          (e.g. DatabaseMemoryUsage*)
+      2. ReplicationGroupId + NodeGroupId (sharded variants)
+      3. CacheClusterId only              (e.g. EngineCPUUtilization)
+      4. CacheClusterId + NodeGroupId     (node-level variants)
+    """
+
+    # -- Replication-group level sources --
     sources = [
         {
             'namespace': 'AWS/ElastiCache',
@@ -409,19 +433,26 @@ def export_elasticache_metrics_to_s3(replication_group_id, bucket, key, start_ti
         }
     ]
 
-    try:
-        response = elasticache.describe_replication_groups(
-            ReplicationGroupId=replication_group_id
-        )
-        for group in response.get('ReplicationGroups', []):
-            for cluster_id in group.get('MemberClusters', []):
-                sources.append({
-                    'namespace': 'AWS/ElastiCache',
-                    'dimensions': [{'Name': 'CacheClusterId', 'Value': cluster_id}]
-                })
-    except Exception as e:
-        print(f"Error describing replication group {replication_group_id}: {e}")
+    # -- Cluster-level sources; use pre-fetched list when available --
+    if not member_clusters:
+        try:
+            response = elasticache.describe_replication_groups(
+                ReplicationGroupId=replication_group_id
+            )
+            for group in response.get('ReplicationGroups', []):
+                member_clusters = group.get('MemberClusters', [])
+        except Exception as e:
+            print(f"Error describing replication group {replication_group_id}: {e}")
+            member_clusters = []
 
+    for cluster_id in member_clusters:
+        # CacheClusterId only — catches single-dim metrics (EngineCPUUtilization, etc.)
+        sources.append({
+            'namespace': 'AWS/ElastiCache',
+            'dimensions': [{'Name': 'CacheClusterId', 'Value': cluster_id}]
+        })
+
+    print(f"ElastiCache metric sources: {[s['dimensions'] for s in sources]}")
     return export_metric_sources_to_s3(sources, bucket, key, start_time, end_time)
 
 
