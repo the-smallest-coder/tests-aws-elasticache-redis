@@ -1,0 +1,58 @@
+name: Offline Harness
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name: Terraform – fmt / init / validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1"
+
+      # Formatting check – fails if any .tf file is not canonical
+      - name: terraform fmt
+        id: fmt
+        run: terraform fmt -check -recursive
+        working-directory: ${{ github.workspace }}
+
+      # Init without connecting to any remote backend
+      # Providers are downloaded from the public registry – no AWS credentials needed
+      - name: terraform init
+        id: init
+        run: terraform init -backend=false -input=false
+        working-directory: ${{ github.workspace }}
+
+      # Static analysis – checks types, references, required arguments
+      - name: terraform validate
+        id: validate
+        run: terraform validate
+        working-directory: ${{ github.workspace }}
+
+      # Write a human-readable step summary
+      - name: Step summary
+        if: always()
+        run: |
+          echo "## Offline Harness Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          fmt_status="${{ steps.fmt.outcome }}"
+          init_status="${{ steps.init.outcome }}"
+          validate_status="${{ steps.validate.outcome }}"
+          echo "| \`terraform fmt -check\` | ${fmt_status} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`terraform init -backend=false\` | ${init_status} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`terraform validate\` | ${validate_status} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "> **No AWS credentials were used. No real infrastructure was touched.**" >> "$GITHUB_STEP_SUMMARY"
