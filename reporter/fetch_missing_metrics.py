@@ -61,7 +61,7 @@ def main():
             continue
 
         for dp in sorted(response.get('Datapoints', []), key=lambda d: d['Timestamp']):
-            ts   = dp['Timestamp'].strftime('%Y-%m-%dT%H:%M:%S+00:00')
+            ts   = dp['Timestamp'].astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S+00:00')
             unit = dp.get('Unit', 'None')
             for stat in STATISTICS:
                 if stat in dp:
