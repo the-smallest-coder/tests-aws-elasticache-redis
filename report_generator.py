@@ -101,7 +101,7 @@ def generate_html_report(cluster_id, timestamp, summary_stats, throughput_div, c
             padding: 20px;
         }}
         .container {{
-            max_width: 1200px;
+            max-width: 1200px;
             margin: 0 auto;
         }}
         header {{
