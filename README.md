@@ -40,9 +40,10 @@ terraform destroy
 ## 🎯 What It Does
 
 1. **Provisions** ElastiCache (Redis/Valkey) + ECS load generators
-2. **Runs** memtier_benchmark for configurable duration (default: 1 hour)
-3. **Exports** metrics (CSV) + logs (text) to S3
-4. **Stops** ECS and ElastiCache automatically
+2. **Uploads** `cluster_details.json` to S3 immediately after apply — full configuration snapshot before the test starts
+3. **Runs** memtier_benchmark for configurable duration (default: 1 hour)
+4. **Exports** metrics (CSV) + logs (text) to S3 in the same run folder
+5. **Stops** ECS and ElastiCache automatically
 
 ---
 
@@ -104,19 +105,36 @@ flowchart LR
         T2 -->|stop| T4[ECS Service]
         T2 -->|stop| T5[ElastiCache]
     end
+
+    subgraph Details["terraform apply (post-create)"]
+        D1[Terraform] -->|cluster_details.json| D2[S3 run folder]
+    end
     
-    Start --> Run --> Stop
+    Start --> Details --> Run --> Stop
 ```
 
 ---
 
 ## 📦 Exports
 
+All artefacts share a single deterministic run folder (`YYYYMMDD-HHmmss`) fixed at `terraform apply` time.
+
 | Data | Format | Path |
 |------|--------|------|
-| ElastiCache Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster}.csv` |
-| ECS Task Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster}-ecs.csv` |
-| Logs | Text | `s3://{bucket}/exports/{timestamp}/logs/{cluster}.txt` |
+| **Cluster Details** | JSON | `s3://{bucket}/{prefix}{run_folder}/cluster_details.json` |
+| ElastiCache Metrics | CSV | `s3://{bucket}/{prefix}{run_folder}/metrics/{cluster}.csv` |
+| ECS Task Metrics | CSV | `s3://{bucket}/{prefix}{run_folder}/metrics/{cluster}-ecs.csv` |
+| Logs (memtier) | Text | `s3://{bucket}/{prefix}{run_folder}/logs/{cluster}.txt` |
+| Logs (ElastiCache) | Text | `s3://{bucket}/{prefix}{run_folder}/logs/elasticache/{cluster}.txt` |
+| Logs (Container Insights) | Text | `s3://{bucket}/{prefix}{run_folder}/logs/container-insights/{cluster}.txt` |
+
+> `run_folder` is also exposed as `terraform output run_folder` while the stack is live.
+
+### cluster_details.json
+
+Uploaded to S3 by Terraform **immediately after the cluster is created**, before the load test begins. Contains a complete snapshot of everything that could explain a performance difference between runs: ElastiCache engine/node/encryption/parameter settings, resolved live endpoints, full memtier configuration (including the computed `key_maximum`), ECS task resources, and the node memory reference table.
+
+Because the cluster is destroyed after each test, this file is the only permanent record of the live resource configuration.
 
 ---
 
@@ -128,10 +146,24 @@ Key variables in `terraform.tfvars`:
 |----------|---------|-------------|
 | `test_duration_minutes` | 60 | Minutes before auto-shutdown |
 | `loadgen_task_count` | 1 | ECS tasks (scale factor) |
-| `node_type` | cache.t4g.micro | ElastiCache instance |
-| `engine_type` | redis | redis or valkey |
+| `node_type` | `cache.t4g.micro` | ElastiCache instance type |
+| `engine_type` | `redis` | `redis` or `valkey` |
+| `loadgen_memtier_key_maximum` | `0` | Key-space upper bound. `0` = auto-compute from node memory and `loadgen_memtier_data_size` (fills cache to 85% capacity) |
+| `loadgen_memtier_data_size` | `32` | Value size in bytes for SET operations |
+| `loadgen_memtier_ratio` | `1:10` | SET:GET ratio |
+| `loadgen_memtier_key_pattern` | `R:R` | Key access pattern (`R:R` random, `S:S` sequential, `G:G` gaussian) |
 
 See `terraform.tfvars.example` for all options.
+
+### Auto key_maximum
+
+When `loadgen_memtier_key_maximum = 0` (the default), Terraform computes the key-space from the target node's usable memory:
+
+```
+key_maximum = floor(node_memory_bytes × 0.85 / (data_size + 70))
+```
+
+The 70-byte overhead accounts for Redis key and object metadata. This ensures the cache is warm (≈85% full) and reads hit existing keys rather than producing cache misses. The computed value is recorded in `cluster_details.json` alongside `key_maximum_auto: true` so you always know exactly what was used.
 
 ---
 
