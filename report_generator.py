@@ -255,7 +255,7 @@ def main():
 
             # Update max ops for summary
             current_max = pivoted['OpsSec'].max()
-            if current_max > max_ops:
+            if pd.notna(current_max) and current_max > max_ops:
                 max_ops = current_max
 
             fig_throughput.add_trace(
