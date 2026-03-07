@@ -41,7 +41,7 @@ def read_csv_from_s3(s3_client, bucket, key):
         return pd.read_csv(obj['Body'])
     except Exception as e:
         print(f"Error reading {key} from {bucket}: {e}")
-        return None
+        sys.exit(1)
 
 def parse_dimensions(dim_str):
     """
