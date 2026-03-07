@@ -58,7 +58,7 @@ def parse_dimensions(dim_str):
             if '=' in part:
                 k, v = part.split('=', 1)
                 dims[k] = v
-    except:
+    except Exception:
         pass
 
     if 'CacheClusterId' in dims:
