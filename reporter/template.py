@@ -99,8 +99,9 @@ body {
   border-radius: 12px;
   white-space: nowrap;
 }
-.group-badge.memtier { background: #e8f0fe; color: #1a56db; }
-.group-badge.infra   { background: #e6f4ea; color: #188038; }
+.group-badge.memtier   { background: #e8f0fe; color: #1a56db; }
+.group-badge.infra     { background: #e6f4ea; color: #188038; }
+.group-badge.deepdive  { background: #f3e5f5; color: #6a1b9a; }
 .group-header::after {
   content: '';
   flex: 1;
@@ -177,6 +178,7 @@ def render_html(
     cards_html,
     chart_memtier_html,
     chart_infra_html,
+    chart_deep_dive_html,
 ):
     """Assemble the full standalone HTML report page."""
     meta_parts = [f"{id_label}: {cluster_id}", f"Run: {suffix}"]
@@ -219,6 +221,14 @@ def render_html(
       <span class="group-badge infra">full CloudWatch window</span>
     </div>
     <div class="chart-wrap">{chart_infra_html}</div>
+  </div>
+
+  <div class="chart-group">
+    <div class="group-header">
+      <h2>ElastiCache Deep-Dive</h2>
+      <span class="group-badge deepdive">full CloudWatch window</span>
+    </div>
+    <div class="chart-wrap">{chart_deep_dive_html}</div>
   </div>
 </div>
 

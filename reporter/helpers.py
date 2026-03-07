@@ -37,6 +37,18 @@ C_NET_TX_CACHE = '#00695c'
 C_ECS_MEM      = '#f57c00'
 MEM_COLORS     = ['#9467bd', '#ff7f0e', '#8c564b', '#e377c2']
 
+# Deep-dive figure colours
+C_CREDIT_BAL   = '#27ae60'
+C_CREDIT_USE   = '#e74c3c'
+C_LAT_GET      = '#2196f3'
+C_LAT_SET      = '#ff5722'
+C_LAT_STR      = '#9c27b0'
+C_THROTTLE_IN  = '#f44336'
+C_THROTTLE_OUT = '#b71c1c'
+C_THROTTLE_PPS = '#ff9800'
+C_CURR_CONN    = '#00838f'
+C_MEM_FRAG     = '#795548'
+
 
 # ------------------------------------------------------------------ #
 #  I/O helper                                                          #

@@ -9,6 +9,10 @@ from helpers import (
     C_THROUGHPUT, C_LATENCY, C_OOM_BAR, C_EVICTION_CW, C_HIT_RATE,
     C_CPU_ECS, C_ENGINE_CPU, C_NET_TX_ECS, C_NET_TX_CACHE, C_ECS_MEM,
     MEM_COLORS,
+    C_CREDIT_BAL, C_CREDIT_USE,
+    C_LAT_GET, C_LAT_SET, C_LAT_STR,
+    C_THROTTLE_IN, C_THROTTLE_OUT, C_THROTTLE_PPS,
+    C_CURR_CONN, C_MEM_FRAG,
     metric_filter, shorten_dim, select_mem_dims,
 )
 
@@ -274,11 +278,169 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config):
     fig.update_yaxes(title_text="%",      row=4, col=1)
     fig.update_xaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
-    for r in range(1, 5):
-        fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.03), row=r, col=1)
-
     fig.update_layout(
         **LAYOUT_BASE, height=1300,
+        legend =dict(**LEGEND_H, x=0.5, y=0.83),
+        legend2=dict(**LEGEND_H, x=0.5, y=0.56),
+        legend3=dict(**LEGEND_H, x=0.5, y=0.27),
+        legend4=dict(**LEGEND_H, x=0.5, y=-0.03),
+    )
+    return fig
+
+
+# ------------------------------------------------------------------ #
+#  GROUP 3 — ElastiCache Deep-Dive figure                              #
+# ------------------------------------------------------------------ #
+
+def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None):
+    """Build a 4-row deep-dive figure for configuration comparison.
+
+    Rows: CPU Credits | Command Latency | Network Throttling | Connections & Fragmentation.
+    """
+    config = config or {}
+
+    fig = make_subplots(
+        rows=4, cols=1,
+        shared_xaxes=False,
+        vertical_spacing=0.14,
+        specs=[
+            [{"secondary_y": True}],
+            [{"secondary_y": False}],
+            [{"secondary_y": False}],
+            [{"secondary_y": True}],
+        ],
+        subplot_titles=(
+            "CPU Credit Balance & Usage",
+            "Server-Side Command Latency (\u00b5s avg)",
+            "Network Throttling Events / min",
+            "Current Connections & Memory Fragmentation Ratio",
+        ),
+        row_heights=[0.25, 0.25, 0.25, 0.25],
+    )
+
+    if metrics_df.empty:
+        fig.add_annotation(text="No ElastiCache metrics available",
+                           xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+        fig.update_layout(**LAYOUT_BASE, height=1100)
+        return fig
+
+    # ---- Row 1: CPU Credits ----
+    bal_df = metric_filter(metrics_df, 'CPUCreditBalance', 'Average', 'CacheClusterId')
+    use_df = metric_filter(metrics_df, 'CPUCreditUsage',  'Average', 'CacheClusterId')
+    if not bal_df.empty:
+        bal_agg = bal_df.groupby('Timestamp')['Value'].mean().reset_index()
+        fig.add_trace(go.Scatter(
+            x=bal_agg['Timestamp'], y=bal_agg['Value'],
+            name="Credit Balance", mode='lines',
+            line=dict(**LINE_OPTS, color=C_CREDIT_BAL),
+            legend="legend",
+            hovertemplate="%{x|%H:%M}<br><b>%{y:.1f} credits</b><extra></extra>"
+        ), row=1, col=1, secondary_y=False)
+    if not use_df.empty:
+        use_agg = use_df.groupby('Timestamp')['Value'].mean().reset_index()
+        fig.add_trace(go.Scatter(
+            x=use_agg['Timestamp'], y=use_agg['Value'],
+            name="Credit Usage", mode='lines',
+            line=dict(**LINE_OPTS, color=C_CREDIT_USE, dash='dot'),
+            legend="legend",
+            hovertemplate="%{x|%H:%M}<br><b>%{y:.3f} vCPU·min</b><extra></extra>"
+        ), row=1, col=1, secondary_y=True)
+    if bal_df.empty and use_df.empty:
+        fig.add_annotation(text="No CPU credit data (non-burstable instance?)",
+                           xref="paper", yref="paper", x=0.5, y=0.875, showarrow=False)
+
+    # ---- Row 2: Command Latency ----
+    get_df = metric_filter(metrics_df, 'GetTypeCmdsLatency',    'Average', 'CacheClusterId')
+    set_df = metric_filter(metrics_df, 'SetTypeCmdsLatency',    'Average', 'CacheClusterId')
+    str_df = metric_filter(metrics_df, 'StringBasedCmdsLatency','Average', 'CacheClusterId')
+    lat_shown = False
+    for mdf, label, color, dash in [
+        (get_df, "GET latency",    C_LAT_GET, 'solid'),
+        (set_df, "SET latency",    C_LAT_SET, 'dot'),
+        (str_df, "String latency", C_LAT_STR, 'dash'),
+    ]:
+        if not mdf.empty:
+            agg = mdf.groupby('Timestamp')['Value'].mean().reset_index()
+            fig.add_trace(go.Scatter(
+                x=agg['Timestamp'], y=agg['Value'],
+                name=label, mode='lines',
+                line=dict(**LINE_OPTS, color=color, dash=dash),
+                legend="legend2",
+                hovertemplate="%{x|%H:%M}<br><b>%{y:.1f} \u00b5s</b><extra></extra>"
+            ), row=2, col=1)
+            lat_shown = True
+    if not lat_shown:
+        fig.add_annotation(text="No command latency data",
+                           xref="paper", yref="paper", x=0.5, y=0.625, showarrow=False)
+
+    # ---- Row 3: Network Throttling ----
+    bw_in_df  = metric_filter(metrics_df, 'NetworkBandwidthInAllowanceExceeded',      'Sum', 'CacheClusterId')
+    bw_out_df = metric_filter(metrics_df, 'NetworkBandwidthOutAllowanceExceeded',     'Sum', 'CacheClusterId')
+    pps_df    = metric_filter(metrics_df, 'NetworkPacketsPerSecondAllowanceExceeded', 'Sum', 'CacheClusterId')
+    throttle_shown = False
+    for mdf, label, color in [
+        (bw_in_df,  "BW In exceeded",  C_THROTTLE_IN),
+        (bw_out_df, "BW Out exceeded", C_THROTTLE_OUT),
+        (pps_df,    "PPS exceeded",    C_THROTTLE_PPS),
+    ]:
+        if not mdf.empty:
+            agg = mdf.groupby('Timestamp')['Value'].sum().reset_index()
+            if agg['Value'].sum() > 0:
+                fig.add_trace(go.Scatter(
+                    x=agg['Timestamp'], y=agg['Value'],
+                    name=label, mode='lines',
+                    line=dict(**LINE_OPTS, color=color),
+                    legend="legend3",
+                    hovertemplate="%{x|%H:%M}<br><b>%{y:,}</b><extra></extra>"
+                ), row=3, col=1)
+                throttle_shown = True
+    if not throttle_shown:
+        fig.add_annotation(text="No network throttling detected",
+                           xref="paper", yref="paper", x=0.5, y=0.375, showarrow=False)
+
+    # ---- Row 4: Connections & Memory Fragmentation Ratio ----
+    conn_df = metric_filter(metrics_df, 'CurrConnections',         'Average', 'CacheClusterId')
+    frag_df = metric_filter(metrics_df, 'MemoryFragmentationRatio','Average', 'CacheClusterId')
+    if not conn_df.empty:
+        conn_agg = conn_df.groupby('Timestamp')['Value'].mean().reset_index()
+        fig.add_trace(go.Scatter(
+            x=conn_agg['Timestamp'], y=conn_agg['Value'],
+            name="Connections", mode='lines',
+            line=dict(**LINE_OPTS, color=C_CURR_CONN),
+            legend="legend4",
+            hovertemplate="%{x|%H:%M}<br><b>%{y:,.0f} conns</b><extra></extra>"
+        ), row=4, col=1, secondary_y=False)
+    if not frag_df.empty:
+        frag_agg = frag_df.groupby('Timestamp')['Value'].mean().reset_index()
+        fig.add_trace(go.Scatter(
+            x=frag_agg['Timestamp'], y=frag_agg['Value'],
+            name="Frag Ratio", mode='lines',
+            line=dict(**LINE_OPTS, color=C_MEM_FRAG, dash='dot'),
+            legend="legend4",
+            hovertemplate="%{x|%H:%M}<br><b>%{y:.2f}x</b><extra></extra>"
+        ), row=4, col=1, secondary_y=True)
+    if conn_df.empty and frag_df.empty:
+        fig.add_annotation(text="No connection/fragmentation data",
+                           xref="paper", yref="paper", x=0.5, y=0.125, showarrow=False)
+
+    # ---- Axes styling ----
+    fig.update_yaxes(title_text="credits",  row=1, col=1, secondary_y=False,
+                     title_font=dict(color=C_CREDIT_BAL), tickfont=dict(color=C_CREDIT_BAL))
+    fig.update_yaxes(title_text="vCPU\u00b7min", row=1, col=1, secondary_y=True,
+                     title_font=dict(color=C_CREDIT_USE), tickfont=dict(color=C_CREDIT_USE),
+                     showgrid=False)
+    fig.update_yaxes(title_text="\u00b5s",      row=2, col=1)
+    fig.update_yaxes(title_text="events",   row=3, col=1)
+    fig.update_yaxes(title_text="conns",    row=4, col=1, secondary_y=False,
+                     title_font=dict(color=C_CURR_CONN), tickfont=dict(color=C_CURR_CONN))
+    fig.update_yaxes(title_text="ratio",    row=4, col=1, secondary_y=True,
+                     title_font=dict(color=C_MEM_FRAG),  tickfont=dict(color=C_MEM_FRAG),
+                     showgrid=False)
+    fig.update_xaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
+
+    fig.update_layout(
+        **LAYOUT_BASE, height=1100,
         legend =dict(**LEGEND_H, x=0.5, y=0.83),
         legend2=dict(**LEGEND_H, x=0.5, y=0.56),
         legend3=dict(**LEGEND_H, x=0.5, y=0.27),

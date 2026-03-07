@@ -12,6 +12,7 @@ All flags fall back to environment variables for ECS/Fargate mode.
 """
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -20,9 +21,10 @@ import pandas as pd
 
 from helpers import read_file_content, resample_logs
 from parsers import parse_memtier_logs, parse_memtier_extra_stats, parse_metrics_csv
-from charts import build_memtier_figure, build_infra_figure
+from charts import build_memtier_figure, build_infra_figure, build_elasticache_deep_dive_figure
 from cards import header_pills, stat_cards_html
 from template import render_html
+from summary import build_summary
 
 
 # ------------------------------------------------------------------ #
@@ -51,9 +53,11 @@ def create_report(metrics_df, logs_df, cluster_id, suffix,
     # Build chart figures
     fig_m = build_memtier_figure(logs_resampled, oom_df, metrics_df, x_min, x_max)
     fig_i = build_infra_figure(ecs_df, metrics_df, cluster_id, config)
+    fig_d = build_elasticache_deep_dive_figure(metrics_df, cluster_id, config)
 
-    chart_memtier = fig_m.to_html(include_plotlyjs='cdn', full_html=False)
-    chart_infra = fig_i.to_html(include_plotlyjs=False, full_html=False)
+    chart_memtier    = fig_m.to_html(include_plotlyjs='cdn', full_html=False)
+    chart_infra      = fig_i.to_html(include_plotlyjs=False, full_html=False)
+    chart_deep_dive  = fig_d.to_html(include_plotlyjs=False, full_html=False)
 
     # Compute time range string from all data sources
     time_range = _compute_time_range(logs_df, metrics_df, ecs_df)
@@ -61,7 +65,10 @@ def create_report(metrics_df, logs_df, cluster_id, suffix,
     cluster_mode = str(config.get('cluster_mode', 'false')).lower() == 'true'
     id_label = 'Cluster' if cluster_mode else 'Replication Group'
 
-    return render_html(
+    summary = build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, time_range)
+    summary_json = json.dumps(summary, indent=2, default=str)
+
+    html = render_html(
         cluster_id=cluster_id,
         suffix=suffix,
         id_label=id_label,
@@ -70,7 +77,9 @@ def create_report(metrics_df, logs_df, cluster_id, suffix,
         cards_html=stat_cards_html(logs_df, metrics_df, ecs_df, extra_stats, config),
         chart_memtier_html=chart_memtier,
         chart_infra_html=chart_infra,
+        chart_deep_dive_html=chart_deep_dive,
     )
+    return html, summary_json
 
 
 def _compute_time_range(logs_df, metrics_df, ecs_df):
@@ -194,7 +203,7 @@ def main():
             'node_count': args.node_count,
             'cluster_mode': args.cluster_mode,
         }
-        html_content = create_report(
+        html_content, summary_json = create_report(
             metrics_df, logs_df, args.cluster_id, args.suffix,
             ecs_metrics_df, config, extra_stats=extra_stats,
         )
@@ -205,22 +214,38 @@ def main():
             with open(args.output, 'w', encoding='utf-8') as f:
                 f.write(html_content)
             print(f"Report written to {args.output}")
+
+            json_path = re.sub(r'\.html$', '.json', args.output)
+            if json_path == args.output:
+                json_path = args.output + '.json'
+            with open(json_path, 'w', encoding='utf-8') as f:
+                f.write(summary_json)
+            print(f"Summary JSON written to {json_path}")
         else:
             import boto3
             timestamp_match = re.search(r'\d{8}-\d{6}', args.metrics_csv or '')
             if timestamp_match:
                 timestamp = timestamp_match.group(0)
-                output_key = f"{args.output_prefix}{timestamp}/results_{args.suffix}.html"
+                output_key      = f"{args.output_prefix}{timestamp}/results_{args.suffix}.html"
+                output_json_key = f"{args.output_prefix}{timestamp}/results_{args.suffix}.json"
             else:
-                output_key = f"{args.output_prefix}results_{args.suffix}.html"
+                output_key      = f"{args.output_prefix}results_{args.suffix}.html"
+                output_json_key = f"{args.output_prefix}results_{args.suffix}.json"
 
-            print(f"Uploading report to s3://{args.output_bucket}/{output_key}")
             s3 = boto3.client('s3')
+            print(f"Uploading report to s3://{args.output_bucket}/{output_key}")
             s3.put_object(
                 Bucket=args.output_bucket,
                 Key=output_key,
                 Body=html_content,
                 ContentType='text/html',
+            )
+            print(f"Uploading summary JSON to s3://{args.output_bucket}/{output_json_key}")
+            s3.put_object(
+                Bucket=args.output_bucket,
+                Key=output_json_key,
+                Body=summary_json,
+                ContentType='application/json',
             )
 
         print("Report generation complete.")
