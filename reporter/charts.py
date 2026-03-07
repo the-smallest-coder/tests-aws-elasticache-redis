@@ -114,8 +114,6 @@ def build_memtier_figure(logs_resampled, oom_df, metrics_df, x_min, x_max):
                      title_font=dict(color=C_OOM_BAR), tickfont=dict(color=C_OOM_BAR))
     fig.update_yaxes(title_text="%", row=3, col=1,
                      title_font=dict(color=C_HIT_RATE), tickfont=dict(color=C_HIT_RATE))
-    for r in range(1, 4):
-        fig.update_xaxes(title_text="Time (UTC)", row=r, col=1)
     if x_min is not None and x_max is not None:
         for r in range(1, 4):
             fig.update_xaxes(range=[x_min, x_max], row=r, col=1)
@@ -274,8 +272,6 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config):
     fig.update_yaxes(title_text="MB",     row=3, col=1,
                      title_font=dict(color=C_ECS_MEM), tickfont=dict(color=C_ECS_MEM))
     fig.update_yaxes(title_text="%",      row=4, col=1)
-    for r in range(1, 5):
-        fig.update_xaxes(title_text="Time (UTC)", row=r, col=1)
     fig.update_xaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
     for r in range(1, 5):
