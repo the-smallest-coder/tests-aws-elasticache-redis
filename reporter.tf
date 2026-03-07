@@ -1,8 +1,22 @@
-resource "aws_s3_object" "reporter_script" {
+locals {
+  reporter_modules = toset([
+    "report_generator.py",
+    "helpers.py",
+    "parsers.py",
+    "charts.py",
+    "cards.py",
+    "template.py",
+    "summary.py",
+  ])
+}
+
+resource "aws_s3_object" "reporter_scripts" {
+  for_each = local.reporter_modules
+
   bucket = var.metrics_export_s3_bucket
-  key    = "scripts/report_generator.py"
-  source = "${path.module}/reporter/report_generator.py"
-  etag   = filemd5("${path.module}/reporter/report_generator.py")
+  key    = "scripts/${each.value}"
+  source = "${path.module}/reporter/${each.value}"
+  etag   = filemd5("${path.module}/reporter/${each.value}")
 }
 
 resource "aws_ecs_task_definition" "reporter" {
@@ -31,30 +45,31 @@ resource "aws_ecs_task_definition" "reporter" {
           # Install required Python dependencies with pinned versions
           pip install --no-cache-dir boto3==1.35.81 pandas==2.2.3 plotly==5.24.1
 
-          # Download the report generator script from S3
+          # Download all reporter modules from S3
           python - << 'PY'
 import boto3
-import os
 import sys
 
 bucket = "${var.metrics_export_s3_bucket}"
-key = "scripts/report_generator.py"
-local_path = "report_generator.py"
+modules = [
+    "report_generator.py",
+    "helpers.py",
+    "parsers.py",
+    "charts.py",
+    "cards.py",
+    "template.py",
+    "summary.py",
+]
 
 s3 = boto3.client("s3")
-
-try:
-    s3.download_file(bucket, key, local_path)
-except Exception as e:
-    print(f"Failed to download {key} from bucket {bucket}: {e}", file=sys.stderr)
-    sys.exit(1)
+for mod in modules:
+    try:
+        s3.download_file(bucket, f"scripts/{mod}", mod)
+        print(f"Downloaded {mod}")
+    except Exception as e:
+        print(f"Failed to download {mod}: {e}", file=sys.stderr)
+        sys.exit(1)
 PY
-
-          # Verify that the script was downloaded successfully
-          if [ ! -f report_generator.py ]; then
-            echo "report_generator.py not found after download" >&2
-            exit 1
-          fi
 
           # Run the report generator
           python report_generator.py

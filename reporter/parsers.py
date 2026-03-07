@@ -9,30 +9,59 @@ import pandas as pd
 def parse_memtier_logs(log_content):
     """Extract time-series data from memtier benchmark CloudWatch log export.
 
+    CloudWatch batches all per-second memtier progress lines into a single log
+    event, so only the *first* line in each batch carries a ``[CW_TS] [stream]``
+    prefix.  Continuation lines carry no prefix at all.  We therefore track the
+    last-seen (stream, CW ingestion timestamp) and propagate it to continuation
+    lines.  The actual wall-clock time is reconstructed per-stream by computing:
+
+        benchmark_start = max(CW_ingest_ts) - max(N_secs)
+        actual_ts(N)    = benchmark_start + N_secs
+
     Returns a DataFrame with columns: Timestamp, Ops/sec, Latency (ms), Bandwidth_KBs.
     """
-    data = []
-    lines = log_content.split('\n')
-    for line in lines:
-        if 'ops/sec' not in line.lower() or 'latency' not in line.lower():
+    # ------------------------------------------------------------------ #
+    #  Phase 1 – collect raw records with (stream, cw_ts, n_secs, values) #
+    # ------------------------------------------------------------------ #
+    # Matches: [2026-03-07T10:13:12.212000] [stream/name] rest-of-message
+    _HEADER = re.compile(r'^\[([\d\-T:\.]+)\] \[([^\]]+)\] (.*)', re.DOTALL)
+    # Matches the elapsed-seconds counter: "N secs]" or ", N secs]"
+    _SECS = re.compile(r',\s*(\d+)\s*secs\]')
+
+    raw = []
+    curr_cw_ts = None
+    curr_stream = None
+
+    for line in log_content.split('\n'):
+        header = _HEADER.match(line)
+        if header:
+            curr_cw_ts  = header.group(1)
+            curr_stream = header.group(2)
+            rest        = header.group(3)
+        else:
+            rest = line   # continuation line — reuse last stream/ts
+
+        if curr_cw_ts is None or curr_stream is None:
+            continue
+        if 'ops/sec' not in rest.lower() or 'latency' not in rest.lower():
             continue
 
-        ts_match = re.search(r'^\[([\d\-T:\.]+)\]', line)
-        if not ts_match:
+        secs_match = _SECS.search(rest)
+        if not secs_match:
             continue
-        timestamp = ts_match.group(1)
+        n_secs = int(secs_match.group(1))
 
-        ops_match = re.search(r'\(avg:\s*([\d\.]+)\)\s*ops/sec', line)
+        ops_match = re.search(r'\(avg:\s*([\d\.]+)\)\s*ops/sec', rest)
         if not ops_match:
-            ops_match = re.search(r'([\d\.]+)\s*ops/sec', line)
+            ops_match = re.search(r'([\d\.]+)\s*ops/sec', rest)
         ops_sec = float(ops_match.group(1)) if ops_match else None
 
-        lat_match = re.search(r'\(avg:\s*([\d\.]+)\)\s*msec latency', line)
+        lat_match = re.search(r'\(avg:\s*([\d\.]+)\)\s*msec latency', rest)
         if not lat_match:
-            lat_match = re.search(r'([\d\.]+)\s*msec latency', line)
+            lat_match = re.search(r'([\d\.]+)\s*msec latency', rest)
         latency = float(lat_match.group(1)) if lat_match else None
 
-        bw_match = re.search(r'\(avg:\s*([\d\.]+)(KB|MB)/sec\)', line)
+        bw_match = re.search(r'\(avg:\s*([\d\.]+)(KB|MB)/sec\)', rest)
         if bw_match:
             bw_val = float(bw_match.group(1))
             bw_kbs = bw_val * 1024 if bw_match.group(2) == 'MB' else bw_val
@@ -40,16 +69,40 @@ def parse_memtier_logs(log_content):
             bw_kbs = None
 
         if ops_sec is not None and latency is not None:
-            data.append({
-                'Timestamp': timestamp,
-                'Ops/sec': ops_sec,
-                'Latency (ms)': latency,
-                'Bandwidth_KBs': bw_kbs,
+            raw.append({
+                'Stream':         curr_stream,
+                'CW_TS':          curr_cw_ts,
+                'N_secs':         n_secs,
+                'Ops/sec':        ops_sec,
+                'Latency (ms)':   latency,
+                'Bandwidth_KBs':  bw_kbs,
             })
 
-    df = pd.DataFrame(data)
+    if not raw:
+        return pd.DataFrame()
+
+    # ------------------------------------------------------------------ #
+    #  Phase 2 – reconstruct wall-clock timestamps per stream             #
+    # ------------------------------------------------------------------ #
+    df_raw = pd.DataFrame(raw)
+    df_raw['CW_TS'] = pd.to_datetime(df_raw['CW_TS'], format='ISO8601')
+
+    records = []
+    for stream, grp in df_raw.groupby('Stream'):
+        max_cw_ts      = grp['CW_TS'].max()
+        max_n_secs     = grp['N_secs'].max()
+        benchmark_start = max_cw_ts - pd.Timedelta(seconds=int(max_n_secs))
+        for _, row in grp.iterrows():
+            records.append({
+                'Timestamp':      benchmark_start + pd.Timedelta(seconds=int(row['N_secs'])),
+                'Ops/sec':        row['Ops/sec'],
+                'Latency (ms)':   row['Latency (ms)'],
+                'Bandwidth_KBs':  row['Bandwidth_KBs'],
+            })
+
+    df = pd.DataFrame(records)
     if not df.empty:
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'], format='ISO8601')
+        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
     return df
 
 
