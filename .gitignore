@@ -39,3 +39,27 @@ terraform.rc
 
 # Ignore packaged Lambda deployment artifacts (zip files) generated during builds.
 lambda/*.zip
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Binary files
+*.pyc
+*.pyo
+*.so
+*.dylib
+*.dll
+*.exe
+*.bin
+*.o
+*.a
+*.out
+*.class
+*.jar
+*.war
+*.ear
+*.lib
+*.obj
+*.pdb

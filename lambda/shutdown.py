@@ -166,6 +166,52 @@ def handler(event, context):
             end_time
         )
 
+        # Trigger Report Generator Task
+        report_link = None
+        try:
+            report_task_def = f"{cluster_id}-report"
+            print(f"Triggering report generator task: {report_task_def}")
+
+            # The network configuration must match the loadgen service to use the same subnets
+            # We need to look up the subnets/security groups or assume they are passed via environment?
+            # Lambda doesn't know the subnets/SGs directly unless passed.
+            # However, we can describe the loadgen service to copy its configuration.
+            service_desc = ecs.describe_services(cluster=ecs_cluster, services=[ecs_service])
+            services = service_desc.get('services', [])
+            if services:
+                network_config = services[0].get('networkConfiguration')
+            else:
+                print("No ECS services returned when describing service for report task")
+                network_config = None
+
+            if network_config:
+                ecs.run_task(
+                    cluster=ecs_cluster,
+                    taskDefinition=report_task_def,
+                    launchType='FARGATE',
+                    networkConfiguration=network_config,
+                    overrides={
+                        'containerOverrides': [
+                            {
+                                'name': 'report-generator',
+                                'environment': [
+                                    {'name': 'REPORT_TIMESTAMP', 'value': timestamp}
+                                ]
+                            }
+                        ]
+                    }
+                )
+                # Using S3 URI as public HTTPS access is not expected
+                report_link = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/results_{timestamp}.html"
+                results['report_generator_triggered'] = True
+            else:
+                print("Could not determine network configuration for report task")
+                results['report_generator_triggered'] = False
+
+        except Exception as e:
+            print(f"Report generator trigger failed: {e}")
+            results['report_generator_triggered'] = str(e)
+
         # Send email notification if configured
         try:
             notification_result = send_notification(
@@ -174,7 +220,8 @@ def handler(event, context):
                 elasticache_id=elasticache_id,
                 s3_bucket=s3_bucket,
                 s3_prefix=s3_prefix,
-                timestamp=timestamp
+                timestamp=timestamp,
+                report_link=report_link
             )
             results['notification_sent'] = notification_result
         except Exception as e:
@@ -191,7 +238,7 @@ def handler(event, context):
     }
 
 
-def send_notification(results, cluster_id, elasticache_id, s3_bucket, s3_prefix, timestamp):
+def send_notification(results, cluster_id, elasticache_id, s3_bucket, s3_prefix, timestamp, report_link=None):
     """Send email notification via SES when shutdown completes."""
     
     email = os.environ.get('NOTIFICATION_EMAIL', '')
@@ -234,6 +281,10 @@ def send_notification(results, cluster_id, elasticache_id, s3_bucket, s3_prefix,
     metrics_path = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/metrics/"
     logs_path = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/logs/"
     
+    report_section = ""
+    if report_link:
+        report_section = f"\n=== Report ===\nHTML Report: {report_link}\n"
+
     email_body = f"""ElastiCache Performance Test Complete
 
 Cluster: {cluster_id}
@@ -245,7 +296,7 @@ ElastiCache ({elasticache_id}): {elasticache_status}
 === Exports ===
 Metrics: {metrics_path}
 Logs: {logs_path}
-
+{report_section}
 Review status above for any remaining resources.
 """
     

@@ -264,8 +264,23 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
       {
         Effect = "Allow"
         Action = [
+          "ecs:RunTask"
+        ]
+        Resource = aws_ecs_task_definition.report.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "iam:PassRole"
+        ]
+        Resource = [aws_iam_role.report_task_execution_role.arn, aws_iam_role.report_task_role.arn]
+      },
+      {
+        Effect = "Allow"
+        Action = [
           "ecs:ListTasks",
-          "ecs:DescribeTasks"
+          "ecs:DescribeTasks",
+          "ecs:DescribeServices"
         ]
         Resource = "*"
       },
