@@ -89,7 +89,7 @@ def _compute_time_range(logs_df, metrics_df, ecs_df):
     t0 = min(all_timestamps)
     t1 = max(all_timestamps)
     duration_min = int((t1 - t0).total_seconds() / 60)
-    return f"{t0.strftime('%Y-%m-%d %H:%M UTC')} – {t1.strftime('%H:%M UTC')} ({duration_min} min)"
+    return f"{t0.strftime('%Y-%m-%d %H:%M')} – {t1.strftime('%H:%M')} ({duration_min} min)"
 
 
 # ------------------------------------------------------------------ #
