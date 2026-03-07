@@ -130,6 +130,11 @@ body {
 #copy-btn:hover { background: rgba(255,255,255,.28); }
 #copy-btn:active { transform: scale(.97); }
 #copy-btn svg { flex-shrink: 0; }
+#copy-btn:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 #copy-btn.copied {
   background: #188038;
   border-color: #188038;
@@ -149,20 +154,36 @@ _COPY_BUTTON = """\
 _JS = """\
 function copyReport() {
   var btn = document.getElementById('copy-btn');
-  var clone = document.body.cloneNode(true);
-  clone.removeChild(clone.querySelector('#copy-btn'));
-  var styles = document.querySelector('head style');
-  var fragment = (styles ? '<style>' + styles.innerHTML + '</style>' : '') + clone.innerHTML;
-  navigator.clipboard.writeText(fragment).then(function() {
-    var btn = document.getElementById('copy-btn');
-    var lbl = document.getElementById('copy-label');
+  var lbl = document.getElementById('copy-label');
+  btn.disabled = true;
+  lbl.textContent = 'Rendering\u2026';
+  var plots = Array.from(document.querySelectorAll('.js-plotly-plot'));
+  Promise.all(plots.map(function(el) {
+    return Plotly.toImage(el, {format: 'png', width: el.offsetWidth || 900, height: el.offsetHeight || 500});
+  })).then(function(urls) {
+    var clone = document.body.cloneNode(true);
+    var cb = clone.querySelector('#copy-btn');
+    if (cb) { cb.parentNode.removeChild(cb); }
+    Array.from(clone.querySelectorAll('.js-plotly-plot')).forEach(function(el, i) {
+      var img = document.createElement('img');
+      img.src = urls[i];
+      img.style.cssText = 'width:100%;display:block;';
+      el.parentNode.replaceChild(img, el);
+    });
+    var st = document.querySelector('head style');
+    var html = (st ? '<style>' + st.innerHTML + '</style>' : '') + clone.innerHTML;
+    return navigator.clipboard.writeText(html);
+  }).then(function() {
     btn.classList.add('copied');
     lbl.textContent = 'Copied!';
+    btn.disabled = false;
     setTimeout(function() {
       btn.classList.remove('copied');
       lbl.textContent = 'Copy HTML';
     }, 2200);
   }).catch(function(err) {
+    btn.disabled = false;
+    lbl.textContent = 'Copy HTML';
     alert('Copy failed: ' + err);
   });
 }
