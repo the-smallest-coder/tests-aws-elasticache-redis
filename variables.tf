@@ -265,6 +265,17 @@ variable "loadgen_memtier_key_pattern" {
   default     = "R:R"
 }
 
+variable "loadgen_memtier_key_maximum" {
+  description = "Upper bound of the key-space for memtier (--key-maximum). 0 = auto-compute from node_type memory and data_size."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.loadgen_memtier_key_maximum >= 0
+    error_message = "loadgen_memtier_key_maximum must be 0 (auto) or a positive integer."
+  }
+}
+
 # Metrics Export Configuration
 variable "metrics_export_s3_bucket" {
   description = "S3 bucket for exporting metrics and logs (REQUIRED)"

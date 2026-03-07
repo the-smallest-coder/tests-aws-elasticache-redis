@@ -68,6 +68,7 @@ resource "aws_ecs_task_definition" "loadgen" {
           "--ratio=${var.loadgen_memtier_ratio}",
           "--test-time=${local.memtier_test_time_seconds}",
           "--key-pattern=${var.loadgen_memtier_key_pattern}",
+          "--key-maximum=${local.memtier_key_maximum}",
           "--hide-histogram"
         ],
         var.cluster_mode_enabled ? ["--cluster-mode"] : [],
@@ -133,4 +134,62 @@ locals {
   # Run effectively indefinitely when test time is 0.
   memtier_test_time_seconds = var.loadgen_memtier_test_time > 0 ? var.loadgen_memtier_test_time : 2147483647
   memtier_duration_label    = var.loadgen_memtier_test_time > 0 ? "${var.loadgen_memtier_test_time}s" : "until stopped"
+
+  # ---------------------------------------------------------------------------
+  # Usable memory (bytes) per ElastiCache node type.
+  # Values are ~85% of advertised RAM to stay within Redis maxmemory limits
+  # and leave headroom for overhead — producing a warm but not over-filled cache.
+  # Source: https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/CacheNodes.SupportedTypes.html
+  # ---------------------------------------------------------------------------
+  _node_memory_bytes = {
+    # T4g family
+    "cache.t4g.micro"  = 536870912    # 512 MB  → 85% ≈ 456 MB
+    "cache.t4g.small"  = 1610612736   # 1.5 GB  → 85% ≈ 1.275 GB
+    "cache.t4g.medium" = 3435973836   # 3.2 GB  → 85% ≈ 2.72 GB
+    # T3 family
+    "cache.t3.micro"   = 536870912
+    "cache.t3.small"   = 1610612736
+    "cache.t3.medium"  = 3435973836
+    # M7g family
+    "cache.m7g.large"   = 7516192768   # 7 GB
+    "cache.m7g.xlarge"  = 15032385536  # 14 GB
+    "cache.m7g.2xlarge" = 30064771072  # 28 GB
+    "cache.m7g.4xlarge" = 60129542144  # 56 GB
+    "cache.m7g.8xlarge" = 120259084288 # 112 GB
+    # M6g family
+    "cache.m6g.large"   = 7516192768
+    "cache.m6g.xlarge"  = 15032385536
+    "cache.m6g.2xlarge" = 30064771072
+    "cache.m6g.4xlarge" = 60129542144
+    "cache.m6g.8xlarge" = 120259084288
+    # R7g family
+    "cache.r7g.large"   = 16106127360  # 15 GB
+    "cache.r7g.xlarge"  = 32212254720  # 30 GB
+    "cache.r7g.2xlarge" = 64424509440  # 60 GB
+    "cache.r7g.4xlarge" = 128849018880 # 120 GB
+    "cache.r7g.8xlarge" = 257698037760 # 240 GB
+    # R6g family
+    "cache.r6g.large"   = 16106127360
+    "cache.r6g.xlarge"  = 32212254720
+    "cache.r6g.2xlarge" = 64424509440
+    "cache.r6g.4xlarge" = 128849018880
+    "cache.r6g.8xlarge" = 257698037760
+  }
+
+  # 85% fill factor — cache stays warm without hitting eviction pressure
+  _fill_factor = 0.85
+
+  # Usable bytes for this run; fall back to t4g.micro if type is unknown
+  _usable_bytes = lookup(local._node_memory_bytes, var.node_type,
+    local._node_memory_bytes["cache.t4g.micro"])
+
+  # key-maximum: how many data_size-byte values fit at the target fill factor.
+  # Each Redis key has ~70 bytes of overhead on top of the value.
+  _key_overhead_bytes = 70
+  _bytes_per_key      = var.loadgen_memtier_data_size + local._key_overhead_bytes
+
+  # If the user explicitly set key-maximum, honour it; otherwise auto-compute.
+  memtier_key_maximum = var.loadgen_memtier_key_maximum > 0 ? var.loadgen_memtier_key_maximum : (
+    floor(local._usable_bytes * local._fill_factor / local._bytes_per_key)
+  )
 }

@@ -84,7 +84,12 @@ def handler(event, context):
     test_duration_minutes = int(os.environ.get('TEST_DURATION_MINUTES', '60'))
 
     start_time, end_time = _time_window(test_duration_minutes)
-    timestamp = end_time.strftime('%Y%m%d-%H%M%S')
+    # Use the folder name that Terraform fixed at apply time so that
+    # cluster_details.json (written by Terraform) and metrics/logs (written
+    # here) land in the same S3 folder.  Fall back to a generated timestamp
+    # only if the variable is absent (e.g. manual Lambda invocation).
+    run_folder = os.environ.get('RUN_FOLDER') or end_time.strftime('%Y%m%d-%H%M%S')
+    timestamp = run_folder
 
     results = {
         'metrics_export': None,

@@ -76,6 +76,11 @@ output "run_timestamp" {
   value       = local.run_id_full
 }
 
+output "run_folder" {
+  description = "S3 folder name for all artefacts of this test run (metrics, logs, cluster_details.json)"
+  value       = local.run_folder
+}
+
 # Load Generator Outputs
 output "loadgen_cluster_name" {
   description = "ECS cluster name for load generators"
@@ -100,16 +105,17 @@ output "loadgen_security_group_id" {
 output "loadgen_configuration" {
   description = "Summary of load generator configuration"
   value = {
-    task_count  = var.loadgen_task_count
-    cpu         = var.loadgen_cpu
-    memory      = var.loadgen_memory
-    threads     = var.loadgen_memtier_threads
-    clients     = var.loadgen_memtier_clients
-    pipeline    = var.loadgen_memtier_pipeline
-    data_size   = var.loadgen_memtier_data_size
-    ratio       = var.loadgen_memtier_ratio
-    test_time   = var.loadgen_memtier_test_time
-    key_pattern = var.loadgen_memtier_key_pattern
+    task_count   = var.loadgen_task_count
+    cpu          = var.loadgen_cpu
+    memory       = var.loadgen_memory
+    threads      = var.loadgen_memtier_threads
+    clients      = var.loadgen_memtier_clients
+    pipeline     = var.loadgen_memtier_pipeline
+    data_size    = var.loadgen_memtier_data_size
+    ratio        = var.loadgen_memtier_ratio
+    test_time    = var.loadgen_memtier_test_time
+    key_pattern  = var.loadgen_memtier_key_pattern
+    key_maximum  = local.memtier_key_maximum
   }
 }
 

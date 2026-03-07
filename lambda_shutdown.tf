@@ -43,6 +43,7 @@ resource "aws_lambda_function" "shutdown" {
       ELASTICACHE_ID = aws_elasticache_replication_group.main.id
       S3_BUCKET      = var.metrics_export_s3_bucket
       S3_PREFIX      = var.metrics_export_s3_prefix
+      RUN_FOLDER     = local.run_folder
       LOG_GROUP      = aws_cloudwatch_log_group.loadgen.name
       CONTAINER_INSIGHTS_LOG_GROUP = aws_cloudwatch_log_group.container_insights.name
       ELASTICACHE_LOG_GROUP        = aws_cloudwatch_log_group.elasticache.name

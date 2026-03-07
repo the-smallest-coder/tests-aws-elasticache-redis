@@ -10,6 +10,11 @@ locals {
   run_id_full   = formatdate("YYYYMMDDhhmmss", time_static.run_id.rfc3339)
   run_id_suffix = substr(local.run_id_full, length(local.run_id_full) - 8, 8)
 
+  # Human-readable folder name shared by all artefacts for this run:
+  # Terraform writes cluster_details.json here at apply time; the Lambda
+  # uses the same name for metrics/logs so everything lands in one folder.
+  run_folder = formatdate("YYYYMMDD-HHmmss", time_static.run_id.rfc3339)
+
   # Cluster identifier (run-scoped)
   cluster_id = "${var.project_name}-${var.engine_type}-${local.run_id_suffix}"
 
