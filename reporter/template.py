@@ -170,6 +170,9 @@ function copyReport() {
       img.style.cssText = 'width:100%;display:block;';
       el.parentNode.replaceChild(img, el);
     });
+    Array.from(clone.querySelectorAll('script')).forEach(function(el) {
+      el.parentNode.removeChild(el);
+    });
     var st = document.querySelector('head style');
     var html = (st ? '<style>' + st.innerHTML + '</style>' : '') + clone.innerHTML;
     return navigator.clipboard.writeText(html);
