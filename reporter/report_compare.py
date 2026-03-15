@@ -107,7 +107,13 @@ def classify_delta(spec: MetricSpec, baseline: float | None, candidate: float | 
         return "neutral"
     if spec.path == ("benchmark", "prefill_min") and (baseline < 0 or candidate < 0):
         return "warning"
-    if math.isclose(baseline, candidate, rel_tol=0.005, abs_tol=max(0.01, 10 ** (-spec.decimals))):
+    # Use a stricter absolute tolerance for integer-like metrics (decimals == 0)
+    # so that changes like 0 -> 1 are not treated as neutral.
+    if spec.decimals == 0:
+        abs_tol = 0.5
+    else:
+        abs_tol = max(0.01, 10 ** (-spec.decimals))
+    if math.isclose(baseline, candidate, rel_tol=0.005, abs_tol=abs_tol):
         return "neutral"
     if spec.direction == "neutral":
         return "neutral"
