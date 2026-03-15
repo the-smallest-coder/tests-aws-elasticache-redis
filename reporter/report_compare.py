@@ -294,9 +294,31 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
     hit_a, hit_b = number(("cache_efficiency", "avg_hit_rate_pct"))
     get_lat_a, get_lat_b = number(("latency_server_us", "get_avg"))
     set_lat_a, set_lat_b = number(("latency_server_us", "set_avg"))
+
+    # Determine tone based on both cache hit rate and server latency.
+    hit_improved = (hit_b or 0) >= (hit_a or 0)
+    hit_worsened = (hit_b or 0) <= (hit_a or 0)
+
+    # Lower latency is better; handle missing values conservatively.
+    get_improved = (get_lat_b or math.inf) <= (get_lat_a or math.inf)
+    get_worsened = (get_lat_b or -math.inf) >= (get_lat_a or -math.inf)
+
+    set_improved = (set_lat_b or math.inf) <= (set_lat_a or math.inf)
+    set_worsened = (set_lat_b or -math.inf) >= (set_lat_a or -math.inf)
+
+    all_improved_or_equal = hit_improved and get_improved and set_improved
+    all_worsened_or_equal = hit_worsened and get_worsened and set_worsened
+
+    if all_improved_or_equal and not all_worsened_or_equal:
+        cache_latency_tone = "better"
+    elif all_worsened_or_equal and not all_improved_or_equal:
+        cache_latency_tone = "worse"
+    else:
+        cache_latency_tone = "mixed"
+
     items.append(
         {
-            "tone": "better" if (hit_b or 0) >= (hit_a or 0) else "worse",
+            "tone": cache_latency_tone,
             "title": "Cache efficiency and server latency",
             "text": (
                 f"Cache hit rate moved {format_number(hit_a or 0, 2)}% -> {format_number(hit_b or 0, 2)}% "
