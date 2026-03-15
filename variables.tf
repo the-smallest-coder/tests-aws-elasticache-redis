@@ -271,8 +271,8 @@ variable "loadgen_memtier_key_maximum" {
   default     = 0
 
   validation {
-    condition     = var.loadgen_memtier_key_maximum >= 0
-    error_message = "loadgen_memtier_key_maximum must be 0 or greater."
+    condition     = var.loadgen_memtier_key_maximum >= 0 && floor(var.loadgen_memtier_key_maximum) == var.loadgen_memtier_key_maximum
+    error_message = "loadgen_memtier_key_maximum must be a non-negative integer (0 or greater)."
   }
 }
 
