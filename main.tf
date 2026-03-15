@@ -129,6 +129,11 @@ resource "aws_elasticache_replication_group" "main" {
   }
 }
 
+moved {
+  from = aws_s3_object.report_script
+  to   = aws_s3_object.report_scripts["report_generator.py"]
+}
+
 resource "aws_s3_object" "report_scripts" {
   for_each = fileset("${path.module}/reporter", "*.py")
 
