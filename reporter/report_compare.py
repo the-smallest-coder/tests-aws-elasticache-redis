@@ -240,9 +240,40 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
     max_mem_a, max_mem_b = number(("memory", "max_usage_pct"))
     headroom_a, headroom_b = number(("memory", "headroom_pct"))
     swap_a, swap_b = number(("memory", "swap_max_bytes"))
+
+    def metric_signal(a: float | None, b: float | None, *, higher_is_better: bool) -> int:
+        """
+        Return +1 if candidate is better than baseline for this metric, -1 if worse, 0 if neutral/unknown.
+        """
+        if a is None or b is None:
+            return 0
+        if b == a:
+            return 0
+        if higher_is_better:
+            return 1 if b > a else -1
+        else:
+            return 1 if b < a else -1
+
+    # For max memory usage and swap, lower is better; for headroom, higher is better.
+    signals = [
+        metric_signal(max_mem_a, max_mem_b, higher_is_better=False),
+        metric_signal(headroom_a, headroom_b, higher_is_better=True),
+        metric_signal(swap_a, swap_b, higher_is_better=False),
+    ]
+
+    pos = any(s > 0 for s in signals)
+    neg = any(s < 0 for s in signals)
+    if pos and not neg:
+        mem_tone = "better"
+    elif neg and not pos:
+        mem_tone = "worse"
+    else:
+        # Mixed or no clear change across metrics.
+        mem_tone = "mixed"
+
     items.append(
         {
-            "tone": "better" if (headroom_b or 0) > (headroom_a or 0) else "worse",
+            "tone": mem_tone,
             "title": "Memory pressure",
             "text": (
                 f"Max memory usage moved {format_number(max_mem_a or 0, 2)}% -> {format_number(max_mem_b or 0, 2)}% "
