@@ -206,9 +206,27 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
 
     avg_ops_a, avg_ops_b = number(("benchmark", "avg_ops"))
     max_latency_a, max_latency_b = number(("benchmark", "max_latency_ms"))
+
+    # Determine tone based on both throughput (higher is better) and latency (lower is better).
+    avg_ops_delta = (avg_ops_b or 0) - (avg_ops_a or 0)
+    latency_delta = (max_latency_b or 0) - (max_latency_a or 0)
+
+    throughput_better = avg_ops_delta > 0
+    throughput_worse = avg_ops_delta < 0
+    latency_better = latency_delta < 0
+    latency_worse = latency_delta > 0
+
+    if (throughput_better and not latency_worse) or (latency_better and not throughput_worse):
+        tone = "better"
+    elif (throughput_worse and not latency_better) or (latency_worse and not throughput_better):
+        tone = "worse"
+    else:
+        # Mixed tradeoff: one metric improved while the other worsened or both unchanged.
+        tone = "mixed"
+
     items.append(
         {
-            "tone": "better" if (avg_ops_b or 0) >= (avg_ops_a or 0) else "worse",
+            "tone": tone,
             "title": "Throughput vs latency tradeoff",
             "text": (
                 f"Avg throughput moved {format_number(avg_ops_a or 0, 1)} -> {format_number(avg_ops_b or 0, 1)} ops/sec "
