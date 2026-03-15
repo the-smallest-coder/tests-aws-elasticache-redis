@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import html
 from typing import Any
 
 try:
@@ -63,6 +64,8 @@ def generate_s3_html_report(
     cpu_div: str,
     ecs_div: str,
 ) -> str:
+    escaped_cluster_id = html.escape(cluster_id, quote=True)
+    escaped_timestamp = html.escape(timestamp, quote=True)
     stats_rows = []
     for stat in summary_stats:
         stats_rows.append(
@@ -79,7 +82,7 @@ def generate_s3_html_report(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Performance Report: {cluster_id}</title>
+    <title>Performance Report: {escaped_cluster_id}</title>
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     <style>
         body {{
@@ -145,7 +148,7 @@ def generate_s3_html_report(
     <div class="container">
         <header>
             <h1>ElastiCache Performance Report</h1>
-            <div class="meta">Cluster: {cluster_id} | Run ID: {timestamp}</div>
+            <div class="meta">Cluster: {escaped_cluster_id} | Run ID: {escaped_timestamp}</div>
         </header>
         <section class="summary-grid">
             {''.join(stats_rows)}
