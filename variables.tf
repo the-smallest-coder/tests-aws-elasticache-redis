@@ -265,6 +265,17 @@ variable "loadgen_memtier_key_pattern" {
   default     = "R:R"
 }
 
+variable "loadgen_memtier_key_maximum" {
+  description = "Maximum key count per load generator task (0 uses memtier default). Tasks still use unique prefixes, so the keyspaces do not overlap."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.loadgen_memtier_key_maximum >= 0
+    error_message = "loadgen_memtier_key_maximum must be 0 or greater."
+  }
+}
+
 # Metrics Export Configuration
 variable "metrics_export_s3_bucket" {
   description = "S3 bucket for exporting metrics and logs (REQUIRED)"

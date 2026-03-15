@@ -57,22 +57,24 @@ resource "aws_ecs_task_definition" "loadgen" {
       image     = "redislabs/memtier_benchmark:latest"
       essential = true
 
-      command = concat(
-        [
-          "--server=${local.elasticache_endpoint}",
-          "--port=${var.port}",
-          "--threads=${var.loadgen_memtier_threads}",
-          "--clients=${var.loadgen_memtier_clients}",
-          "--pipeline=${var.loadgen_memtier_pipeline}",
-          "--data-size=${var.loadgen_memtier_data_size}",
-          "--ratio=${var.loadgen_memtier_ratio}",
-          "--test-time=${local.memtier_test_time_seconds}",
-          "--key-pattern=${var.loadgen_memtier_key_pattern}",
-          "--hide-histogram"
-        ],
-        var.cluster_mode_enabled ? ["--cluster-mode"] : [],
-        var.transit_encryption_enabled ? ["--tls", "--tls-skip-verify"] : []
-      )
+      entryPoint = ["/bin/sh", "-c"]
+      command = [join(" ", compact([
+        "exec memtier_benchmark",
+        "--server=${local.elasticache_endpoint}",
+        "--port=${var.port}",
+        "--threads=${var.loadgen_memtier_threads}",
+        "--clients=${var.loadgen_memtier_clients}",
+        "--pipeline=${var.loadgen_memtier_pipeline}",
+        "--data-size=${var.loadgen_memtier_data_size}",
+        "--ratio=${var.loadgen_memtier_ratio}",
+        "--test-time=${local.memtier_test_time_seconds}",
+        "--key-pattern=${var.loadgen_memtier_key_pattern}",
+        "--key-prefix=$(cat /proc/sys/kernel/random/uuid)-",
+        "--hide-histogram",
+        var.loadgen_memtier_key_maximum > 0 ? "--key-maximum=${var.loadgen_memtier_key_maximum}" : "",
+        var.cluster_mode_enabled ? "--cluster-mode" : "",
+        var.transit_encryption_enabled ? "--tls --tls-skip-verify" : "",
+      ]))]
 
       logConfiguration = {
         logDriver = "awslogs"
@@ -170,7 +172,7 @@ resource "aws_ecs_task_definition" "report" {
       command = [
         "/bin/sh",
         "-c",
-        "set -e; pip install boto3 pandas plotly && python - << 'PY'\nimport boto3\nimport sys\n\ns3 = boto3.client('s3')\n\ntry:\n    s3.download_file('${var.metrics_export_s3_bucket}', 'scripts/report_generator.py', 'report_generator.py')\nexcept Exception as e:\n    print(f'Failed to download report_generator.py from S3 bucket ${var.metrics_export_s3_bucket} with key scripts/report_generator.py: {e}', file=sys.stderr)\n    sys.exit(1)\nPY\npython report_generator.py"
+        "set -e; pip install boto3 pandas plotly && python - << 'PY'\nimport boto3\nimport sys\n\nbucket = '${var.metrics_export_s3_bucket}'\ns3 = boto3.client('s3')\ndownloaded = 0\n\nfor page in s3.get_paginator('list_objects_v2').paginate(Bucket=bucket, Prefix='scripts/'):\n    for item in page.get('Contents', []):\n        key = item['Key']\n        if not key.endswith('.py'):\n            continue\n        name = key.rsplit('/', 1)[-1]\n        try:\n            s3.download_file(bucket, key, name)\n        except Exception as e:\n            print(f'Failed to download {name} from S3 bucket {bucket} with key {key}: {e}', file=sys.stderr)\n            sys.exit(1)\n        downloaded += 1\n\nif downloaded == 0:\n    print(f'No reporter Python files found in s3://{bucket}/scripts/', file=sys.stderr)\n    sys.exit(1)\nPY\npython report_generator.py"
       ]
 
       environment = [

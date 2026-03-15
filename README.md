@@ -133,6 +133,8 @@ Key variables in `terraform.tfvars`:
 
 See `terraform.tfvars.example` for all options.
 
+Load generator tasks use per-task key prefixes to avoid overlapping writes. If `loadgen_memtier_key_maximum` is set, that key maximum applies per task.
+
 ---
 
 ## 📧 Email Notification (Optional)
@@ -180,3 +182,19 @@ notification_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/aws
 - **Test Complete**: After shutdown and export operations finish
 - **Verification Warning**: If resources are still running 15 minutes after scheduled shutdown
 - **Verification OK**: If all resources successfully shut down
+
+---
+
+## Local Comparison
+
+The same `reporter/report_generator.py` entrypoint is used in ECS and for local comparison.
+For local comparison:
+
+```bash
+reporter/.venv/Scripts/python.exe reporter/report_generator.py compare \
+  results/20260227-140039 \
+  results/20260307-093716
+```
+
+You can also omit `compare`; two positional paths are treated as comparison input.
+The output defaults to `results/comparisons/<baseline>_vs_<candidate>.html`.

@@ -129,9 +129,11 @@ resource "aws_elasticache_replication_group" "main" {
   }
 }
 
-resource "aws_s3_object" "report_script" {
+resource "aws_s3_object" "report_scripts" {
+  for_each = fileset("${path.module}/reporter", "*.py")
+
   bucket = var.metrics_export_s3_bucket
-  key    = "scripts/report_generator.py"
-  source = "${path.module}/report_generator.py"
-  etag   = filemd5("${path.module}/report_generator.py")
+  key    = "scripts/${each.value}"
+  source = "${path.module}/reporter/${each.value}"
+  etag   = filemd5("${path.module}/reporter/${each.value}")
 }
