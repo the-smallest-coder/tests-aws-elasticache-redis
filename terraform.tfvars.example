@@ -62,7 +62,7 @@ loadgen_memtier_test_time = 0      # 0 = run until ECS stops the task
 # loadgen_memtier_pipeline  = 1
 # loadgen_memtier_data_size = 32
 # loadgen_memtier_ratio     = "1:10"
-# loadgen_memtier_key_maximum = 0   # 0 = memtier default; >0 applies per task with unique key prefixes
+# loadgen_memtier_key_maximum = 0   # 0 = auto-compute based on node type (~85% fill); >0 = explicit per-task key count with unique prefixes
 
 # REQUIRED: Metrics Export Configuration
 metrics_export_s3_bucket = "my-elasticache-perf-exports"  # REQUIRED - create bucket first!
