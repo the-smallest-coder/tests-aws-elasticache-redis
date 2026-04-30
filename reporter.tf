@@ -14,13 +14,8 @@ locals {
 }
 
 # Moved blocks: handle state migration from previous resource addresses.
-# Previously the S3 objects lived in main.tf as aws_s3_object.report_script (single)
-# then aws_s3_object.report_scripts (for_each), and are now aws_s3_object.reporter_scripts.
-moved {
-  from = aws_s3_object.report_script
-  to   = aws_s3_object.reporter_scripts["report_generator.py"]
-}
-
+# Previously the S3 objects lived in main.tf as aws_s3_object.report_scripts (for_each)
+# and are now aws_s3_object.reporter_scripts.
 moved {
   from = aws_s3_object.report_scripts["report_generator.py"]
   to   = aws_s3_object.reporter_scripts["report_generator.py"]
