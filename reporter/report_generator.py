@@ -9,6 +9,10 @@ from report_compare import run_compare_report
 from report_ecs import run_ecs_report
 from parsers import parse_metrics_csv, parse_memtier_logs, parse_memtier_extra_stats
 from summary import build_summary
+from cards import header_pills, stat_cards_html
+from charts import build_memtier_figure, build_infra_figure, build_elasticache_deep_dive_figure
+from helpers import resample_logs
+from template import render_html
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -104,6 +108,36 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     out_path = run_path / "results_local.json"
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"Written: {out_path}")
+
+    # Build HTML report using the same pipeline as the ECS report task
+    logs_resampled = resample_logs(logs_df)
+    oom_df = logs_df[logs_df.get("OOM", pd.Series(dtype=bool))] if "OOM" in logs_df.columns else pd.DataFrame()
+    x_min = logs_df["Timestamp"].min() if not logs_df.empty else None
+    x_max = logs_df["Timestamp"].max() if not logs_df.empty else None
+
+    fig_m = build_memtier_figure(logs_resampled, oom_df, metrics_df, x_min, x_max)
+    fig_i = build_infra_figure(ecs_df, metrics_df, cluster_id, config)
+    fig_d = build_elasticache_deep_dive_figure(metrics_df, cluster_id, config)
+
+    cluster_mode = str(config.get("cluster_mode", "false")).lower() == "true"
+    id_label = "Cluster" if cluster_mode else "Replication Group"
+    suffix = run_path.name
+
+    html_content = render_html(
+        cluster_id=cluster_id,
+        suffix=suffix,
+        id_label=id_label,
+        time_range=time_range,
+        pills_html=header_pills(config),
+        cards_html=stat_cards_html(logs_df, metrics_df, ecs_df, extra_stats, config),
+        chart_memtier_html=fig_m.to_html(include_plotlyjs="cdn", full_html=False),
+        chart_infra_html=fig_i.to_html(include_plotlyjs=False, full_html=False),
+        chart_deep_dive_html=fig_d.to_html(include_plotlyjs=False, full_html=False),
+    )
+
+    html_path = run_path / "results_local.html"
+    html_path.write_text(html_content, encoding="utf-8")
+    print(f"Written: {html_path}")
 
 
 def main() -> None:
