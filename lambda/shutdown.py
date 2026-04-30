@@ -610,6 +610,9 @@ def run_reporter_task(cluster_id, ecs_cluster, metrics_key, ecs_metrics_key, log
                         {'name': 'OUTPUT_BUCKET', 'value': s3_bucket},
                         {'name': 'OUTPUT_PREFIX', 'value': s3_prefix},
                         {'name': 'SUFFIX', 'value': suffix},
+                        {'name': 'S3_BUCKET', 'value': s3_bucket},
+                        {'name': 'S3_PREFIX', 'value': s3_prefix},
+                        {'name': 'REPORT_TIMESTAMP', 'value': timestamp},
                         {'name': 'CLUSTER_ID', 'value': cluster_id},
                         {'name': 'CLUSTER_MODE', 'value': os.environ.get('CLUSTER_MODE', 'false')}
                     ]
