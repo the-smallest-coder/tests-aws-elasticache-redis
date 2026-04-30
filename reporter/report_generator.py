@@ -4,18 +4,11 @@ import argparse
 import os
 import sys
 
-try:
-    from report_common import ECS_ENV_VARS
-    from report_compare import run_compare_report
-    from report_ecs import run_ecs_report
-    from parsers import parse_metrics_csv, parse_memtier_logs, parse_memtier_extra_stats
-    from summary import build_summary
-except ImportError:  # pragma: no cover - supports python -m reporter.report_generator
-    from reporter.report_common import ECS_ENV_VARS
-    from reporter.report_compare import run_compare_report
-    from reporter.report_ecs import run_ecs_report
-    from reporter.parsers import parse_metrics_csv, parse_memtier_logs, parse_memtier_extra_stats
-    from reporter.summary import build_summary
+from report_common import ECS_ENV_VARS
+from report_compare import run_compare_report
+from report_ecs import run_ecs_report
+from parsers import parse_metrics_csv, parse_memtier_logs, parse_memtier_extra_stats
+from summary import build_summary
 
 
 def build_parser() -> argparse.ArgumentParser:

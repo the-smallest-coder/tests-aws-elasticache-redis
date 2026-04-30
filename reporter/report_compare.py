@@ -4,41 +4,21 @@ import math
 from pathlib import Path
 from typing import Any
 
-try:
-    from report_common import (
-        MetricSpec,
-        RunData,
-        bytes_to_mb,
-        diff_points,
-        display_value,
-        format_number,
-        get_nested,
-        load_run,
-        metric_value,
-        normalize_cluster_mode,
-        parse_duration_minutes,
-        percent_change,
-    )
-except ImportError:  # pragma: no cover - supports python -m reporter.report_generator
-    from reporter.report_common import (
-        MetricSpec,
-        RunData,
-        bytes_to_mb,
-        diff_points,
-        display_value,
-        format_number,
-        get_nested,
-        load_run,
-        metric_value,
-        normalize_cluster_mode,
-        parse_duration_minutes,
-        percent_change,
-    )
-
-try:
-    from template import render_report
-except ImportError:  # pragma: no cover - supports python -m reporter.report_generator
-    from reporter.template import render_report
+from report_common import (
+    MetricSpec,
+    RunData,
+    bytes_to_mb,
+    diff_points,
+    display_value,
+    format_number,
+    get_nested,
+    load_run,
+    metric_value,
+    normalize_cluster_mode,
+    parse_duration_minutes,
+    percent_change,
+)
+from template import render_report
 
 
 SECTION_META: dict[str, dict[str, str]] = {

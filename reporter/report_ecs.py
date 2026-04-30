@@ -4,10 +4,7 @@ import sys
 import html
 from typing import Any
 
-try:
-    from report_common import get_env_var
-except ImportError:  # pragma: no cover - supports python -m reporter.report_generator
-    from reporter.report_common import get_env_var
+from report_common import get_env_var
 
 
 def validate_csv_columns(df: Any, csv_name: str) -> bool:
