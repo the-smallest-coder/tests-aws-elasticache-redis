@@ -18,13 +18,15 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_DIR=""
 REPORTS_ONLY=false
 LATEST=false
+PARALLEL=8
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --output-dir)  OUTPUT_DIR="$2"; shift 2 ;;
+        --output-dir)   OUTPUT_DIR="$2"; shift 2 ;;
         --reports-only) REPORTS_ONLY=true; shift ;;
-        --latest)      LATEST=true; shift ;;
-        *)             echo "Unknown option: $1" >&2; exit 1 ;;
+        --latest)       LATEST=true; shift ;;
+        --parallel)     PARALLEL="$2"; shift 2 ;;
+        *)              echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
 
@@ -92,33 +94,48 @@ fi
 FILE_COUNT=$(echo "$ALL_KEYS" | wc -l | tr -d ' ')
 echo "  Found $FILE_COUNT file(s) to download."
 
-# -- Download files --
+# -- Download files (parallel) --
 echo ""
 echo "=== Downloading ==="
 
 mkdir -p "$OUTPUT_DIR"
 
-DOWNLOADED=0
-FAILED=0
+RESULTS_DIR=$(mktemp -d)
+_download_one() {
+    local key="$1"
+    local s3_bucket="$2"
+    local s3_prefix="$3"
+    local output_dir="$4"
+    local region="$5"
+    local results_dir="$6"
 
-while IFS= read -r key; do
-    [[ -z "$key" ]] && continue
+    local relative_path="${key#$s3_prefix}"
+    local local_path="${output_dir}/${relative_path}"
+    local local_dir
+    local_dir=$(dirname "$local_path")
 
-    # Preserve directory structure relative to S3 prefix
-    RELATIVE_PATH="${key#$S3_PREFIX}"
-    LOCAL_PATH="${OUTPUT_DIR}/${RELATIVE_PATH}"
-    LOCAL_DIR=$(dirname "$LOCAL_PATH")
+    mkdir -p "$local_dir"
 
-    mkdir -p "$LOCAL_DIR"
-
-    if aws s3 cp "s3://${S3_BUCKET}/${key}" "$LOCAL_PATH" --region "$REGION" --quiet 2>/dev/null; then
-        DOWNLOADED=$((DOWNLOADED + 1))
-        echo "  OK    $RELATIVE_PATH"
+    if aws s3 cp "s3://${s3_bucket}/${key}" "$local_path" --region "$region" --quiet 2>/dev/null; then
+        echo "OK $relative_path" >> "${results_dir}/ok.txt"
+        echo "  OK    $relative_path"
     else
-        FAILED=$((FAILED + 1))
-        echo "  FAIL  $RELATIVE_PATH"
+        echo "FAIL $relative_path" >> "${results_dir}/fail.txt"
+        echo "  FAIL  $relative_path"
     fi
-done <<< "$ALL_KEYS"
+}
+export -f _download_one
+
+echo "$ALL_KEYS" | grep -v '^$' | \
+    xargs -P "$PARALLEL" -I{} bash -c \
+        '_download_one "$@"' _ {} \
+        "$S3_BUCKET" "$S3_PREFIX" "$OUTPUT_DIR" "$REGION" "$RESULTS_DIR"
+
+DOWNLOADED=$(wc -l < "${RESULTS_DIR}/ok.txt" 2>/dev/null || echo 0)
+FAILED=$(wc -l < "${RESULTS_DIR}/fail.txt" 2>/dev/null || echo 0)
+DOWNLOADED=$(echo "$DOWNLOADED" | tr -d ' ')
+FAILED=$(echo "$FAILED" | tr -d ' ')
+rm -rf "$RESULTS_DIR"
 
 # -- Summary --
 echo ""
