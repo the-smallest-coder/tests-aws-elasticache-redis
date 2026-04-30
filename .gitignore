@@ -68,3 +68,4 @@ results/*
 reporter/.venv
 reporter/*.txt
 reporter/*.log
+tmp
