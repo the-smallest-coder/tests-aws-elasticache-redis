@@ -13,59 +13,6 @@ locals {
   ])
 }
 
-# Moved blocks: handle state migration from previous resource addresses.
-# Previously the S3 objects lived in main.tf as aws_s3_object.report_scripts (for_each)
-# and are now aws_s3_object.reporter_scripts.
-moved {
-  from = aws_s3_object.report_scripts["report_generator.py"]
-  to   = aws_s3_object.reporter_scripts["report_generator.py"]
-}
-
-moved {
-  from = aws_s3_object.report_scripts["report_common.py"]
-  to   = aws_s3_object.reporter_scripts["report_common.py"]
-}
-
-moved {
-  from = aws_s3_object.report_scripts["report_compare.py"]
-  to   = aws_s3_object.reporter_scripts["report_compare.py"]
-}
-
-moved {
-  from = aws_s3_object.report_scripts["report_ecs.py"]
-  to   = aws_s3_object.reporter_scripts["report_ecs.py"]
-}
-
-moved {
-  from = aws_s3_object.report_scripts["helpers.py"]
-  to   = aws_s3_object.reporter_scripts["helpers.py"]
-}
-
-moved {
-  from = aws_s3_object.report_scripts["parsers.py"]
-  to   = aws_s3_object.reporter_scripts["parsers.py"]
-}
-
-moved {
-  from = aws_s3_object.report_scripts["charts.py"]
-  to   = aws_s3_object.reporter_scripts["charts.py"]
-}
-
-moved {
-  from = aws_s3_object.report_scripts["cards.py"]
-  to   = aws_s3_object.reporter_scripts["cards.py"]
-}
-
-moved {
-  from = aws_s3_object.report_scripts["template.py"]
-  to   = aws_s3_object.reporter_scripts["template.py"]
-}
-
-moved {
-  from = aws_s3_object.report_scripts["summary.py"]
-  to   = aws_s3_object.reporter_scripts["summary.py"]
-}
-
 resource "aws_s3_object" "reporter_scripts" {
   for_each = local.reporter_modules
 

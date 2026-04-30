@@ -110,6 +110,7 @@ echo "=== Downloading ==="
 mkdir -p "$OUTPUT_DIR"
 
 RESULTS_DIR=$(mktemp -d)
+mkdir -p "${RESULTS_DIR}/ok" "${RESULTS_DIR}/fail"
 _download_one() {
     local key="$1"
     local s3_bucket="$2"
@@ -125,11 +126,15 @@ _download_one() {
 
     mkdir -p "$local_dir"
 
+    # Use per-job marker files to avoid concurrent write races on shared files.
+    local safe_name
+    safe_name=$(echo "$relative_path" | tr '/' '_' | tr -d ' ')
+
     if aws s3 cp "s3://${s3_bucket}/${key}" "$local_path" --region "$region" --quiet 2>/dev/null; then
-        echo "OK $relative_path" >> "${results_dir}/ok.txt"
+        touch "${results_dir}/ok/${safe_name}"
         echo "  OK    $relative_path"
     else
-        echo "FAIL $relative_path" >> "${results_dir}/fail.txt"
+        touch "${results_dir}/fail/${safe_name}"
         echo "  FAIL  $relative_path"
     fi
 }
@@ -140,8 +145,8 @@ echo "$ALL_KEYS" | grep -v '^$' | \
         '_download_one "$@"' _ {} \
         "$S3_BUCKET" "$S3_PREFIX" "$OUTPUT_DIR" "$REGION" "$RESULTS_DIR"
 
-DOWNLOADED=$([ -f "${RESULTS_DIR}/ok.txt" ] && wc -l < "${RESULTS_DIR}/ok.txt" | tr -d ' ' || echo 0)
-FAILED=$([ -f "${RESULTS_DIR}/fail.txt" ] && wc -l < "${RESULTS_DIR}/fail.txt" | tr -d ' ' || echo 0)
+DOWNLOADED=$(find "${RESULTS_DIR}/ok" -maxdepth 1 -type f | wc -l | tr -d ' ')
+FAILED=$(find "${RESULTS_DIR}/fail" -maxdepth 1 -type f | wc -l | tr -d ' ')
 rm -rf "$RESULTS_DIR"
 
 # -- Summary --
