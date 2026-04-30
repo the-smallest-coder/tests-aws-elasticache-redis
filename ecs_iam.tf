@@ -66,58 +66,11 @@ resource "aws_iam_role_policy" "ecs_task_logs" {
     ]
   })
 }
-# Report Generator Task Execution Role
-resource "aws_iam_role" "report_task_execution_role" {
-  name = "${local.cluster_id}-report-execution"
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ecs-tasks.amazonaws.com"
-        }
-      }
-    ]
-  })
-
-  tags = {
-    Name = "${local.cluster_id}-report-execution"
-  }
-}
-
-resource "aws_iam_role_policy_attachment" "report_task_execution_role_policy" {
-  role       = aws_iam_role.report_task_execution_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
-
-# Report Generator Task Role (S3 Access)
-resource "aws_iam_role" "report_task_role" {
-  name = "${local.cluster_id}-report-task"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ecs-tasks.amazonaws.com"
-        }
-      }
-    ]
-  })
-
-  tags = {
-    Name = "${local.cluster_id}-report-task"
-  }
-}
-
-resource "aws_iam_role_policy" "report_task_policy" {
-  name = "${local.cluster_id}-report-task-policy"
-  role = aws_iam_role.report_task_role.id
+# Allow ECS task to access S3 for reporting
+resource "aws_iam_role_policy" "ecs_task_s3" {
+  name = "${local.cluster_id}-ecs-task-s3"
+  role = aws_iam_role.ecs_task_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -126,16 +79,13 @@ resource "aws_iam_role_policy" "report_task_policy" {
         Effect = "Allow"
         Action = [
           "s3:GetObject",
-          "s3:PutObject"
-        ]
-        Resource = "arn:aws:s3:::${var.metrics_export_s3_bucket}/*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
+          "s3:PutObject",
           "s3:ListBucket"
         ]
-        Resource = "arn:aws:s3:::${var.metrics_export_s3_bucket}"
+        Resource = [
+          "arn:aws:s3:::${var.metrics_export_s3_bucket}",
+          "arn:aws:s3:::${var.metrics_export_s3_bucket}/*"
+        ]
       }
     ]
   })

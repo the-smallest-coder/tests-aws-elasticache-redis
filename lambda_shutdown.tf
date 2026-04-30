@@ -43,6 +43,7 @@ resource "aws_lambda_function" "shutdown" {
       ELASTICACHE_ID = aws_elasticache_replication_group.main.id
       S3_BUCKET      = var.metrics_export_s3_bucket
       S3_PREFIX      = var.metrics_export_s3_prefix
+      RUN_FOLDER     = local.run_folder
       LOG_GROUP      = aws_cloudwatch_log_group.loadgen.name
       CONTAINER_INSIGHTS_LOG_GROUP = aws_cloudwatch_log_group.container_insights.name
       ELASTICACHE_LOG_GROUP        = aws_cloudwatch_log_group.elasticache.name
@@ -51,6 +52,7 @@ resource "aws_lambda_function" "shutdown" {
       TEST_DURATION_MINUTES        = var.test_duration_minutes
       NOTIFICATION_EMAIL           = var.notification_email
       SES_IDENTITY_ARN             = var.notification_ses_identity_arn
+      REPORTER_TASK_DEFINITION     = aws_ecs_task_definition.reporter.arn
     }
   }
 
@@ -81,6 +83,13 @@ resource "aws_lambda_function" "shutdown_scheduler" {
       SHUTDOWN_RULE_PLACEHOLDER = "cron(0 0 1 1 ? 2099)"
       NOTIFICATION_EMAIL    = var.notification_email
       SES_IDENTITY_ARN      = var.notification_ses_identity_arn
+      ENGINE_TYPE           = var.engine_type
+      ENGINE_VERSION        = var.engine_version
+      NODE_TYPE             = var.node_type
+      NODE_COUNT            = tostring(var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes)
+      CLUSTER_MODE          = tostring(var.cluster_mode_enabled)
+      LOADGEN_TASK_COUNT    = tostring(var.loadgen_task_count)
+      AWS_REGION_NAME       = var.aws_region
     }
   }
 
@@ -107,6 +116,9 @@ resource "aws_lambda_function" "shutdown_verify" {
       ELASTICACHE_ID     = aws_elasticache_replication_group.main.id
       NOTIFICATION_EMAIL = var.notification_email
       SES_IDENTITY_ARN   = var.notification_ses_identity_arn
+      ENGINE_TYPE        = var.engine_type
+      NODE_TYPE          = var.node_type
+      AWS_REGION_NAME    = var.aws_region
     }
   }
 
@@ -266,14 +278,22 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
         Action = [
           "ecs:RunTask"
         ]
-        Resource = aws_ecs_task_definition.report.arn
+        Resource = "arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task-definition/${aws_ecs_task_definition.reporter.family}:*"
       },
       {
         Effect = "Allow"
         Action = [
           "iam:PassRole"
         ]
-        Resource = [aws_iam_role.report_task_execution_role.arn, aws_iam_role.report_task_role.arn]
+        Resource = [
+          aws_iam_role.ecs_task_execution_role.arn,
+          aws_iam_role.ecs_task_role.arn
+        ]
+        Condition = {
+          StringEquals = {
+            "iam:PassedToService" = "ecs-tasks.amazonaws.com"
+          }
+        }
       },
       {
         Effect = "Allow"

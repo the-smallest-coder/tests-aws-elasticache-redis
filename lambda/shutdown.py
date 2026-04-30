@@ -84,7 +84,12 @@ def handler(event, context):
     test_duration_minutes = int(os.environ.get('TEST_DURATION_MINUTES', '60'))
 
     start_time, end_time = _time_window(test_duration_minutes)
-    timestamp = end_time.strftime('%Y%m%d-%H%M%S')
+    # Use the folder name that Terraform fixed at apply time so that
+    # cluster_details.json (written by Terraform) and metrics/logs (written
+    # here) land in the same S3 folder.  Fall back to a generated timestamp
+    # only if the variable is absent (e.g. manual Lambda invocation).
+    run_folder = os.environ.get('RUN_FOLDER') or end_time.strftime('%Y%m%d-%H%M%S')
+    timestamp = run_folder
 
     results = {
         'metrics_export': None,
@@ -93,6 +98,20 @@ def handler(event, context):
         'ecs_stopped': False,
         'elasticache_stopped': False
     }
+
+    # Describe replication group NOW, before we initiate deletion, so we have
+    # the full member cluster list available for metric export regardless of
+    # whether describe_replication_groups races with the delete call later.
+    member_clusters = []
+    try:
+        rg_response = elasticache.describe_replication_groups(
+            ReplicationGroupId=elasticache_id
+        )
+        for group in rg_response.get('ReplicationGroups', []):
+            member_clusters = group.get('MemberClusters', [])
+        print(f"Pre-shutdown: found member clusters {member_clusters}")
+    except Exception as e:
+        print(f"Pre-shutdown describe failed (will retry inside export): {e}")
 
     try:
         try:
@@ -125,7 +144,8 @@ def handler(event, context):
 
         metrics_key = f"{s3_prefix}{timestamp}/metrics/{cluster_id}.csv"
         results['metrics_export'] = export_elasticache_metrics_to_s3(
-            elasticache_id, s3_bucket, metrics_key, start_time, end_time
+            elasticache_id, s3_bucket, metrics_key, start_time, end_time,
+            member_clusters=member_clusters
         )
 
         ecs_metrics_key = f"{s3_prefix}{timestamp}/metrics/{cluster_id}-ecs.csv"
@@ -166,51 +186,22 @@ def handler(event, context):
             end_time
         )
 
-        # Trigger Report Generator Task
-        report_link = None
+        # Run reporter task
         try:
-            report_task_def = f"{cluster_id}-report"
-            print(f"Triggering report generator task: {report_task_def}")
-
-            # The network configuration must match the loadgen service to use the same subnets
-            # We need to look up the subnets/security groups or assume they are passed via environment?
-            # Lambda doesn't know the subnets/SGs directly unless passed.
-            # However, we can describe the loadgen service to copy its configuration.
-            service_desc = ecs.describe_services(cluster=ecs_cluster, services=[ecs_service])
-            services = service_desc.get('services', [])
-            if services:
-                network_config = services[0].get('networkConfiguration')
-            else:
-                print("No ECS services returned when describing service for report task")
-                network_config = None
-
-            if network_config:
-                ecs.run_task(
-                    cluster=ecs_cluster,
-                    taskDefinition=report_task_def,
-                    launchType='FARGATE',
-                    networkConfiguration=network_config,
-                    overrides={
-                        'containerOverrides': [
-                            {
-                                'name': 'report-generator',
-                                'environment': [
-                                    {'name': 'REPORT_TIMESTAMP', 'value': timestamp}
-                                ]
-                            }
-                        ]
-                    }
-                )
-                # Using S3 URI as public HTTPS access is not expected
-                report_link = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/results_{timestamp}.html"
-                results['report_generator_triggered'] = True
-            else:
-                print("Could not determine network configuration for report task")
-                results['report_generator_triggered'] = False
-
+            reporter_result = run_reporter_task(
+                cluster_id=cluster_id,
+                ecs_cluster=ecs_cluster,
+                metrics_key=f"s3://{s3_bucket}/{metrics_key}",
+                ecs_metrics_key=f"s3://{s3_bucket}/{ecs_metrics_key}",
+                logs_key=log_exports['loadgen'],
+                s3_bucket=s3_bucket,
+                s3_prefix=s3_prefix,
+                timestamp=timestamp
+            )
+            results['reporter_task'] = reporter_result
         except Exception as e:
-            print(f"Report generator trigger failed: {e}")
-            results['report_generator_triggered'] = str(e)
+            print(f"Reporter task launch failed: {e}")
+            results['reporter_task'] = str(e)
 
         # Send email notification if configured
         try:
@@ -220,8 +211,7 @@ def handler(event, context):
                 elasticache_id=elasticache_id,
                 s3_bucket=s3_bucket,
                 s3_prefix=s3_prefix,
-                timestamp=timestamp,
-                report_link=report_link
+                timestamp=timestamp
             )
             results['notification_sent'] = notification_result
         except Exception as e:
@@ -238,8 +228,8 @@ def handler(event, context):
     }
 
 
-def send_notification(results, cluster_id, elasticache_id, s3_bucket, s3_prefix, timestamp, report_link=None):
-    """Send email notification via SES when shutdown completes."""
+def send_notification(results, cluster_id, elasticache_id, s3_bucket, s3_prefix, timestamp):
+    """Send HTML email notification via SES when shutdown completes."""
     
     email = os.environ.get('NOTIFICATION_EMAIL', '')
     ses_arn = os.environ.get('SES_IDENTITY_ARN', '')
@@ -267,45 +257,161 @@ def send_notification(results, cluster_id, elasticache_id, s3_bucket, s3_prefix,
     ses = boto3.client('ses', region_name=ses_region)
     
     # Build email content
-    ecs_status = (
-        "OK - Stopped (0 running tasks)"
-        if results.get('ecs_stopped') is True
-        else f"FAILED - {results.get('ecs_stopped', 'Unknown')}"
-    )
-    elasticache_status = (
-        "OK - Deleted"
-        if results.get('elasticache_stopped') is True
-        else f"FAILED - {results.get('elasticache_stopped', 'Unknown')}"
-    )
-    
+    ecs_ok = results.get('ecs_stopped') is True
+    ec_ok = results.get('elasticache_stopped') is True
+
+    ecs_status_text = "Stopped (0 running tasks)" if ecs_ok else f"Issue - {results.get('ecs_stopped', 'Unknown')}"
+    elasticache_status_text = "Delete initiated" if ec_ok else f"Issue - {results.get('elasticache_stopped', 'Unknown')}"
+
+    ecs_icon = "&#9989;" if ecs_ok else "&#9888;&#65039;"
+    ec_icon = "&#9989;" if ec_ok else "&#9888;&#65039;"
+    ecs_color = "#1e8e3e" if ecs_ok else "#e37400"
+    ec_color = "#1e8e3e" if ec_ok else "#e37400"
+
+    metrics_exported = results.get('metrics_export') is not None
+    ecs_metrics_exported = results.get('ecs_metrics_export') is not None
+    logs_exported = any(v for v in results.get('log_exports', {}).values() if v)
+    reporter_launched = results.get('reporter_task') is not None and not isinstance(results.get('reporter_task'), str)
+
     metrics_path = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/metrics/"
     logs_path = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/logs/"
-    
-    report_section = ""
-    if report_link:
-        report_section = f"\n=== Report ===\nHTML Report: {report_link}\n"
+    aws_region = os.environ.get('AWS_REGION', os.environ.get('AWS_DEFAULT_REGION', ''))
 
-    email_body = f"""ElastiCache Performance Test Complete
+    # Determine overall status
+    all_ok = ecs_ok and ec_ok
+    header_bg = "linear-gradient(135deg,#1e8e3e,#137333)" if all_ok else "linear-gradient(135deg,#e37400,#c56200)"
+    header_title = "&#9989; Shutdown Complete" if all_ok else "&#9888;&#65039; Shutdown Complete (with issues)"
+
+    email_body_text = f"""ElastiCache Performance Test Complete
 
 Cluster: {cluster_id}
 
 === Resource Status ===
-ECS Service: {ecs_status}
-ElastiCache ({elasticache_id}): {elasticache_status}
+ECS Service: {ecs_status_text}
+ElastiCache ({elasticache_id}): {elasticache_status_text}
 
 === Exports ===
 Metrics: {metrics_path}
 Logs: {logs_path}
-{report_section}
+
 Review status above for any remaining resources.
 """
+
+    email_body_html = f"""\
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background-color:#f4f6f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f9;padding:30px 0;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+
+        <!-- Header -->
+        <tr>
+          <td style="background:{header_bg};padding:30px 40px;">
+            <span style="font-size:14px;color:rgba(255,255,255,0.85);text-transform:uppercase;letter-spacing:1px;">Performance Test</span>
+            <h1 style="margin:6px 0 0;font-size:24px;color:#ffffff;font-weight:600;">{header_title}</h1>
+          </td>
+        </tr>
+
+        <!-- Cluster ID bar -->
+        <tr>
+          <td style="background-color:#e8f0fe;padding:14px 40px;border-bottom:1px solid #d2e3fc;">
+            <span style="font-size:13px;color:#5f6368;">Cluster</span><br>
+            <span style="font-size:16px;color:#1a73e8;font-weight:600;font-family:monospace;">{cluster_id}</span>
+          </td>
+        </tr>
+
+        <!-- Resource Status -->
+        <tr>
+          <td style="padding:28px 40px 10px;">
+            <h2 style="margin:0 0 16px;font-size:15px;color:#5f6368;text-transform:uppercase;letter-spacing:0.5px;">Resource Status</h2>
+            <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8eaed;border-radius:6px;overflow:hidden;">
+              <tr style="background-color:#f8f9fa;">
+                <td style="padding:10px 16px;font-size:13px;color:#5f6368;border-bottom:1px solid #e8eaed;">Resource</td>
+                <td style="padding:10px 16px;font-size:13px;color:#5f6368;border-bottom:1px solid #e8eaed;">Status</td>
+              </tr>
+              <tr>
+                <td style="padding:10px 16px;font-size:14px;color:#202124;border-bottom:1px solid #e8eaed;">ECS Service</td>
+                <td style="padding:10px 16px;font-size:14px;color:{ecs_color};font-weight:500;border-bottom:1px solid #e8eaed;">{ecs_icon} {ecs_status_text}</td>
+              </tr>
+              <tr>
+                <td style="padding:10px 16px;font-size:14px;color:#202124;">ElastiCache ({elasticache_id})</td>
+                <td style="padding:10px 16px;font-size:14px;color:{ec_color};font-weight:500;">{ec_icon} {elasticache_status_text}</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Export Summary -->
+        <tr>
+          <td style="padding:20px 40px;">
+            <h2 style="margin:0 0 16px;font-size:15px;color:#5f6368;text-transform:uppercase;letter-spacing:0.5px;">Data Exports</h2>
+            <table width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td width="50%" style="padding:8px 0;">
+                  <span style="font-size:12px;color:#80868b;">CloudWatch Metrics</span><br>
+                  <span style="font-size:14px;color:{'#1e8e3e' if metrics_exported else '#d93025'};font-weight:500;">{'&#9989; Exported' if metrics_exported else '&#10060; Failed'}</span>
+                </td>
+                <td width="50%" style="padding:8px 0;">
+                  <span style="font-size:12px;color:#80868b;">ECS Metrics</span><br>
+                  <span style="font-size:14px;color:{'#1e8e3e' if ecs_metrics_exported else '#d93025'};font-weight:500;">{'&#9989; Exported' if ecs_metrics_exported else '&#10060; Failed'}</span>
+                </td>
+              </tr>
+              <tr>
+                <td width="50%" style="padding:8px 0;">
+                  <span style="font-size:12px;color:#80868b;">CloudWatch Logs</span><br>
+                  <span style="font-size:14px;color:{'#1e8e3e' if logs_exported else '#d93025'};font-weight:500;">{'&#9989; Exported' if logs_exported else '&#10060; Failed'}</span>
+                </td>
+                <td width="50%" style="padding:8px 0;">
+                  <span style="font-size:12px;color:#80868b;">HTML Report</span><br>
+                  <span style="font-size:14px;color:{'#1e8e3e' if reporter_launched else '#80868b'};font-weight:500;">{'&#9989; Generating' if reporter_launched else '&#8212; Not launched'}</span>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- S3 Paths -->
+        <tr>
+          <td style="padding:10px 40px 28px;">
+            <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f1f3f4;border-radius:6px;">
+              <tr>
+                <td style="padding:14px 20px;">
+                  <span style="font-size:12px;color:#80868b;">Metrics Location</span><br>
+                  <span style="font-size:13px;color:#202124;font-family:monospace;">{metrics_path}</span><br><br>
+                  <span style="font-size:12px;color:#80868b;">Logs Location</span><br>
+                  <span style="font-size:13px;color:#202124;font-family:monospace;">{logs_path}</span>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+          <td style="background-color:#f8f9fa;padding:20px 40px;border-top:1px solid #e8eaed;">
+            <p style="margin:0;font-size:12px;color:#80868b;text-align:center;">
+              Automated notification from ElastiCache Performance Lab&nbsp;&nbsp;&#8226;&nbsp;&nbsp;{aws_region}
+            </p>
+          </td>
+        </tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
     
     response = ses.send_email(
         Source=source_email,
         Destination={'ToAddresses': [email]},
         Message={
-            'Subject': {'Data': f'[ElastiCache Test Complete] {cluster_id}'},
-            'Body': {'Text': {'Data': email_body}}
+            'Subject': {'Data': f'[ElastiCache Test Complete] {cluster_id}', 'Charset': 'UTF-8'},
+            'Body': {
+                'Text': {'Data': email_body_text, 'Charset': 'UTF-8'},
+                'Html': {'Data': email_body_html, 'Charset': 'UTF-8'}
+            }
         }
     )
     
@@ -313,9 +419,18 @@ Review status above for any remaining resources.
     return True
 
 
-def export_elasticache_metrics_to_s3(replication_group_id, bucket, key, start_time, end_time):
-    """Export ElastiCache CloudWatch metrics to S3 as CSV."""
+def export_elasticache_metrics_to_s3(replication_group_id, bucket, key, start_time, end_time,
+                                      member_clusters=None):
+    """Export all ElastiCache CloudWatch metrics to S3 as CSV.
 
+    Covers three dimension granularities published by ElastiCache:
+      1. ReplicationGroupId only          (e.g. DatabaseMemoryUsage*)
+      2. ReplicationGroupId + NodeGroupId (sharded variants)
+      3. CacheClusterId only              (e.g. EngineCPUUtilization)
+      4. CacheClusterId + NodeGroupId     (node-level variants)
+    """
+
+    # -- Replication-group level sources --
     sources = [
         {
             'namespace': 'AWS/ElastiCache',
@@ -323,19 +438,26 @@ def export_elasticache_metrics_to_s3(replication_group_id, bucket, key, start_ti
         }
     ]
 
-    try:
-        response = elasticache.describe_replication_groups(
-            ReplicationGroupId=replication_group_id
-        )
-        for group in response.get('ReplicationGroups', []):
-            for cluster_id in group.get('MemberClusters', []):
-                sources.append({
-                    'namespace': 'AWS/ElastiCache',
-                    'dimensions': [{'Name': 'CacheClusterId', 'Value': cluster_id}]
-                })
-    except Exception as e:
-        print(f"Error describing replication group {replication_group_id}: {e}")
+    # -- Cluster-level sources; use pre-fetched list when available --
+    if not member_clusters:
+        try:
+            response = elasticache.describe_replication_groups(
+                ReplicationGroupId=replication_group_id
+            )
+            for group in response.get('ReplicationGroups', []):
+                member_clusters = group.get('MemberClusters', [])
+        except Exception as e:
+            print(f"Error describing replication group {replication_group_id}: {e}")
+            member_clusters = []
 
+    for cluster_id in member_clusters:
+        # CacheClusterId only — catches single-dim metrics (EngineCPUUtilization, etc.)
+        sources.append({
+            'namespace': 'AWS/ElastiCache',
+            'dimensions': [{'Name': 'CacheClusterId', 'Value': cluster_id}]
+        })
+
+    print(f"ElastiCache metric sources: {[s['dimensions'] for s in sources]}")
     return export_metric_sources_to_s3(sources, bucket, key, start_time, end_time)
 
 
@@ -435,6 +557,77 @@ def export_metric_sources_to_s3(sources, bucket, key, start_time, end_time):
 
     print(f"Metrics exported to s3://{bucket}/{key}")
     return f"s3://{bucket}/{key}"
+
+
+def run_reporter_task(cluster_id, ecs_cluster, metrics_key, ecs_metrics_key, logs_key, s3_bucket, s3_prefix, timestamp):
+    """Launch ECS task to generate HTML report."""
+
+    task_definition = os.environ.get('REPORTER_TASK_DEFINITION')
+    if not task_definition:
+        print("REPORTER_TASK_DEFINITION not set, skipping report generation.")
+        return None
+
+    if not metrics_key or not logs_key:
+        print("Missing metrics or logs key, skipping report generation.")
+        return None
+
+    # Get network configuration from the loadgen service to reuse subnets/security groups
+    # This assumes the loadgen service still exists (even if scaled to 0) which matches our flow
+    try:
+        service_desc = ecs.describe_services(
+            cluster=ecs_cluster,
+            services=[os.environ['ECS_SERVICE']]
+        )
+        network_config = service_desc['services'][0]['networkConfiguration']
+    except Exception as e:
+        print(f"Failed to get network config from service, using defaults: {e}")
+        # Fallback or fail? We need subnets to run Fargate.
+        # If we can't get them, we probably can't run the task.
+        raise e
+
+    # S3 keys passed to this function might be full s3:// paths returned by export functions
+    # or just keys. The export functions return "s3://bucket/key".
+    # The reporter script expects s3:// paths for input.
+
+    # metrics_key is like "s3://bucket/prefix/timestamp/metrics/cluster.csv"
+    # logs_key is like "s3://bucket/prefix/timestamp/logs/cluster.txt"
+
+    suffix = timestamp  # Use timestamp as suffix for the report file
+
+    response = ecs.run_task(
+        cluster=ecs_cluster,
+        taskDefinition=task_definition,
+        launchType='FARGATE',
+        networkConfiguration=network_config,
+        overrides={
+            'containerOverrides': [
+                {
+                    'name': 'reporter',
+                    'environment': [
+                        {'name': 'METRICS_CSV', 'value': metrics_key},
+                        {'name': 'ECS_METRICS_CSV', 'value': ecs_metrics_key or ''},
+                        {'name': 'LOGS_TXT', 'value': logs_key},
+                        {'name': 'OUTPUT_BUCKET', 'value': s3_bucket},
+                        {'name': 'OUTPUT_PREFIX', 'value': s3_prefix},
+                        {'name': 'SUFFIX', 'value': suffix},
+                        {'name': 'CLUSTER_ID', 'value': cluster_id},
+                        {'name': 'CLUSTER_MODE', 'value': os.environ.get('CLUSTER_MODE', 'false')}
+                    ]
+                }
+            ]
+        },
+        count=1,
+        startedBy='ShutdownLambda'
+    )
+
+    tasks = response.get('tasks', [])
+    if not tasks:
+        print(f"run_task did not return any tasks. Response failures: {response.get('failures')}")
+        return None
+
+    task_arn = tasks[0].get('taskArn')
+    print(f"Reporter task launched: {task_arn}")
+    return task_arn
 
 
 def export_logs_to_s3(log_group, bucket, key, start_time, end_time):
