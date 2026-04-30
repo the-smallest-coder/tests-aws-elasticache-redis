@@ -68,6 +68,8 @@ fi
 ALL_KEYS=$(echo "$S3_LISTING" | awk '{print $4}')
 
 # If --latest, filter to most recent timestamped run
+# NOTE: grep -oP requires GNU grep with PCRE support (standard on Linux/GNU environments).
+#       macOS/BSD grep does not support -P and is not a supported platform for this script.
 if $LATEST; then
     LATEST_TS=$(echo "$ALL_KEYS" | grep -oP '\d{8}-?\d{6}' | sort -u | tail -1)
     if [[ -n "$LATEST_TS" ]]; then

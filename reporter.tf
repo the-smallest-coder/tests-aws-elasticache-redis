@@ -95,7 +95,7 @@ resource "aws_ecs_task_definition" "reporter" {
       image     = "python:3.11-slim"
       essential = true
 
-      # NOTE: This approach installs dependencies at runtime with pinned versions.
+      # NOTE: This approach installs dependencies at runtime with minimum versions.
       # For production use, consider building a custom Docker image with pre-installed
       # dependencies (see reporter/Dockerfile and reporter/requirements.txt) and pushing
       # it to ECR. This eliminates supply chain risks and reduces task startup time.
@@ -103,8 +103,8 @@ resource "aws_ecs_task_definition" "reporter" {
         <<-EOT
           set -e
 
-          # Install required Python dependencies with pinned versions
-          pip install --no-cache-dir boto3==1.35.81 pandas==2.2.3 plotly==5.24.1
+          # Install required Python dependencies (minimum versions; latest compatible release is used)
+          pip install --no-cache-dir "boto3>=1.35.81" "pandas>=2.2.3" "plotly>=5.24.1"
 
           # Download all reporter modules from S3
           python - << 'PY'
@@ -142,8 +142,20 @@ PY
 
       environment = [
         {
-          name  = "OUTPUT_BUCKET"
+          name  = "S3_BUCKET"
           value = var.metrics_export_s3_bucket
+        },
+        {
+          name  = "S3_PREFIX"
+          value = var.metrics_export_s3_prefix
+        },
+        {
+          name  = "CLUSTER_ID"
+          value = local.cluster_id
+        },
+        {
+          name  = "REPORT_TIMESTAMP"
+          value = local.run_folder
         },
         {
           name  = "AWS_DEFAULT_REGION"
