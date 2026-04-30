@@ -351,6 +351,16 @@ def render_report(payload: dict[str, object]) -> str:
     tr.tone-warning .delta-cell {{
       color: var(--warn);
     }}
+    .tone-mixed .takeaway-title,
+    .tone-mixed .delta,
+    tr.tone-mixed .delta-cell {{
+      color: var(--warn);
+    }}
+    .tone-neutral .takeaway-title,
+    .tone-neutral .delta,
+    tr.tone-neutral .delta-cell {{
+      color: var(--muted);
+    }}
     .run-grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
