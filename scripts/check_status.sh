@@ -6,9 +6,17 @@
 #   ./scripts/check_status.sh            # quick status
 #   ./scripts/check_status.sh --detailed # verbose output
 #
-# Requires: AWS CLI configured, Terraform state accessible from project root.
+# Requires: AWS CLI configured, jq, terraform, Terraform state accessible from project root.
 
 set -euo pipefail
+
+# -- Dependency checks --
+for cmd in aws jq terraform; do
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "ERROR: Required dependency '$cmd' not found. Please install it and ensure it is on your PATH." >&2
+        exit 1
+    fi
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
