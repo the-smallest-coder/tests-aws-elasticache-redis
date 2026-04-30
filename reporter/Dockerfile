@@ -7,7 +7,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy all report-generator modules
-COPY helpers.py parsers.py charts.py cards.py template.py report_generator.py ./
+COPY . ./
 
 # Run the report generator
 CMD ["python", "report_generator.py"]
