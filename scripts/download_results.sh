@@ -73,7 +73,8 @@ ALL_KEYS=$(echo "$S3_LISTING" | awk '{print $4}')
 # NOTE: grep -oP requires GNU grep with PCRE support (standard on Linux/GNU environments).
 #       macOS/BSD grep does not support -P and is not a supported platform for this script.
 if $LATEST; then
-    LATEST_TS=$(echo "$ALL_KEYS" | grep -oP '\d{8}-?\d{6}' | sort -u | tail -1)
+    # Sort by S3 upload date+time (columns 1-2), pick the folder timestamp from the most recently uploaded object
+    LATEST_TS=$(echo "$S3_LISTING" | sort -k1,2 | tail -1 | awk '{print $4}' | grep -oP '\d{8}-\d{6}' | head -1)
     if [[ -n "$LATEST_TS" ]]; then
         echo "  Latest run: $LATEST_TS"
         ALL_KEYS=$(echo "$ALL_KEYS" | grep "$LATEST_TS")
@@ -131,10 +132,8 @@ echo "$ALL_KEYS" | grep -v '^$' | \
         '_download_one "$@"' _ {} \
         "$S3_BUCKET" "$S3_PREFIX" "$OUTPUT_DIR" "$REGION" "$RESULTS_DIR"
 
-DOWNLOADED=$(wc -l < "${RESULTS_DIR}/ok.txt" 2>/dev/null || echo 0)
-FAILED=$(wc -l < "${RESULTS_DIR}/fail.txt" 2>/dev/null || echo 0)
-DOWNLOADED=$(echo "$DOWNLOADED" | tr -d ' ')
-FAILED=$(echo "$FAILED" | tr -d ' ')
+DOWNLOADED=$([ -f "${RESULTS_DIR}/ok.txt" ] && wc -l < "${RESULTS_DIR}/ok.txt" | tr -d ' ' || echo 0)
+FAILED=$([ -f "${RESULTS_DIR}/fail.txt" ] && wc -l < "${RESULTS_DIR}/fail.txt" | tr -d ' ' || echo 0)
 rm -rf "$RESULTS_DIR"
 
 # -- Summary --
