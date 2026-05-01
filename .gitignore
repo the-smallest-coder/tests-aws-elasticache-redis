@@ -69,3 +69,4 @@ reporter/.venv
 reporter/*.txt
 reporter/*.log
 tmp
+.codex-tmp

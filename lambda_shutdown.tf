@@ -50,6 +50,14 @@ resource "aws_lambda_function" "shutdown" {
       LAMBDA_SHUTDOWN_LOG_GROUP    = aws_cloudwatch_log_group.lambda_shutdown.name
       LAMBDA_SCHEDULER_LOG_GROUP   = aws_cloudwatch_log_group.lambda_shutdown_scheduler.name
       TEST_DURATION_MINUTES        = var.test_duration_minutes
+      CLUSTER_MODE                 = tostring(var.cluster_mode_enabled)
+      NUM_CACHE_NODES              = tostring(var.num_cache_nodes)
+      NUM_NODE_GROUPS              = tostring(var.num_node_groups)
+      REPLICAS_PER_NODE_GROUP      = tostring(var.replicas_per_node_group)
+      ENGINE_TYPE                  = var.engine_type
+      ENGINE_VERSION               = var.engine_version
+      NODE_TYPE                    = var.node_type
+      NODE_COUNT                   = tostring(var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes)
       NOTIFICATION_EMAIL           = var.notification_email
       SES_IDENTITY_ARN             = var.notification_ses_identity_arn
       REPORTER_TASK_DEFINITION     = aws_ecs_task_definition.reporter.arn

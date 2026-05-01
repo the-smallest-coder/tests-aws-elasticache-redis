@@ -31,6 +31,29 @@ def _dimensions_to_str(dimensions):
     )
 
 
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _fallback_member_clusters(replication_group_id):
+    """Derive ElastiCache member cluster IDs when DescribeReplicationGroups is unavailable."""
+    cluster_mode = os.environ.get('CLUSTER_MODE', 'false').strip().lower() == 'true'
+    if cluster_mode:
+        node_groups = max(_env_int('NUM_NODE_GROUPS', 1), 1)
+        replicas = max(_env_int('REPLICAS_PER_NODE_GROUP', 0), 0)
+        return [
+            f"{replication_group_id}-{node_group:04d}-{replica:03d}"
+            for node_group in range(1, node_groups + 1)
+            for replica in range(1, replicas + 2)
+        ]
+
+    num_nodes = max(_env_int('NUM_CACHE_NODES', 1), 1)
+    return [f"{replication_group_id}-{node:03d}" for node in range(1, num_nodes + 1)]
+
+
 def _list_metrics(namespace, filter_dimensions=None, metric_name_filter=None):
     metrics = []
     token = None
@@ -450,6 +473,16 @@ def export_elasticache_metrics_to_s3(replication_group_id, bucket, key, start_ti
             print(f"Error describing replication group {replication_group_id}: {e}")
             member_clusters = []
 
+    member_clusters = list(dict.fromkeys(member_clusters or []))
+    for cluster_id in _fallback_member_clusters(replication_group_id):
+        if cluster_id not in member_clusters:
+            member_clusters.append(cluster_id)
+
+    if member_clusters:
+        print(f"Exporting CacheClusterId metric sources: {member_clusters}")
+    else:
+        print(f"No member clusters found for {replication_group_id}; only replication-group metrics will be exported.")
+
     for cluster_id in member_clusters:
         # CacheClusterId only — catches single-dim metrics (EngineCPUUtilization, etc.)
         sources.append({
@@ -614,7 +647,11 @@ def run_reporter_task(cluster_id, ecs_cluster, metrics_key, ecs_metrics_key, log
                         {'name': 'S3_PREFIX', 'value': s3_prefix},
                         {'name': 'REPORT_TIMESTAMP', 'value': timestamp},
                         {'name': 'CLUSTER_ID', 'value': cluster_id},
-                        {'name': 'CLUSTER_MODE', 'value': os.environ.get('CLUSTER_MODE', 'false')}
+                        {'name': 'CLUSTER_MODE', 'value': os.environ.get('CLUSTER_MODE', 'false')},
+                        {'name': 'ENGINE_TYPE', 'value': os.environ.get('ENGINE_TYPE', '')},
+                        {'name': 'ENGINE_VERSION', 'value': os.environ.get('ENGINE_VERSION', '')},
+                        {'name': 'NODE_TYPE', 'value': os.environ.get('NODE_TYPE', '')},
+                        {'name': 'NODE_COUNT', 'value': os.environ.get('NODE_COUNT', '')}
                     ]
                 }
             ]
