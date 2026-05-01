@@ -2,7 +2,7 @@
 
 Terraform infrastructure for **automated** ElastiCache (Redis/Valkey) performance testing.
 
-> `terraform apply` → auto-run load tests → auto-export metrics → auto-stop → `terraform destroy`
+> `terraform apply` → auto-run load tests → auto-export metrics → auto-cleanup → `terraform destroy`
 
 ---
 
@@ -42,7 +42,7 @@ terraform destroy
 1. **Provisions** ElastiCache (Redis/Valkey) + ECS load generators
 2. **Runs** memtier_benchmark for configurable duration (default: 1 hour)
 3. **Exports** metrics (CSV) + logs (text) to S3
-4. **Stops** ECS and ElastiCache automatically
+4. **Cleans up** by stopping ECS and deleting the ElastiCache replication group
 
 ---
 
@@ -102,7 +102,7 @@ flowchart LR
         T2 -->|export logs| T3[S3]
         T2 -->|export metrics| T3
         T2 -->|stop| T4[ECS Service]
-        T2 -->|stop| T5[ElastiCache]
+        T2 -->|delete| T5[ElastiCache]
     end
     
     Start --> Run --> Stop

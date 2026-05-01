@@ -1,7 +1,7 @@
 # AWS ElastiCache Performance Testing — Agent Instructions
 
 Terraform infrastructure for automated ElastiCache (Redis/Valkey) load testing.
-Single `terraform apply` → spins up ElastiCache + ECS memtier_benchmark → runs test → auto-exports metrics/logs to S3 → auto-cleans up.
+Single `terraform apply` → spins up ElastiCache + ECS memtier_benchmark → runs test → auto-exports metrics/logs to S3 → stops ECS and deletes the ElastiCache replication group.
 
 See [README.md](README.md) for full architecture diagrams and quick-start guide.
 
@@ -46,14 +46,14 @@ Lambda deps are `boto3` only (built-in to Lambda runtime). Reporter deps are in 
 ## Key Conventions
 
 ### Naming
-- **Cluster ID**: `{project_name}-{engine_type}-{last-8-digits-of-timestamp}` — 40-char ElastiCache limit enforced by truncation
+- **Cluster ID**: `{project_name}-{engine_type}-{last-8-digits-of-timestamp}`. Keep `project_name` short enough that the full ID stays within ElastiCache's 40-character limit; only the timestamp is shortened.
 - **Run folders**: `results/YYYYmmdd-HHMMSS/`
 - **S3 paths**: `{s3_prefix}/{timestamp}/metrics/{cluster_id}.csv` and `{cluster_id}-ecs.csv`, `logs/{cluster_id}.txt`
 - **CloudWatch log groups**: `/aws/elasticache/{cluster_id}`, `/aws/ecs/{cluster_id}/loadgen`
 
 ### Metrics CSV format
 ```
-Timestamp,Namespace,Stat,MetricName,Value,Dimensions
+Timestamp,Namespace,MetricName,Stat,Value,Unit,Dimensions
 ```
 Produced by `lambda/shutdown.py`; consumed by `reporter/report_ecs.py`.
 
