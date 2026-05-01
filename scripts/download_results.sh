@@ -81,8 +81,8 @@ ALL_KEYS=$(echo "$S3_LISTING" | awk '{print $4}')
 # NOTE: grep -oP requires GNU grep with PCRE support (standard on Linux/GNU environments).
 #       macOS/BSD grep does not support -P and is not a supported platform for this script.
 if $LATEST; then
-    # Sort by S3 upload date+time (columns 1-2), pick the folder timestamp from the most recently uploaded object
-    LATEST_TS=$(echo "$S3_LISTING" | sort -k1,2 | tail -1 | awk '{print $4}' | grep -oP '\d{8}-\d{6}' | head -1)
+    # Pick the highest timestamped run folder, not the most recently uploaded object.
+    LATEST_TS=$(echo "$ALL_KEYS" | grep -oP '\d{8}-\d{6}' | sort -u | tail -1)
     if [[ -n "$LATEST_TS" ]]; then
         echo "  Latest run: $LATEST_TS"
         ALL_KEYS=$(echo "$ALL_KEYS" | grep "$LATEST_TS")
