@@ -83,6 +83,33 @@ def metric_filter(df, name, stat, dim_prefix=None):
     return df[mask]
 
 
+def cache_hit_rate_df(df):
+    """Return CacheHitRate/Average rows, deriving them from CacheHits/CacheMisses when needed."""
+    direct = metric_filter(df, 'CacheHitRate', 'Average', 'CacheClusterId')
+    if not direct.empty:
+        return direct
+
+    hits = metric_filter(df, 'CacheHits', 'Sum', 'CacheClusterId')
+    misses = metric_filter(df, 'CacheMisses', 'Sum', 'CacheClusterId')
+    if hits.empty or misses.empty:
+        return direct
+
+    hit_cols = hits[['Timestamp', 'Dimensions', 'Value']].rename(columns={'Value': 'Hits'})
+    miss_cols = misses[['Timestamp', 'Dimensions', 'Value']].rename(columns={'Value': 'Misses'})
+    merged = hit_cols.merge(miss_cols, on=['Timestamp', 'Dimensions'], how='inner')
+    total = merged['Hits'] + merged['Misses']
+    merged = merged[total > 0].copy()
+    if merged.empty:
+        return direct
+
+    merged['Value'] = (merged['Hits'] / (merged['Hits'] + merged['Misses'])) * 100.0
+    merged['Namespace'] = 'AWS/ElastiCache'
+    merged['MetricName'] = 'CacheHitRate'
+    merged['Stat'] = 'Average'
+    merged['Unit'] = 'Percent'
+    return merged[['Timestamp', 'Namespace', 'MetricName', 'Stat', 'Value', 'Unit', 'Dimensions']]
+
+
 def shorten_dim(dim, cluster_id=''):
     """Return a concise label from a CloudWatch Dimensions string.
 

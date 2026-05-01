@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from helpers import metric_filter, select_mem_dims
+from helpers import metric_filter, cache_hit_rate_df, select_mem_dims
 
 
 def _safe(val, decimals=None):
@@ -118,7 +118,7 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
     cache_efficiency = {}
     if not metrics_df.empty:
         # Hit rate
-        hr_df = metric_filter(metrics_df, 'CacheHitRate', 'Average', 'CacheClusterId')
+        hr_df = cache_hit_rate_df(metrics_df)
         if not hr_df.empty:
             if not logs_df.empty:
                 bench_start = logs_df['Timestamp'].min()

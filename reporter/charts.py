@@ -13,7 +13,7 @@ from helpers import (
     C_LAT_GET, C_LAT_SET, C_LAT_STR,
     C_THROTTLE_IN, C_THROTTLE_OUT, C_THROTTLE_PPS,
     C_CURR_CONN, C_MEM_FRAG,
-    metric_filter, shorten_dim, select_mem_dims,
+    metric_filter, cache_hit_rate_df, shorten_dim, select_mem_dims,
 )
 
 
@@ -91,7 +91,7 @@ def build_memtier_figure(logs_resampled, oom_df, metrics_df, x_min, x_max):
 
     # ---- Row 3: Cache Hit Rate ----
     if not metrics_df.empty:
-        hr_df = metric_filter(metrics_df, 'CacheHitRate', 'Average', 'CacheClusterId')
+        hr_df = cache_hit_rate_df(metrics_df)
         if not hr_df.empty:
             hr_agg = hr_df.groupby('Timestamp')['Value'].mean().reset_index()
             fig.add_trace(go.Scatter(

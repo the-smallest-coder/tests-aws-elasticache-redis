@@ -59,8 +59,8 @@ resource "aws_ecs_task_definition" "loadgen" {
 
       # Wrap in sh -c so $(cat /proc/sys/kernel/random/uuid) is expanded at task startup,
       # giving each task a unique key prefix and avoiding keyspace collisions across tasks.
+      entryPoint = ["sh", "-c"]
       command = [
-        "sh", "-c",
         join(" ", concat(
           [
             "UUID=$(cat /proc/sys/kernel/random/uuid)",

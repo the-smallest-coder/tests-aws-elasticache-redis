@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from helpers import metric_filter, select_mem_dims
+from helpers import metric_filter, cache_hit_rate_df, select_mem_dims
 
 
 def header_pills(config):
@@ -119,7 +119,7 @@ def stat_cards_html(logs_df, metrics_df, ecs_df, extra_stats=None, config=None):
 
     # ---- Cache Hit Rate (benchmark window) ----
     if not metrics_df.empty and not logs_df.empty:
-        hr_df = metric_filter(metrics_df, 'CacheHitRate', 'Average', 'CacheClusterId')
+        hr_df = cache_hit_rate_df(metrics_df)
         if not hr_df.empty:
             bench_start = logs_df['Timestamp'].min()
             hr_ts = hr_df['Timestamp']

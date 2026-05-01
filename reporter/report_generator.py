@@ -88,6 +88,22 @@ def _warn_if_cache_hit_rate_missing(metrics_df, source: str) -> None:
         & (metrics_df["Dimensions"].astype(str).str.startswith("CacheClusterId"))
     ]
     if hit_rate.empty:
+        has_hits = (
+            (metrics_df["MetricName"] == "CacheHits")
+            & (metrics_df["Stat"] == "Sum")
+            & (metrics_df["Dimensions"].astype(str).str.startswith("CacheClusterId"))
+        ).any()
+        has_misses = (
+            (metrics_df["MetricName"] == "CacheMisses")
+            & (metrics_df["Stat"] == "Sum")
+            & (metrics_df["Dimensions"].astype(str).str.startswith("CacheClusterId"))
+        ).any()
+        if has_hits and has_misses:
+            print(
+                "Info: CacheHitRate/Average is missing from "
+                f"{source}; deriving hit rate from CacheHits/CacheMisses."
+            )
+            return
         print(
             "Warning: CacheHitRate/Average with CacheClusterId dimensions is missing from "
             f"{source}. The old local report plotted this CloudWatch metric directly, "
@@ -106,9 +122,9 @@ def create_report(
 ) -> tuple[str, str]:
     """Build the rich HTML report and matching summary JSON.
 
-    This intentionally follows the March 2026 local report pipeline: cache hit
-    rate is read from the metrics CSV as CacheHitRate/Average at CacheClusterId
-    granularity, then plotted in the memtier chart.
+    This follows the March 2026 local report pipeline. Cache hit rate is read
+    from CacheHitRate/Average when CloudWatch publishes it, or derived from
+    CacheHits/CacheMisses at CacheClusterId granularity when it does not.
     """
     import pandas as pd
 

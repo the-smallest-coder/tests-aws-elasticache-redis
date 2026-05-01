@@ -10,6 +10,7 @@ locals {
     "cards.py",
     "template.py",
     "summary.py",
+    "exporter.py",
   ])
 }
 
@@ -118,6 +119,7 @@ modules = [
     "cards.py",
     "template.py",
     "summary.py",
+    "exporter.py",
 ]
 
 s3 = boto3.client("s3")
@@ -130,8 +132,8 @@ for mod in modules:
         sys.exit(1)
 PY
 
-          # Run the report generator
-          python report_generator.py
+          # Export CloudWatch data, generate the report, and send the final report-ready email.
+          python exporter.py
         EOT
       ]
 
@@ -151,6 +153,86 @@ PY
         {
           name  = "REPORT_TIMESTAMP"
           value = local.run_folder
+        },
+        {
+          name  = "RUN_FOLDER"
+          value = local.run_folder
+        },
+        {
+          name  = "ELASTICACHE_ID"
+          value = aws_elasticache_replication_group.main.id
+        },
+        {
+          name  = "ECS_CLUSTER"
+          value = local.loadgen_cluster_name
+        },
+        {
+          name  = "ECS_SERVICE"
+          value = local.loadgen_service_name
+        },
+        {
+          name  = "LOG_GROUP"
+          value = aws_cloudwatch_log_group.loadgen.name
+        },
+        {
+          name  = "LOADGEN_LOG_GROUP"
+          value = aws_cloudwatch_log_group.loadgen.name
+        },
+        {
+          name  = "CONTAINER_INSIGHTS_LOG_GROUP"
+          value = aws_cloudwatch_log_group.container_insights.name
+        },
+        {
+          name  = "ELASTICACHE_LOG_GROUP"
+          value = aws_cloudwatch_log_group.elasticache.name
+        },
+        {
+          name  = "LAMBDA_SCHEDULER_LOG_GROUP"
+          value = aws_cloudwatch_log_group.lambda_shutdown_scheduler.name
+        },
+        {
+          name  = "TEST_DURATION_MINUTES"
+          value = tostring(var.test_duration_minutes)
+        },
+        {
+          name  = "CLUSTER_MODE"
+          value = tostring(var.cluster_mode_enabled)
+        },
+        {
+          name  = "NUM_CACHE_NODES"
+          value = tostring(var.num_cache_nodes)
+        },
+        {
+          name  = "NUM_NODE_GROUPS"
+          value = tostring(var.num_node_groups)
+        },
+        {
+          name  = "REPLICAS_PER_NODE_GROUP"
+          value = tostring(var.replicas_per_node_group)
+        },
+        {
+          name  = "ENGINE_TYPE"
+          value = var.engine_type
+        },
+        {
+          name  = "ENGINE_VERSION"
+          value = var.engine_version
+        },
+        {
+          name  = "NODE_TYPE"
+          value = var.node_type
+        },
+        {
+          name  = "NODE_COUNT"
+          value = tostring(var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes)
+        },
+        {
+          name  = "NOTIFICATION_EMAIL"
+          value = var.notification_email
+        },
+        {
+          name  = "SES_IDENTITY_ARN"
+          value = var.notification_ses_identity_arn
         },
         {
           name  = "AWS_DEFAULT_REGION"

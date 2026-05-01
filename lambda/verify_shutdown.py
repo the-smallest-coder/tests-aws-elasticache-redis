@@ -160,6 +160,103 @@ def _elasticache_running(replication_group_id):
         return True, f"describe_failed: {exc}"
 
 
+def _launch_exporter_task(cluster_id, ecs_cluster, ecs_service):
+    task_definition = os.environ.get("REPORTER_TASK_DEFINITION", "").strip()
+    if not task_definition:
+        return {
+            "launched": False,
+            "task_arn": None,
+            "error": "REPORTER_TASK_DEFINITION not set",
+        }
+
+    try:
+        service_desc = ecs.describe_services(cluster=ecs_cluster, services=[ecs_service])
+        services = service_desc.get("services", [])
+        if not services:
+            return {
+                "launched": False,
+                "task_arn": None,
+                "error": f"ECS service not found: {ecs_service}",
+            }
+        network_config = services[0]["networkConfiguration"]
+    except Exception as exc:
+        return {
+            "launched": False,
+            "task_arn": None,
+            "error": f"Failed to read ECS service network config: {exc}",
+        }
+
+    env_names = [
+        "CLUSTER_ID",
+        "ELASTICACHE_ID",
+        "ECS_CLUSTER",
+        "ECS_SERVICE",
+        "S3_BUCKET",
+        "S3_PREFIX",
+        "RUN_FOLDER",
+        "REPORT_TIMESTAMP",
+        "LOG_GROUP",
+        "LOADGEN_LOG_GROUP",
+        "CONTAINER_INSIGHTS_LOG_GROUP",
+        "ELASTICACHE_LOG_GROUP",
+        "LAMBDA_SCHEDULER_LOG_GROUP",
+        "TEST_DURATION_MINUTES",
+        "CLUSTER_MODE",
+        "NUM_CACHE_NODES",
+        "NUM_NODE_GROUPS",
+        "REPLICAS_PER_NODE_GROUP",
+        "ENGINE_TYPE",
+        "ENGINE_VERSION",
+        "NODE_TYPE",
+        "NODE_COUNT",
+        "NOTIFICATION_EMAIL",
+        "SES_IDENTITY_ARN",
+        "AWS_REGION_NAME",
+    ]
+    environment = [
+        {"name": name, "value": os.environ.get(name, "")}
+        for name in env_names
+        if os.environ.get(name, "") != ""
+    ]
+    if not any(item["name"] == "REPORT_TIMESTAMP" for item in environment):
+        environment.append({"name": "REPORT_TIMESTAMP", "value": os.environ.get("RUN_FOLDER", "")})
+    if not any(item["name"] == "AWS_DEFAULT_REGION" for item in environment):
+        environment.append({"name": "AWS_DEFAULT_REGION", "value": os.environ.get("AWS_REGION_NAME", "")})
+
+    try:
+        response = ecs.run_task(
+            cluster=ecs_cluster,
+            taskDefinition=task_definition,
+            launchType="FARGATE",
+            networkConfiguration=network_config,
+            overrides={
+                "containerOverrides": [
+                    {
+                        "name": "reporter",
+                        "environment": environment,
+                    }
+                ]
+            },
+            count=1,
+            startedBy="VerifyShutdown",
+        )
+    except Exception as exc:
+        return {
+            "launched": False,
+            "task_arn": None,
+            "error": f"ecs.run_task failed: {exc}",
+        }
+
+    tasks = response.get("tasks", [])
+    task_arn = tasks[0].get("taskArn") if tasks else None
+    return {
+        "launched": bool(task_arn),
+        "task_arn": task_arn,
+        "failures": response.get("failures", []),
+        "error": None if task_arn else "ecs.run_task returned no tasks",
+    }
+
+
 def handler(event, context):
     cluster_id = os.environ.get("CLUSTER_ID", "")
     ecs_cluster = os.environ["ECS_CLUSTER"]
@@ -223,10 +320,34 @@ def handler(event, context):
             aws_region
         )
         _send_email(subject, body_text, body_html)
+        exporter_result = _launch_exporter_task(cluster_id, ecs_cluster, ecs_service)
+        if not exporter_result.get("launched"):
+            error = exporter_result.get("error", "unknown error")
+            fail_subject = f"[ElastiCache Test Warning] Report exporter failed to launch ({cluster_id})"
+            fail_body = (
+                f"Shutdown verification passed, but the report exporter ECS task did not launch.\n\n"
+                f"Cluster: {cluster_id}\n"
+                f"Error: {error}\n"
+            )
+            fail_html = _build_verify_html(
+                "&#9888;&#65039; Report Exporter Not Launched",
+                "linear-gradient(135deg,#e37400,#c56200)",
+                cluster_id,
+                [
+                    ("ECS Service", ecs_detail, True),
+                    (f"ElastiCache ({elasticache_id})", elasticache_detail, True),
+                    ("Report Exporter", error, False),
+                ],
+                aws_region
+            )
+            _send_email(fail_subject, fail_body, fail_html)
+    else:
+        exporter_result = {"launched": False, "task_arn": None, "skipped": True}
 
     return {
         "ecs_running": ecs_is_running,
         "ecs_detail": ecs_detail,
         "elasticache_running": elasticache_is_running,
-        "elasticache_detail": elasticache_detail
+        "elasticache_detail": elasticache_detail,
+        "exporter_task": exporter_result
     }
