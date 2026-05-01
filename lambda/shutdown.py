@@ -222,9 +222,17 @@ def handler(event, context):
                 timestamp=timestamp
             )
             results['reporter_task'] = reporter_result
+            if isinstance(reporter_result, dict) and reporter_result.get('error'):
+                results['reporter_error'] = reporter_result['error']
         except Exception as e:
             print(f"Reporter task launch failed: {e}")
-            results['reporter_task'] = str(e)
+            results['reporter_task'] = {
+                'launched': False,
+                'task_arn': None,
+                'failures': [],
+                'error': str(e),
+            }
+            results['reporter_error'] = str(e)
 
         # Send email notification if configured
         try:
@@ -294,7 +302,20 @@ def send_notification(results, cluster_id, elasticache_id, s3_bucket, s3_prefix,
     metrics_exported = results.get('metrics_export') is not None
     ecs_metrics_exported = results.get('ecs_metrics_export') is not None
     logs_exported = any(v for v in results.get('log_exports', {}).values() if v)
-    reporter_launched = results.get('reporter_task') is not None and not isinstance(results.get('reporter_task'), str)
+    reporter_result = results.get('reporter_task') or {}
+    if isinstance(reporter_result, dict):
+        reporter_launched = bool(reporter_result.get('launched') and reporter_result.get('task_arn'))
+        reporter_error = reporter_result.get('error')
+        reporter_skipped = bool(reporter_result.get('skipped'))
+    else:
+        # Backward-compatible handling for older Lambda results.
+        reporter_launched = isinstance(reporter_result, str) and reporter_result.startswith('arn:')
+        reporter_error = None if reporter_launched else str(reporter_result or '')
+        reporter_skipped = not bool(reporter_result)
+    reporter_status_text = "&#9989; Generating" if reporter_launched else (
+        "&#8212; Not launched" if reporter_skipped else "&#10060; Failed"
+    )
+    reporter_status_color = "#1e8e3e" if reporter_launched else ("#80868b" if reporter_skipped else "#d93025")
 
     metrics_path = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/metrics/"
     logs_path = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/logs/"
@@ -316,6 +337,8 @@ ElastiCache ({elasticache_id}): {elasticache_status_text}
 === Exports ===
 Metrics: {metrics_path}
 Logs: {logs_path}
+HTML Report: {'Generating' if reporter_launched else ('Not launched' if reporter_skipped else 'Failed')}
+{f'Reporter error: {reporter_error}' if reporter_error else ''}
 
 Review status above for any remaining resources.
 """
@@ -388,7 +411,7 @@ Review status above for any remaining resources.
                 </td>
                 <td width="50%" style="padding:8px 0;">
                   <span style="font-size:12px;color:#80868b;">HTML Report</span><br>
-                  <span style="font-size:14px;color:{'#1e8e3e' if reporter_launched else '#80868b'};font-weight:500;">{'&#9989; Generating' if reporter_launched else '&#8212; Not launched'}</span>
+                  <span style="font-size:14px;color:{reporter_status_color};font-weight:500;">{reporter_status_text}</span>
                 </td>
               </tr>
             </table>
@@ -598,11 +621,24 @@ def run_reporter_task(cluster_id, ecs_cluster, metrics_key, ecs_metrics_key, log
     task_definition = os.environ.get('REPORTER_TASK_DEFINITION')
     if not task_definition:
         print("REPORTER_TASK_DEFINITION not set, skipping report generation.")
-        return None
+        return {
+            'launched': False,
+            'task_arn': None,
+            'failures': [],
+            'error': None,
+            'skipped': True,
+            'reason': 'REPORTER_TASK_DEFINITION not set',
+        }
 
     if not metrics_key or not logs_key:
         print("Missing metrics or logs key, skipping report generation.")
-        return None
+        return {
+            'launched': False,
+            'task_arn': None,
+            'failures': [],
+            'error': 'Missing metrics or logs key',
+            'skipped': False,
+        }
 
     # Get network configuration from the loadgen service to reuse subnets/security groups
     # This assumes the loadgen service still exists (even if scaled to 0) which matches our flow
@@ -662,12 +698,25 @@ def run_reporter_task(cluster_id, ecs_cluster, metrics_key, ecs_metrics_key, log
 
     tasks = response.get('tasks', [])
     if not tasks:
-        print(f"run_task did not return any tasks. Response failures: {response.get('failures')}")
-        return None
+        failures = response.get('failures', [])
+        print(f"run_task did not return any tasks. Response failures: {failures}")
+        return {
+            'launched': False,
+            'task_arn': None,
+            'failures': failures,
+            'error': 'ecs.run_task returned no tasks',
+            'skipped': False,
+        }
 
     task_arn = tasks[0].get('taskArn')
     print(f"Reporter task launched: {task_arn}")
-    return task_arn
+    return {
+        'launched': bool(task_arn),
+        'task_arn': task_arn,
+        'failures': response.get('failures', []),
+        'error': None if task_arn else 'ecs.run_task response task did not include taskArn',
+        'skipped': False,
+    }
 
 
 def export_logs_to_s3(log_group, bucket, key, start_time, end_time):
