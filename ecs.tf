@@ -147,16 +147,16 @@ locals {
   memtier_duration_label    = var.loadgen_memtier_test_time > 0 ? "${var.loadgen_memtier_test_time}s" : "until stopped"
 
   # ---------------------------------------------------------------------------
-  # Usable memory (bytes) per ElastiCache node type.
-  # Values are ~85% of advertised RAM to stay within Redis maxmemory limits
-  # and leave headroom for overhead — producing a warm but not over-filled cache.
+  # Advertised memory (bytes) per ElastiCache node type. The 85% target is
+  # applied separately by _fill_factor below so the map stays easy to audit
+  # against AWS instance specs.
   # Source: https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/CacheNodes.SupportedTypes.html
   # ---------------------------------------------------------------------------
   _node_memory_bytes = {
     # T4g family
-    "cache.t4g.micro"  = 536870912    # 512 MB  → 85% ≈ 456 MB
-    "cache.t4g.small"  = 1610612736   # 1.5 GB  → 85% ≈ 1.275 GB
-    "cache.t4g.medium" = 3435973836   # 3.2 GB  → 85% ≈ 2.72 GB
+    "cache.t4g.micro"  = 536870912    # 512 MB advertised
+    "cache.t4g.small"  = 1610612736   # 1.5 GB advertised
+    "cache.t4g.medium" = 3435973836   # 3.2 GB advertised
     # T3 family
     "cache.t3.micro"   = 536870912
     "cache.t3.small"   = 1610612736
@@ -190,8 +190,8 @@ locals {
   # 85% fill factor — cache stays warm without hitting eviction pressure
   _fill_factor = 0.85
 
-  # Usable bytes for this run; fall back to t4g.micro if type is unknown
-  _usable_bytes = lookup(local._node_memory_bytes, var.node_type,
+  # Advertised bytes for this run; fall back to t4g.micro if type is unknown.
+  _advertised_bytes = lookup(local._node_memory_bytes, var.node_type,
     local._node_memory_bytes["cache.t4g.micro"])
 
   # key-maximum: how many data_size-byte values fit at the target fill factor.
@@ -201,6 +201,6 @@ locals {
 
   # If the user explicitly set key-maximum, honour it; otherwise auto-compute.
   memtier_key_maximum = var.loadgen_memtier_key_maximum > 0 ? var.loadgen_memtier_key_maximum : (
-    floor(local._usable_bytes * local._fill_factor / local._bytes_per_key)
+    floor(local._advertised_bytes * local._fill_factor / local._bytes_per_key)
   )
 }

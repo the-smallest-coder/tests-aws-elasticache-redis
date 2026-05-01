@@ -1,5 +1,6 @@
 import boto3
 import csv
+import html
 import io
 import json
 import os
@@ -321,6 +322,14 @@ def send_notification(results, cluster_id, elasticache_id, s3_bucket, s3_prefix,
     logs_path = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/logs/"
     aws_region = os.environ.get('AWS_REGION', os.environ.get('AWS_DEFAULT_REGION', ''))
 
+    cluster_id_html = html.escape(str(cluster_id), quote=True)
+    elasticache_id_html = html.escape(str(elasticache_id), quote=True)
+    ecs_status_text_html = html.escape(str(ecs_status_text), quote=True)
+    elasticache_status_text_html = html.escape(str(elasticache_status_text), quote=True)
+    metrics_path_html = html.escape(metrics_path, quote=True)
+    logs_path_html = html.escape(logs_path, quote=True)
+    aws_region_html = html.escape(str(aws_region), quote=True)
+
     # Determine overall status
     all_ok = ecs_ok and ec_ok
     header_bg = "linear-gradient(135deg,#1e8e3e,#137333)" if all_ok else "linear-gradient(135deg,#e37400,#c56200)"
@@ -364,7 +373,7 @@ Review status above for any remaining resources.
         <tr>
           <td style="background-color:#e8f0fe;padding:14px 40px;border-bottom:1px solid #d2e3fc;">
             <span style="font-size:13px;color:#5f6368;">Cluster</span><br>
-            <span style="font-size:16px;color:#1a73e8;font-weight:600;font-family:monospace;">{cluster_id}</span>
+            <span style="font-size:16px;color:#1a73e8;font-weight:600;font-family:monospace;">{cluster_id_html}</span>
           </td>
         </tr>
 
@@ -379,11 +388,11 @@ Review status above for any remaining resources.
               </tr>
               <tr>
                 <td style="padding:10px 16px;font-size:14px;color:#202124;border-bottom:1px solid #e8eaed;">ECS Service</td>
-                <td style="padding:10px 16px;font-size:14px;color:{ecs_color};font-weight:500;border-bottom:1px solid #e8eaed;">{ecs_icon} {ecs_status_text}</td>
+                <td style="padding:10px 16px;font-size:14px;color:{ecs_color};font-weight:500;border-bottom:1px solid #e8eaed;">{ecs_icon} {ecs_status_text_html}</td>
               </tr>
               <tr>
-                <td style="padding:10px 16px;font-size:14px;color:#202124;">ElastiCache ({elasticache_id})</td>
-                <td style="padding:10px 16px;font-size:14px;color:{ec_color};font-weight:500;">{ec_icon} {elasticache_status_text}</td>
+                <td style="padding:10px 16px;font-size:14px;color:#202124;">ElastiCache ({elasticache_id_html})</td>
+                <td style="padding:10px 16px;font-size:14px;color:{ec_color};font-weight:500;">{ec_icon} {elasticache_status_text_html}</td>
               </tr>
             </table>
           </td>
@@ -425,9 +434,9 @@ Review status above for any remaining resources.
               <tr>
                 <td style="padding:14px 20px;">
                   <span style="font-size:12px;color:#80868b;">Metrics Location</span><br>
-                  <span style="font-size:13px;color:#202124;font-family:monospace;">{metrics_path}</span><br><br>
+                  <span style="font-size:13px;color:#202124;font-family:monospace;">{metrics_path_html}</span><br><br>
                   <span style="font-size:12px;color:#80868b;">Logs Location</span><br>
-                  <span style="font-size:13px;color:#202124;font-family:monospace;">{logs_path}</span>
+                  <span style="font-size:13px;color:#202124;font-family:monospace;">{logs_path_html}</span>
                 </td>
               </tr>
             </table>
@@ -438,7 +447,7 @@ Review status above for any remaining resources.
         <tr>
           <td style="background-color:#f8f9fa;padding:20px 40px;border-top:1px solid #e8eaed;">
             <p style="margin:0;font-size:12px;color:#80868b;text-align:center;">
-              Automated notification from ElastiCache Performance Lab&nbsp;&nbsp;&#8226;&nbsp;&nbsp;{aws_region}
+              Automated notification from ElastiCache Performance Lab&nbsp;&nbsp;&#8226;&nbsp;&nbsp;{aws_region_html}
             </p>
           </td>
         </tr>

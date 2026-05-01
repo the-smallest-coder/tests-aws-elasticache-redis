@@ -1,3 +1,4 @@
+import html
 import os
 import re
 
@@ -62,11 +63,16 @@ def _build_verify_html(header_title, header_bg, cluster_id, rows, aws_region="")
     for label, value, ok in rows:
         color = "#1e8e3e" if ok else "#d93025"
         icon = "&#9989;" if ok else "&#9888;&#65039;"
+        label_html = html.escape(str(label), quote=True)
+        value_html = html.escape(str(value), quote=True)
         rows_html += f"""\
               <tr>
-                <td style="padding:10px 16px;font-size:14px;color:#202124;border-bottom:1px solid #e8eaed;">{label}</td>
-                <td style="padding:10px 16px;font-size:14px;color:{color};font-weight:500;border-bottom:1px solid #e8eaed;">{icon} {value}</td>
+                <td style="padding:10px 16px;font-size:14px;color:#202124;border-bottom:1px solid #e8eaed;">{label_html}</td>
+                <td style="padding:10px 16px;font-size:14px;color:{color};font-weight:500;border-bottom:1px solid #e8eaed;">{icon} {value_html}</td>
               </tr>"""
+
+    cluster_id_html = html.escape(str(cluster_id), quote=True)
+    aws_region_html = html.escape(str(aws_region), quote=True)
 
     return f"""\
 <!DOCTYPE html>
@@ -89,7 +95,7 @@ def _build_verify_html(header_title, header_bg, cluster_id, rows, aws_region="")
         <tr>
           <td style="background-color:#e8f0fe;padding:14px 40px;border-bottom:1px solid #d2e3fc;">
             <span style="font-size:13px;color:#5f6368;">Cluster</span><br>
-            <span style="font-size:16px;color:#1a73e8;font-weight:600;font-family:monospace;">{cluster_id}</span>
+            <span style="font-size:16px;color:#1a73e8;font-weight:600;font-family:monospace;">{cluster_id_html}</span>
           </td>
         </tr>
 
@@ -111,7 +117,7 @@ def _build_verify_html(header_title, header_bg, cluster_id, rows, aws_region="")
         <tr>
           <td style="background-color:#f8f9fa;padding:20px 40px;border-top:1px solid #e8eaed;">
             <p style="margin:0;font-size:12px;color:#80868b;text-align:center;">
-              Automated notification from ElastiCache Performance Lab&nbsp;&nbsp;&#8226;&nbsp;&nbsp;{aws_region}
+              Automated notification from ElastiCache Performance Lab&nbsp;&nbsp;&#8226;&nbsp;&nbsp;{aws_region_html}
             </p>
           </td>
         </tr>
