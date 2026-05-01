@@ -95,14 +95,37 @@ fi
 # Extract S3 keys (4th column from aws s3 ls output)
 ALL_KEYS=$(echo "$S3_LISTING" | awk '{print $4}')
 
-# If --latest, filter to most recent timestamped run
-# NOTE: grep -oP requires GNU grep with PCRE support (standard on Linux/GNU environments).
-#       macOS/BSD grep does not support -P and is not a supported platform for this script.
+# If --latest, filter to the timestamped run with the newest S3 LastModified time.
+# Run folder timestamps can come from the test's own clock/timezone and are not
+# always ordered the same way as upload completion time.
 if $LATEST; then
-    # Pick the highest timestamped run folder, not the most recently uploaded object.
-    LATEST_TS=$(echo "$ALL_KEYS" | grep -oP '\d{8}-\d{6}' | sort -u | tail -1)
+    LATEST_TS=$(echo "$S3_LISTING" | awk '
+        NF >= 4 {
+            key = $4
+            if (match(key, /[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]/)) {
+                run = substr(key, RSTART, RLENGTH)
+                modified = $1 " " $2
+                if (!(run in latest_modified) || modified > latest_modified[run]) {
+                    latest_modified[run] = modified
+                }
+            }
+        }
+        END {
+            for (run in latest_modified) {
+                if (best_run == "" ||
+                    latest_modified[run] > best_modified ||
+                    (latest_modified[run] == best_modified && run > best_run)) {
+                    best_run = run
+                    best_modified = latest_modified[run]
+                }
+            }
+            if (best_run != "") {
+                print best_run
+            }
+        }
+    ')
     if [[ -n "$LATEST_TS" ]]; then
-        echo "  Latest run: $LATEST_TS"
+        echo "  Latest run by upload time: $LATEST_TS"
         ALL_KEYS=$(echo "$ALL_KEYS" | grep "$LATEST_TS")
     else
         echo "  Could not identify timestamped runs. Downloading all files."

@@ -179,12 +179,10 @@ def export_ecs_metrics_to_s3(cluster, service, bucket, key, start_time, end_time
     return export_metric_sources_to_s3(sources, bucket, key, start_time, end_time)
 
 
-def export_logs_to_s3(log_group, bucket, key, start_time, end_time) -> str | None:
+def export_logs_to_s3(log_group, bucket, key, start_time=None, end_time=None, log_stream_name_prefix: str = "") -> str | None:
     if not log_group:
         return None
 
-    start_time_ms = int(start_time.timestamp() * 1000)
-    end_time_ms = int(end_time.timestamp() * 1000)
     buffer = bytearray()
     upload_id = None
     parts = []
@@ -218,10 +216,14 @@ def export_logs_to_s3(log_group, bucket, key, start_time, end_time) -> str | Non
         while True:
             params = {
                 "logGroupName": log_group,
-                "startTime": start_time_ms,
-                "endTime": end_time_ms,
                 "interleaved": True,
             }
+            if start_time is not None:
+                params["startTime"] = int(start_time.timestamp() * 1000)
+            if end_time is not None:
+                params["endTime"] = int(end_time.timestamp() * 1000)
+            if log_stream_name_prefix:
+                params["logStreamNamePrefix"] = log_stream_name_prefix
             if next_token:
                 params["nextToken"] = next_token
 
@@ -338,7 +340,12 @@ def main() -> None:
 
     export_elasticache_metrics_to_s3(elasticache_id, bucket, metrics_key, start_time, end_time)
     export_ecs_metrics_to_s3(ecs_cluster, ecs_service, bucket, ecs_metrics_key, start_time, end_time)
-    export_logs_to_s3(os.environ.get("LOADGEN_LOG_GROUP") or os.environ.get("LOG_GROUP"), bucket, logs_key, start_time, end_time)
+    export_logs_to_s3(
+        os.environ.get("LOADGEN_LOG_GROUP") or os.environ.get("LOG_GROUP"),
+        bucket,
+        logs_key,
+        log_stream_name_prefix="memtier/",
+    )
     export_logs_to_s3(
         os.environ.get("CONTAINER_INSIGHTS_LOG_GROUP"),
         bucket,
