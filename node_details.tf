@@ -62,7 +62,13 @@ resource "aws_s3_object" "cluster_details" {
       ratio             = var.loadgen_memtier_ratio
       key_pattern       = var.loadgen_memtier_key_pattern
       key_maximum       = local.memtier_key_maximum
+      key_maximum_total = local.memtier_key_maximum * var.loadgen_task_count
       key_maximum_auto  = var.loadgen_memtier_key_maximum == 0
+      auto_sizing       = {
+        writable_shard_count = local._writable_shard_count
+        target_fill_bytes    = local._target_fill_bytes
+        target_total_keys    = local._target_total_keys
+      }
       test_time_seconds = local.memtier_test_time_seconds
       duration_label    = local.memtier_duration_label
       tls               = var.transit_encryption_enabled

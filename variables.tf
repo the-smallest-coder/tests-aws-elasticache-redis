@@ -266,7 +266,7 @@ variable "loadgen_memtier_key_pattern" {
 }
 
 variable "loadgen_memtier_key_maximum" {
-  description = "Maximum key count per load generator task. 0 (default) auto-computes a value based on node type and data size to fill ~85% of cache memory. Set >0 to use a specific value. Each task still gets a unique key prefix so keyspaces do not overlap."
+  description = "Maximum key count per load generator task. 0 (default) auto-computes total target keys from writable cache memory (~85% of primary/shard capacity), then divides by loadgen_task_count. Set >0 to use a specific per-task value. Each task still gets a unique key prefix so keyspaces do not overlap."
   type        = number
   default     = 0
 

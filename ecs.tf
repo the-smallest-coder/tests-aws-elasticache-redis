@@ -199,8 +199,15 @@ locals {
   _key_overhead_bytes = 70
   _bytes_per_key      = var.loadgen_memtier_data_size + local._key_overhead_bytes
 
+  # Capacity scales with primary shards in cluster mode. Non-cluster replicas
+  # mirror the primary, so they do not increase writable keyspace.
+  _writable_shard_count = var.cluster_mode_enabled ? var.num_node_groups : 1
+  _target_fill_bytes    = local._advertised_bytes * local._writable_shard_count * local._fill_factor
+  _target_total_keys    = floor(local._target_fill_bytes / local._bytes_per_key)
+  _target_keys_per_task = max(1, floor(local._target_total_keys / var.loadgen_task_count))
+
   # If the user explicitly set key-maximum, honour it; otherwise auto-compute.
   memtier_key_maximum = var.loadgen_memtier_key_maximum > 0 ? var.loadgen_memtier_key_maximum : (
-    floor(local._advertised_bytes * local._fill_factor / local._bytes_per_key)
+    local._target_keys_per_task
   )
 }

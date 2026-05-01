@@ -275,26 +275,22 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
     get_lat_a, get_lat_b = number(("latency_server_us", "get_avg"))
     set_lat_a, set_lat_b = number(("latency_server_us", "set_avg"))
 
-    # Determine tone based on both cache hit rate and server latency.
-    hit_improved = (hit_b or 0) >= (hit_a or 0)
-    hit_worsened = (hit_b or 0) <= (hit_a or 0)
+    # Determine tone based on strict improvement/worsening only; equality is neutral.
+    cache_latency_signals = [
+        _metric_signal(hit_a, hit_b, "higher"),
+        _metric_signal(get_lat_a, get_lat_b, "lower"),
+        _metric_signal(set_lat_a, set_lat_b, "lower"),
+    ]
+    cache_latency_signals = [signal for signal in cache_latency_signals if signal != 0]
 
-    # Lower latency is better; handle missing values conservatively.
-    get_improved = (get_lat_b or math.inf) <= (get_lat_a or math.inf)
-    get_worsened = (get_lat_b or -math.inf) >= (get_lat_a or -math.inf)
-
-    set_improved = (set_lat_b or math.inf) <= (set_lat_a or math.inf)
-    set_worsened = (set_lat_b or -math.inf) >= (set_lat_a or -math.inf)
-
-    all_improved_or_equal = hit_improved and get_improved and set_improved
-    all_worsened_or_equal = hit_worsened and get_worsened and set_worsened
-
-    if all_improved_or_equal and not all_worsened_or_equal:
+    if cache_latency_signals and all(signal > 0 for signal in cache_latency_signals):
         cache_latency_tone = "better"
-    elif all_worsened_or_equal and not all_improved_or_equal:
+    elif cache_latency_signals and all(signal < 0 for signal in cache_latency_signals):
         cache_latency_tone = "worse"
-    else:
+    elif cache_latency_signals:
         cache_latency_tone = "mixed"
+    else:
+        cache_latency_tone = "neutral"
 
     items.append(
         {

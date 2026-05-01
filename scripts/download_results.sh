@@ -30,10 +30,28 @@ PARALLEL=8
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --output-dir)   OUTPUT_DIR="$2"; shift 2 ;;
+        --output-dir)
+            if [[ $# -lt 2 || "$2" == --* ]]; then
+                echo "ERROR: --output-dir requires a directory argument." >&2
+                exit 1
+            fi
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
         --reports-only) REPORTS_ONLY=true; shift ;;
         --latest)       LATEST=true; shift ;;
-        --parallel)     PARALLEL="$2"; shift 2 ;;
+        --parallel)
+            if [[ $# -lt 2 || "$2" == --* ]]; then
+                echo "ERROR: --parallel requires a positive integer argument." >&2
+                exit 1
+            fi
+            if ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
+                echo "ERROR: --parallel must be a positive integer, got '$2'." >&2
+                exit 1
+            fi
+            PARALLEL="$2"
+            shift 2
+            ;;
         *)              echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
