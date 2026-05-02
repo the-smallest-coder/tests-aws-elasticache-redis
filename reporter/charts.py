@@ -137,7 +137,7 @@ def build_memtier_figure(logs_resampled, oom_df, metrics_df, x_min, x_max):
 #  GROUP 2 — Infrastructure figure                                     #
 # ------------------------------------------------------------------ #
 
-def build_infra_figure(ecs_df, metrics_df, cluster_id, config):
+def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max=None):
     """Build a 4-row figure: CPU, Network TX, ECS Memory, ElastiCache Memory.
 
     Returns a Plotly Figure ready for ``to_html()``.
@@ -277,6 +277,9 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config):
                      title_font=dict(color=C_ECS_MEM), tickfont=dict(color=C_ECS_MEM))
     fig.update_yaxes(title_text="%",      row=4, col=1)
     fig.update_xaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
+    if x_min is not None and x_max is not None:
+        for r in range(1, 5):
+            fig.update_xaxes(range=[x_min, x_max], row=r, col=1)
     fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
     fig.update_layout(
         **LAYOUT_BASE, height=1300,
@@ -292,7 +295,7 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config):
 #  GROUP 3 — ElastiCache Deep-Dive figure                              #
 # ------------------------------------------------------------------ #
 
-def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None):
+def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None, x_min=None, x_max=None):
     """Build a 4-row deep-dive figure for configuration comparison.
 
     Rows: CPU Credits | Command Latency | Network Throttling | Connections & Fragmentation.
@@ -437,6 +440,9 @@ def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None):
                      title_font=dict(color=C_MEM_FRAG),  tickfont=dict(color=C_MEM_FRAG),
                      showgrid=False)
     fig.update_xaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
+    if x_min is not None and x_max is not None:
+        for r in range(1, 5):
+            fig.update_xaxes(range=[x_min, x_max], row=r, col=1)
     fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
 
     fig.update_layout(

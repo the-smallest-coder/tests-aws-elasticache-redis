@@ -110,7 +110,9 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
             bs = bench_start
             if hasattr(bs, 'tzinfo') and bs.tzinfo is not None:
                 bs = bs.replace(tzinfo=None)
-            benchmark['prefill_min'] = _safe(float((bs - ps).total_seconds() / 60), 1)
+            prefill_min = float((bs - ps).total_seconds() / 60)
+            if prefill_min >= 0:
+                benchmark['prefill_min'] = _safe(prefill_min, 1)
 
     # ------------------------------------------------------------------ #
     #  cache_efficiency                                                    #

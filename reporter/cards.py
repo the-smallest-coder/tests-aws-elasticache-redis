@@ -69,9 +69,10 @@ def stat_cards_html(logs_df, metrics_df, ecs_df, extra_stats=None, config=None):
             if hasattr(bs, 'tzinfo') and bs.tzinfo is not None:
                 bs = bs.replace(tzinfo=None)
             prefill_min = (bs - ps).total_seconds() / 60
-            cards.append(('Pre-fill Duration', f"{prefill_min:.0f}", 'min', '#78909c',
-                          'Time memtier spent silently loading keys before benchmark traffic began. '
-                          'Scales with keyspace size relative to instance memory.'))
+            if prefill_min >= 0:
+                cards.append(('Pre-fill Duration', f"{prefill_min:.0f}", 'min', '#78909c',
+                              'Time memtier spent silently loading keys before benchmark traffic began. '
+                              'Scales with keyspace size relative to instance memory.'))
 
     # ---- ECS CPU / Memory ----
     if not ecs_df.empty:

@@ -69,6 +69,13 @@ def _compute_time_range(*frames) -> str:
     return f"{t0.strftime('%Y-%m-%d %H:%M')} \u2013 {t1.strftime('%H:%M')} ({duration_min} min)"
 
 
+def _clip_to_time_window(df, start, end):
+    if df is None or df.empty or "Timestamp" not in df.columns or start is None or end is None:
+        return df
+    ts = df["Timestamp"]
+    return df[(ts >= start) & (ts <= end)].copy()
+
+
 def _config_from_env() -> dict[str, str]:
     return {
         "engine_type": os.environ.get("ENGINE_TYPE", ""),
@@ -141,15 +148,18 @@ def create_report(
 
     oom_df = extra_stats.get("oom_df", pd.DataFrame())
 
-    fig_m = build_memtier_figure(logs_resampled, oom_df, metrics_df, x_min, x_max)
-    fig_i = build_infra_figure(ecs_df, metrics_df, cluster_id, config)
-    fig_d = build_elasticache_deep_dive_figure(metrics_df, cluster_id, config)
+    metrics_window_df = _clip_to_time_window(metrics_df, x_min, x_max)
+    ecs_window_df = _clip_to_time_window(ecs_df, x_min, x_max)
 
-    time_range = _compute_time_range(logs_df, metrics_df, ecs_df)
+    fig_m = build_memtier_figure(logs_resampled, oom_df, metrics_window_df, x_min, x_max)
+    fig_i = build_infra_figure(ecs_window_df, metrics_window_df, cluster_id, config, x_min, x_max)
+    fig_d = build_elasticache_deep_dive_figure(metrics_window_df, cluster_id, config, x_min, x_max)
+
+    time_range = _compute_time_range(logs_df) if not logs_df.empty else _compute_time_range(metrics_df, ecs_df)
     cluster_mode = str(config.get("cluster_mode", "false")).lower() == "true"
     id_label = "Cluster" if cluster_mode else "Replication Group"
 
-    summary = build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, time_range)
+    summary = build_summary(metrics_window_df, logs_df, ecs_window_df, extra_stats, config, cluster_id, time_range)
     summary_json = json.dumps(summary, indent=2, default=str)
 
     html_content = render_html(
@@ -158,7 +168,7 @@ def create_report(
         id_label=id_label,
         time_range=time_range,
         pills_html=header_pills(config),
-        cards_html=stat_cards_html(logs_df, metrics_df, ecs_df, extra_stats, config),
+        cards_html=stat_cards_html(logs_df, metrics_window_df, ecs_window_df, extra_stats, config),
         chart_memtier_html=fig_m.to_html(include_plotlyjs="cdn", full_html=False),
         chart_infra_html=fig_i.to_html(include_plotlyjs=False, full_html=False),
         chart_deep_dive_html=fig_d.to_html(include_plotlyjs=False, full_html=False),
@@ -200,24 +210,9 @@ def run_generate_report(run_dir: str, config: dict) -> None:
         logs_df = parse_memtier_logs(log_content)
         extra_stats = parse_memtier_extra_stats(log_content)
 
-    time_range = _compute_time_range(logs_df, metrics_df, ecs_df)
     _warn_if_cache_hit_rate_missing(metrics_df, str(ec_csvs[0]))
 
-    summary = build_summary(
-        metrics_df=metrics_df,
-        logs_df=logs_df,
-        ecs_df=ecs_df,
-        extra_stats=extra_stats,
-        config=config,
-        cluster_id=cluster_id,
-        time_range=time_range,
-    )
-
-    out_path = run_path / "results_local.json"
-    out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(f"Written: {out_path}")
-
-    html_content, _summary_json = create_report(
+    html_content, summary_json = create_report(
         metrics_df=metrics_df,
         logs_df=logs_df,
         cluster_id=cluster_id,
@@ -226,6 +221,10 @@ def run_generate_report(run_dir: str, config: dict) -> None:
         config=config,
         extra_stats=extra_stats,
     )
+
+    out_path = run_path / "results_local.json"
+    out_path.write_text(summary_json, encoding="utf-8")
+    print(f"Written: {out_path}")
 
     html_path = run_path / "results_local.html"
     html_path.write_text(html_content, encoding="utf-8")
