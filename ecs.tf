@@ -58,24 +58,31 @@ resource "aws_ecs_task_definition" "loadgen" {
       essential = true
       stopTimeout = 120
 
-      command = concat(
-        [
-          "--server=${local.elasticache_endpoint}",
-          "--port=${var.port}",
-          "--threads=${var.loadgen_memtier_threads}",
-          "--clients=${var.loadgen_memtier_clients}",
-          "--pipeline=${var.loadgen_memtier_pipeline}",
-          "--data-size=${var.loadgen_memtier_data_size}",
-          "--ratio=${var.loadgen_memtier_ratio}",
-          "--test-time=${local.memtier_test_time_seconds}",
-          "--key-pattern=${var.loadgen_memtier_key_pattern}",
-          "--key-prefix=$(cat /proc/sys/kernel/random/uuid)-",
-          "--key-maximum=${local.memtier_key_maximum}",
-          "--hide-histogram"
-        ],
-        var.cluster_mode_enabled ? ["--cluster-mode"] : [],
-        var.transit_encryption_enabled ? ["--tls", "--tls-skip-verify"] : []
-      )
+      entryPoint = ["sh", "-c"]
+      command = [
+        join(" ", concat(
+          [
+            "UUID=$(cat /proc/sys/kernel/random/uuid)",
+            "&&",
+            "exec",
+            "memtier_benchmark",
+            "--server=${local.elasticache_endpoint}",
+            "--port=${var.port}",
+            "--threads=${var.loadgen_memtier_threads}",
+            "--clients=${var.loadgen_memtier_clients}",
+            "--pipeline=${var.loadgen_memtier_pipeline}",
+            "--data-size=${var.loadgen_memtier_data_size}",
+            "--ratio=${var.loadgen_memtier_ratio}",
+            "--test-time=${local.memtier_test_time_seconds}",
+            "--key-pattern=${var.loadgen_memtier_key_pattern}",
+            "--key-prefix=$UUID-",
+            "--key-maximum=${local.memtier_key_maximum}",
+            "--hide-histogram"
+          ],
+          var.cluster_mode_enabled ? ["--cluster-mode"] : [],
+          var.transit_encryption_enabled ? ["--tls", "--tls-skip-verify"] : []
+        ))
+      ]
       
       logConfiguration = {
         logDriver = "awslogs"
