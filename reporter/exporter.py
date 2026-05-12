@@ -3,18 +3,85 @@ from __future__ import annotations
 import csv
 import html
 import io
+import json
 import os
 import re
 from datetime import datetime, timedelta
 
 import boto3
 
+from parsers import parse_memtier_logs
 from report_generator import run_uploaded_report
 
 
 STATISTICS = ["Average", "Sum", "Maximum", "Minimum"]
 EXPORT_BUFFER_MINUTES = 5
 LOG_EXPORT_PART_SIZE = 6 * 1024 * 1024
+
+REQUIRED_ELASTICACHE_METRICS = [
+    "CacheHitRate",
+    "CacheHits",
+    "CacheMisses",
+    "CPUCreditBalance",
+    "CPUCreditUsage",
+    "CPUUtilization",
+    "CurrConnections",
+    "CurrItems",
+    "DatabaseCapacityUsageCountedForEvictPercentage",
+    "DatabaseCapacityUsagePercentage",
+    "DatabaseMemoryUsageCountedForEvictPercentage",
+    "DatabaseMemoryUsagePercentage",
+    "EngineCPUUtilization",
+    "Evictions",
+    "FreeableMemory",
+    "GetTypeCmds",
+    "GetTypeCmdsLatency",
+    "MemoryFragmentationRatio",
+    "NetworkBandwidthInAllowanceExceeded",
+    "NetworkBandwidthOutAllowanceExceeded",
+    "NetworkBytesIn",
+    "NetworkBytesOut",
+    "NetworkConntrackAllowanceExceeded",
+    "NetworkPacketsPerSecondAllowanceExceeded",
+    "NewConnections",
+    "SetTypeCmds",
+    "SetTypeCmdsLatency",
+    "StringBasedCmds",
+    "StringBasedCmdsLatency",
+    "SwapUsage",
+]
+
+REQUIRED_ECS_METRICS = [
+    "CPUUtilization",
+    "MemoryUtilization",
+    "RunningTaskCount",
+    "TaskCount",
+    "TaskCpuUtilization",
+    "TaskMemoryUtilization",
+    "CpuUtilized",
+    "MemoryUtilized",
+    "NetworkRxBytes",
+    "NetworkTxBytes",
+    "ContainerCpuUtilization",
+    "ContainerMemoryUtilization",
+    "ContainerNetworkRxBytes",
+    "ContainerNetworkTxBytes",
+]
+
+REPORT_CONTRACT_METRICS = [
+    "CacheHits",
+    "CacheMisses",
+    "CurrConnections",
+    "CurrItems",
+    "DatabaseCapacityUsageCountedForEvictPercentage",
+    "DatabaseMemoryUsageCountedForEvictPercentage",
+    "EngineCPUUtilization",
+    "Evictions",
+    "FreeableMemory",
+    "GetTypeCmdsLatency",
+    "SetTypeCmdsLatency",
+    "StringBasedCmdsLatency",
+]
 
 
 cloudwatch = boto3.client("cloudwatch")
@@ -39,6 +106,20 @@ def _time_window(duration_minutes: int) -> tuple[datetime, datetime]:
 def _dimensions_to_str(dimensions: list[dict[str, str]]) -> str:
     return ";".join(
         f"{name}={value}" for name, value in sorted((d["Name"], d["Value"]) for d in dimensions)
+    )
+
+
+def _read_s3_text(bucket: str, key: str) -> str:
+    response = s3.get_object(Bucket=bucket, Key=key)
+    return response["Body"].read().decode("utf-8", "replace")
+
+
+def _put_json(bucket: str, key: str, payload: dict) -> None:
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=json.dumps(payload, indent=2, default=str).encode("utf-8"),
+        ContentType="application/json",
     )
 
 
@@ -92,11 +173,16 @@ def export_metric_sources_to_s3(sources, bucket: str, key: str, start_time: date
         namespace = source["namespace"]
         filter_dimensions = source.get("dimensions") or []
         metric_filter = set(source.get("metric_names", [])) if source.get("metric_names") else None
+
+        for metric_name in sorted(metric_filter or []):
+            dims_key = tuple(sorted((d["Name"], d["Value"]) for d in filter_dimensions))
+            metric_map[(namespace, metric_name, dims_key)] = filter_dimensions
+
         try:
-            metrics = _list_metrics(namespace, filter_dimensions, metric_filter)
+            metrics = _list_metrics(namespace, filter_dimensions)
         except Exception as exc:
             print(f"Error listing metrics for {namespace} {filter_dimensions}: {exc}")
-            continue
+            metrics = []
 
         for metric in metrics:
             dimensions = metric.get("Dimensions", [])
@@ -136,6 +222,7 @@ def export_elasticache_metrics_to_s3(replication_group_id, bucket, key, start_ti
         {
             "namespace": "AWS/ElastiCache",
             "dimensions": [{"Name": "ReplicationGroupId", "Value": replication_group_id}],
+            "metric_names": REQUIRED_ELASTICACHE_METRICS,
         }
     ]
 
@@ -157,6 +244,7 @@ def export_elasticache_metrics_to_s3(replication_group_id, bucket, key, start_ti
             {
                 "namespace": "AWS/ElastiCache",
                 "dimensions": [{"Name": "CacheClusterId", "Value": cluster_id}],
+                "metric_names": REQUIRED_ELASTICACHE_METRICS,
             }
         )
 
@@ -169,11 +257,17 @@ def export_ecs_metrics_to_s3(cluster, service, bucket, key, start_time, end_time
         {
             "namespace": "AWS/ECS",
             "dimensions": [{"Name": "ClusterName", "Value": cluster}, {"Name": "ServiceName", "Value": service}],
+            "metric_names": REQUIRED_ECS_METRICS,
         },
-        {"namespace": "ECS/ContainerInsights", "dimensions": [{"Name": "ClusterName", "Value": cluster}]},
+        {
+            "namespace": "ECS/ContainerInsights",
+            "dimensions": [{"Name": "ClusterName", "Value": cluster}],
+            "metric_names": REQUIRED_ECS_METRICS,
+        },
         {
             "namespace": "ECS/ContainerInsights",
             "dimensions": [{"Name": "ClusterName", "Value": cluster}, {"Name": "ServiceName", "Value": service}],
+            "metric_names": REQUIRED_ECS_METRICS,
         },
     ]
     return export_metric_sources_to_s3(sources, bucket, key, start_time, end_time)
@@ -258,6 +352,89 @@ def export_logs_to_s3(log_group, bucket, key, start_time=None, end_time=None, lo
     return f"s3://{bucket}/{key}"
 
 
+def _benchmark_rows_in_s3(bucket: str, key: str) -> int:
+    try:
+        content = _read_s3_text(bucket, key)
+        df = parse_memtier_logs(content)
+        return 0 if df.empty else len(df)
+    except Exception as exc:
+        print(f"Benchmark log validation failed for s3://{bucket}/{key}: {exc}")
+        return 0
+
+
+def export_loadgen_logs_to_s3(log_group, bucket, key) -> dict:
+    status = {
+        "artifact": f"s3://{bucket}/{key}",
+        "attempts": [],
+        "benchmark_rows": 0,
+        "complete": False,
+    }
+    if not log_group:
+        status["attempts"].append({"mode": "missing-log-group", "benchmark_rows": 0})
+        return status
+
+    export_logs_to_s3(log_group, bucket, key, log_stream_name_prefix="memtier/")
+    rows = _benchmark_rows_in_s3(bucket, key)
+    status["attempts"].append({"mode": "memtier-prefix", "benchmark_rows": rows})
+
+    if rows == 0:
+        print("No benchmark rows found in memtier/ streams; retrying loadgen log export without a stream prefix.")
+        export_logs_to_s3(log_group, bucket, key)
+        rows = _benchmark_rows_in_s3(bucket, key)
+        status["attempts"].append({"mode": "full-log-group", "benchmark_rows": rows})
+
+    status["benchmark_rows"] = rows
+    status["complete"] = rows > 0
+    return status
+
+
+def _csv_metric_rows(bucket: str, key: str) -> list[dict]:
+    content = _read_s3_text(bucket, key)
+    return list(csv.DictReader(io.StringIO(content)))
+
+
+def _metric_value(row: dict) -> float:
+    try:
+        return float(row.get("Value", "0") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _metric_contract_status(bucket: str, key: str) -> dict:
+    try:
+        rows = _csv_metric_rows(bucket, key)
+    except Exception as exc:
+        return {"complete": False, "missing": REPORT_CONTRACT_METRICS, "error": str(exc)}
+
+    names = {row.get("MetricName", "") for row in rows if row.get("MetricName")}
+    missing = [name for name in REPORT_CONTRACT_METRICS if name not in names]
+    cache_ops = sum(
+        _metric_value(row)
+        for row in rows
+        if row.get("MetricName") in {"CacheHits", "CacheMisses"} and row.get("Stat") == "Sum"
+    )
+    curr_items_max = max(
+        (
+            _metric_value(row)
+            for row in rows
+            if row.get("MetricName") == "CurrItems" and row.get("Stat") == "Maximum"
+        ),
+        default=0.0,
+    )
+    value_failures = []
+    if cache_ops <= 0:
+        value_failures.append("CacheHits/CacheMisses have no positive Sum datapoints")
+    if curr_items_max <= 0:
+        value_failures.append("CurrItems has no positive Maximum datapoints")
+
+    return {
+        "complete": not missing and not value_failures,
+        "missing": missing,
+        "value_failures": value_failures,
+        "present_count": len(names),
+    }
+
+
 def _ses_config():
     email = os.environ.get("NOTIFICATION_EMAIL", "").strip()
     ses_arn = os.environ.get("SES_IDENTITY_ARN", "").strip()
@@ -337,15 +514,29 @@ def main() -> None:
     metrics_key = f"{prefix}{timestamp}/metrics/{cluster_id}.csv"
     ecs_metrics_key = f"{prefix}{timestamp}/metrics/{cluster_id}-ecs.csv"
     logs_key = f"{prefix}{timestamp}/logs/{cluster_id}.txt"
+    status_key = f"{prefix}{timestamp}/report_status.json"
+    status = {
+        "cluster_id": cluster_id,
+        "timestamp": timestamp,
+        "complete": False,
+        "checks": {},
+        "artifacts": {
+            "metrics": f"s3://{bucket}/{metrics_key}",
+            "ecs_metrics": f"s3://{bucket}/{ecs_metrics_key}",
+            "loadgen_logs": f"s3://{bucket}/{logs_key}",
+        },
+    }
 
     export_elasticache_metrics_to_s3(elasticache_id, bucket, metrics_key, start_time, end_time)
     export_ecs_metrics_to_s3(ecs_cluster, ecs_service, bucket, ecs_metrics_key, start_time, end_time)
-    export_logs_to_s3(
+    loadgen_status = export_loadgen_logs_to_s3(
         os.environ.get("LOADGEN_LOG_GROUP") or os.environ.get("LOG_GROUP"),
         bucket,
         logs_key,
-        log_stream_name_prefix="memtier/",
     )
+    status["checks"]["loadgen_logs"] = loadgen_status
+    status["checks"]["metrics"] = _metric_contract_status(bucket, metrics_key)
+
     export_logs_to_s3(
         os.environ.get("CONTAINER_INSIGHTS_LOG_GROUP"),
         bucket,
@@ -368,6 +559,22 @@ def main() -> None:
         end_time,
     )
 
+    status["complete"] = (
+        status["checks"]["loadgen_logs"].get("complete", False)
+        and status["checks"]["metrics"].get("complete", False)
+    )
+    _put_json(bucket, status_key, status)
+    if not status["complete"]:
+        missing = {
+            name: check
+            for name, check in status["checks"].items()
+            if not check.get("complete", False)
+        }
+        raise RuntimeError(
+            "Report data contract incomplete; refusing to generate an empty report. "
+            f"Details written to s3://{bucket}/{status_key}: {missing}"
+        )
+
     os.environ["METRICS_CSV"] = f"s3://{bucket}/{metrics_key}"
     os.environ["ECS_METRICS_CSV"] = f"s3://{bucket}/{ecs_metrics_key}"
     os.environ["LOGS_TXT"] = f"s3://{bucket}/{logs_key}"
@@ -379,6 +586,9 @@ def main() -> None:
 
     report_uri = f"s3://{bucket}/{prefix}{timestamp}/results_{timestamp}.html"
     summary_uri = f"s3://{bucket}/{prefix}{timestamp}/results_{timestamp}.json"
+    status["report"] = report_uri
+    status["summary"] = summary_uri
+    _put_json(bucket, status_key, status)
     send_report_ready_email(cluster_id, report_uri, summary_uri, bucket, prefix, timestamp)
 
 

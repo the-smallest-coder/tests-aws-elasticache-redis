@@ -32,7 +32,7 @@ def parse_memtier_logs(log_content):
     curr_cw_ts = None
     curr_stream = None
 
-    for line in log_content.split('\n'):
+    for line in log_content.splitlines():
         header = _HEADER.match(line)
         if header:
             curr_cw_ts  = header.group(1)

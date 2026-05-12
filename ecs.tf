@@ -56,16 +56,35 @@ resource "aws_ecs_task_definition" "loadgen" {
       name      = "memtier"
       image     = "redislabs/memtier_benchmark:latest"
       essential = true
+      stopTimeout = 120
 
       # Wrap in sh -c so $(cat /proc/sys/kernel/random/uuid) is expanded at task startup,
       # giving each task a unique key prefix and avoiding keyspace collisions across tasks.
+      # memtier emits progress updates with carriage returns; stream them as newline-delimited
+      # CloudWatch records so the post-cleanup reporter can recover benchmark stats reliably.
       entryPoint = ["sh", "-c"]
       command = [
         join(" ", concat(
           [
             "UUID=$(cat /proc/sys/kernel/random/uuid)",
             "&&",
-            "exec",
+            "PIPE=/tmp/memtier-output",
+            "&&",
+            "rm",
+            "-f",
+            "$PIPE",
+            "&&",
+            "mkfifo",
+            "$PIPE",
+            "&&",
+            "tr",
+            "'\\r'",
+            "'\\n'",
+            "<",
+            "$PIPE",
+            "&",
+            "LOG_PID=$!",
+            "&&",
             "memtier_benchmark",
             "--server=${local.elasticache_endpoint}",
             "--port=${var.port}",
@@ -81,7 +100,28 @@ resource "aws_ecs_task_definition" "loadgen" {
             "--hide-histogram",
           ],
           var.cluster_mode_enabled ? ["--cluster-mode"] : [],
-          var.transit_encryption_enabled ? ["--tls", "--tls-skip-verify"] : []
+          var.transit_encryption_enabled ? ["--tls", "--tls-skip-verify"] : [],
+          [
+            ">",
+            "$PIPE",
+            "2>&1",
+            "&",
+            "MEMTIER_PID=$!",
+            "&&",
+            "wait",
+            "$MEMTIER_PID",
+            ";",
+            "CODE=$?",
+            ";",
+            "wait",
+            "$LOG_PID",
+            ";",
+            "echo",
+            "MEMTIER_EXIT_CODE=$CODE",
+            ";",
+            "exit",
+            "$CODE",
+          ]
         ))
       ]
 
