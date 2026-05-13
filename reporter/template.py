@@ -173,7 +173,7 @@ def render_html(
   <div class="chart-group">
     <div class="group-header">
       <h2>Memtier Benchmark</h2>
-      <span class="group-badge memtier">benchmark window only</span>
+      <span class="group-badge memtier">report window</span>
     </div>
     <div class="chart-wrap">{chart_memtier_html}</div>
   </div>
@@ -181,7 +181,7 @@ def render_html(
   <div class="chart-group">
     <div class="group-header">
       <h2>Infrastructure</h2>
-      <span class="group-badge infra">full CloudWatch window</span>
+      <span class="group-badge infra">report window</span>
     </div>
     <div class="chart-wrap">{chart_infra_html}</div>
   </div>
@@ -189,7 +189,7 @@ def render_html(
   <div class="chart-group">
     <div class="group-header">
       <h2>ElastiCache Deep-Dive</h2>
-      <span class="group-badge deepdive">full CloudWatch window</span>
+      <span class="group-badge deepdive">report window</span>
     </div>
     <div class="chart-wrap">{chart_deep_dive_html}</div>
   </div>

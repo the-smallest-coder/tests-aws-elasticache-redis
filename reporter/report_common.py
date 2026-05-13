@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,11 +152,6 @@ def display_value(spec: MetricSpec, raw_value: Any) -> str:
         return str(raw_value)
     suffix = f" {spec.unit}" if spec.unit else ""
     return f"{format_number(numeric, spec.decimals)}{suffix}"
-
-
-def parse_duration_minutes(time_range: str) -> str | None:
-    match = re.search(r"\(([-0-9.]+)\s+min\)", time_range or "")
-    return f"{match.group(1)} min" if match else None
 
 
 def normalize_cluster_mode(value: Any) -> str | None:

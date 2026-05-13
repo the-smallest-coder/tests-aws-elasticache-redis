@@ -16,17 +16,64 @@ from helpers import (
     metric_filter, cache_hit_rate_df, shorten_dim, select_mem_dims,
 )
 
+ABS_TIME_HOVER = "%{customdata}"
+
+
+def _normalize_timestamp(value):
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+    return ts
+
+
+def _format_timestamp(value):
+    ts = _normalize_timestamp(value)
+    if ts.microsecond:
+        return f"{ts.strftime('%Y-%m-%d %H:%M:%S')}.{ts.microsecond:06d} UTC"
+    return f"{ts.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+
+
+def _epoch_ms(value):
+    return int(_normalize_timestamp(value).value // 1_000_000)
+
+
+def _plot_x(values):
+    return [_epoch_ms(value) for value in values]
+
+
+def _plot_times(values):
+    return [_format_timestamp(value) for value in values]
+
+
+def _set_absolute_xaxes(fig, rows, x_min, x_max):
+    axis = {
+        "type": "linear",
+        "showgrid": True,
+        "gridcolor": "#f0f0f0",
+        "zeroline": False,
+    }
+    if x_min is not None and x_max is not None:
+        tickvals = [_epoch_ms(x_min), _epoch_ms(x_max)]
+        axis.update({
+            "range": tickvals,
+            "tickmode": "array",
+            "tickvals": tickvals,
+            "ticktext": [_format_timestamp(x_min), _format_timestamp(x_max)],
+        })
+    for row in rows:
+        fig.update_xaxes(row=row, col=1, **axis)
+
 
 # ------------------------------------------------------------------ #
 #  GROUP 1 — Memtier Benchmark figure                                  #
 # ------------------------------------------------------------------ #
 
-def build_memtier_figure(logs_resampled, oom_df, metrics_df, x_min, x_max):
+def build_memtier_figure(logs_df, oom_df, metrics_df, x_min, x_max):
     """Build a 3-row figure: throughput+latency, eviction pressure, cache hit rate.
 
     Returns a Plotly Figure ready for ``to_html()``.
     """
-    has_evictions = not oom_df.empty and oom_df['OOM_per_min'].sum() > 0
+    has_evictions = not oom_df.empty and oom_df['OOM_events'].sum() > 0
 
     fig = make_subplots(
         rows=3, cols=1,
@@ -34,28 +81,30 @@ def build_memtier_figure(logs_resampled, oom_df, metrics_df, x_min, x_max):
         vertical_spacing=0.18,
         specs=[[{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]],
         subplot_titles=(
-            "Throughput & Latency (1-min avg)",
-            "Eviction Pressure (OOM events / min)",
+            "Throughput & Latency",
+            "Eviction Pressure (OOM events)",
             "Cache Hit Rate (%)",
         ),
         row_heights=[0.50, 0.27, 0.23],
     )
 
     # ---- Row 1: Throughput + Latency ----
-    if not logs_resampled.empty:
+    if not logs_df.empty:
         fig.add_trace(go.Scatter(
-            x=logs_resampled['Timestamp'], y=logs_resampled['Ops/sec'],
+            x=_plot_x(logs_df['Timestamp']), y=logs_df['Ops/sec'],
+            customdata=_plot_times(logs_df['Timestamp']),
             name="Throughput", mode='lines',
             line=dict(**LINE_OPTS, color=C_THROUGHPUT),
             legend="legend",
-            hovertemplate="%{x|%H:%M}<br><b>%{y:,.0f} ops/sec</b><extra></extra>"
+            hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:,.0f}} ops/sec</b><extra></extra>"
         ), row=1, col=1, secondary_y=False)
         fig.add_trace(go.Scatter(
-            x=logs_resampled['Timestamp'], y=logs_resampled['Latency (ms)'],
+            x=_plot_x(logs_df['Timestamp']), y=logs_df['Latency (ms)'],
+            customdata=_plot_times(logs_df['Timestamp']),
             name="Latency", mode='lines',
             line=dict(**LINE_OPTS, color=C_LATENCY, dash='dot'),
             legend="legend",
-            hovertemplate="%{x|%H:%M}<br><b>%{y:.2f} ms</b><extra></extra>"
+            hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.2f}} ms</b><extra></extra>"
         ), row=1, col=1, secondary_y=True)
     else:
         fig.add_annotation(text="No Log Data", xref="paper", yref="y",
@@ -64,26 +113,16 @@ def build_memtier_figure(logs_resampled, oom_df, metrics_df, x_min, x_max):
     # ---- Row 2: OOM bar + CW Evictions overlay ----
     if has_evictions:
         oom_plot = oom_df.copy()
-        if x_min is not None:
+        if x_min is not None and x_max is not None:
             oom_plot = oom_plot[(oom_plot['Timestamp'] >= x_min) & (oom_plot['Timestamp'] <= x_max)]
         fig.add_trace(go.Bar(
-            x=oom_plot['Timestamp'], y=oom_plot['OOM_per_min'],
-            name="OOM events/min", marker_color=C_OOM_BAR,
+            x=_plot_x(oom_plot['Timestamp']), y=oom_plot['OOM_events'],
+            customdata=_plot_times(oom_plot['Timestamp']),
+            name="OOM events", marker_color=C_OOM_BAR,
             legend="legend2",
-            hovertemplate="%{x|%H:%M}<br><b>%{y:,} OOM/min</b><extra></extra>"
+            hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:,}} OOM events</b><extra></extra>"
         ), row=2, col=1)
     else:
-        if x_min is not None and x_max is not None:
-            oom_plot = pd.DataFrame({
-                'Timestamp': pd.date_range(x_min, x_max, freq='1min'),
-                'OOM_per_min': 0,
-            })
-            fig.add_trace(go.Bar(
-                x=oom_plot['Timestamp'], y=oom_plot['OOM_per_min'],
-                name="OOM events/min", marker_color=C_OOM_BAR,
-                legend="legend2",
-                hovertemplate="%{x|%H:%M}<br><b>%{y:,} OOM/min</b><extra></extra>"
-            ), row=2, col=1)
         fig.add_annotation(text="No eviction pressure detected",
                            xref="paper", yref="paper",
                            x=0.5, y=0.32, showarrow=False)
@@ -93,11 +132,12 @@ def build_memtier_figure(logs_resampled, oom_df, metrics_df, x_min, x_max):
         if not ev_df.empty:
             ev_agg = ev_df.groupby('Timestamp')['Value'].sum().reset_index()
             fig.add_trace(go.Scatter(
-                x=ev_agg['Timestamp'], y=ev_agg['Value'],
+                x=_plot_x(ev_agg['Timestamp']), y=ev_agg['Value'],
+                customdata=_plot_times(ev_agg['Timestamp']),
                 name="Evictions (CW)", mode='lines',
                 line=dict(**LINE_OPTS, color=C_EVICTION_CW, dash='dash'),
                 legend="legend2",
-                hovertemplate="%{x|%H:%M}<br><b>%{y:,.0f} evictions</b><extra></extra>"
+                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:,.0f}} evictions</b><extra></extra>"
             ), row=2, col=1)
 
     # ---- Row 3: Cache Hit Rate ----
@@ -106,11 +146,12 @@ def build_memtier_figure(logs_resampled, oom_df, metrics_df, x_min, x_max):
         if not hr_df.empty:
             hr_agg = hr_df.groupby('Timestamp')['Value'].mean().reset_index()
             fig.add_trace(go.Scatter(
-                x=hr_agg['Timestamp'], y=hr_agg['Value'],
+                x=_plot_x(hr_agg['Timestamp']), y=hr_agg['Value'],
+                customdata=_plot_times(hr_agg['Timestamp']),
                 name="Cache Hit Rate", mode='lines',
                 line=dict(**LINE_OPTS, color=C_HIT_RATE),
                 legend="legend3",
-                hovertemplate="%{x|%H:%M}<br><b>%{y:.1f}%</b><extra></extra>"
+                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}}%</b><extra></extra>"
             ), row=3, col=1)
         else:
             fig.add_annotation(text="No CacheHitRate metric", xref="paper", yref="paper",
@@ -125,14 +166,11 @@ def build_memtier_figure(logs_resampled, oom_df, metrics_df, x_min, x_max):
     fig.update_yaxes(title_text="ms", row=1, col=1, secondary_y=True,
                      title_font=dict(color=C_LATENCY), tickfont=dict(color=C_LATENCY),
                      showgrid=False)
-    fig.update_yaxes(title_text="OOM/min", row=2, col=1,
+    fig.update_yaxes(title_text="events", row=2, col=1,
                      title_font=dict(color=C_OOM_BAR), tickfont=dict(color=C_OOM_BAR))
     fig.update_yaxes(title_text="%", row=3, col=1,
                      title_font=dict(color=C_HIT_RATE), tickfont=dict(color=C_HIT_RATE))
-    if x_min is not None and x_max is not None:
-        for r in range(1, 4):
-            fig.update_xaxes(range=[x_min, x_max], row=r, col=1)
-    fig.update_xaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
+    _set_absolute_xaxes(fig, range(1, 4), x_min, x_max)
     fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
 
     fig.update_layout(
@@ -176,11 +214,12 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
         if not cpu_df.empty:
             for dim, group in cpu_df.groupby('Dimensions'):
                 fig.add_trace(go.Scatter(
-                    x=group['Timestamp'], y=group['Value'],
+                    x=_plot_x(group['Timestamp']), y=group['Value'],
+                    customdata=_plot_times(group['Timestamp']),
                     name=f"CPU – {shorten_dim(dim, cluster_id)}", mode='lines',
                     line=dict(**LINE_OPTS, color=C_CPU_ECS),
                     legend="legend",
-                    hovertemplate="%{x|%H:%M}<br><b>%{y:.1f}%</b><extra></extra>"
+                    hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}}%</b><extra></extra>"
                 ), row=1, col=1)
         else:
             fig.add_annotation(text="No ECS CPU Metrics", xref="paper", yref="paper",
@@ -194,11 +233,12 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
         if not eng_cpu_df.empty:
             for dim, group in eng_cpu_df.groupby('Dimensions'):
                 fig.add_trace(go.Scatter(
-                    x=group['Timestamp'], y=group['Value'],
+                    x=_plot_x(group['Timestamp']), y=group['Value'],
+                    customdata=_plot_times(group['Timestamp']),
                     name=f"EngineCPU – {shorten_dim(dim, cluster_id)}", mode='lines',
                     line=dict(**LINE_OPTS, color=C_ENGINE_CPU, dash='dot'),
                     legend="legend",
-                    hovertemplate="%{x|%H:%M}<br><b>%{y:.1f}%</b><extra></extra>"
+                    hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}}%</b><extra></extra>"
                 ), row=1, col=1)
 
     # ---- Row 2: ECS Network TX + ElastiCache NetworkBytesOut overlay ----
@@ -208,11 +248,12 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
             tx_agg = tx_df.groupby('Timestamp')['Value'].sum().reset_index()
             tx_agg['Value'] = tx_agg['Value'] / 1024.0
             fig.add_trace(go.Scatter(
-                x=tx_agg['Timestamp'], y=tx_agg['Value'],
+                x=_plot_x(tx_agg['Timestamp']), y=tx_agg['Value'],
+                customdata=_plot_times(tx_agg['Timestamp']),
                 name="Network TX – loadgen", mode='lines',
                 line=dict(**LINE_OPTS, color=C_NET_TX_ECS),
                 legend="legend2",
-                hovertemplate="%{x|%H:%M}<br><b>%{y:.1f} KB/min</b><extra></extra>"
+                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} KB/min</b><extra></extra>"
             ), row=2, col=1)
         else:
             fig.add_annotation(text="No Network TX Metrics", xref="paper", yref="paper",
@@ -227,11 +268,12 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
             ec_tx_agg = ec_tx_df.groupby('Timestamp')['Value'].sum().reset_index()
             ec_tx_agg['Value'] = ec_tx_agg['Value'] / 1024.0
             fig.add_trace(go.Scatter(
-                x=ec_tx_agg['Timestamp'], y=ec_tx_agg['Value'],
+                x=_plot_x(ec_tx_agg['Timestamp']), y=ec_tx_agg['Value'],
+                customdata=_plot_times(ec_tx_agg['Timestamp']),
                 name="Network TX – cache", mode='lines',
                 line=dict(**LINE_OPTS, color=C_NET_TX_CACHE, dash='dot'),
                 legend="legend2",
-                hovertemplate="%{x|%H:%M}<br><b>%{y:.1f} KB/min</b><extra></extra>"
+                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} KB/min</b><extra></extra>"
             ), row=2, col=1)
 
     # ---- Row 3: ECS Memory (MB) ----
@@ -244,11 +286,12 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
             if mem_agg['Value'].max() > 10000:
                 mem_agg['Value'] = mem_agg['Value'] / (1024 * 1024)
             fig.add_trace(go.Scatter(
-                x=mem_agg['Timestamp'], y=mem_agg['Value'],
+                x=_plot_x(mem_agg['Timestamp']), y=mem_agg['Value'],
+                customdata=_plot_times(mem_agg['Timestamp']),
                 name="ECS Mem – loadgen", mode='lines',
                 line=dict(**LINE_OPTS, color=C_ECS_MEM),
                 legend="legend3",
-                hovertemplate="%{x|%H:%M}<br><b>%{y:.1f} MB</b><extra></extra>"
+                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} MB</b><extra></extra>"
             ), row=3, col=1)
         else:
             fig.add_annotation(text="No ECS Memory Metrics", xref="paper", yref="paper",
@@ -267,11 +310,12 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
             mem_df = mem_df[mem_df['Dimensions'].isin(keep_dims)]
             for i, (dim, group) in enumerate(mem_df.groupby('Dimensions')):
                 fig.add_trace(go.Scatter(
-                    x=group['Timestamp'], y=group['Value'],
+                    x=_plot_x(group['Timestamp']), y=group['Value'],
+                    customdata=_plot_times(group['Timestamp']),
                     name=f"Mem – {shorten_dim(dim, cluster_id)}", mode='lines',
                     line=dict(**LINE_OPTS, color=MEM_COLORS[i % len(MEM_COLORS)]),
                     legend="legend4",
-                    hovertemplate="%{x|%H:%M}<br><b>%{y:.2f}%</b><extra></extra>"
+                    hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.2f}}%</b><extra></extra>"
                 ), row=4, col=1)
         else:
             fig.add_annotation(text="No Memory Metrics", xref="paper", yref="paper",
@@ -287,10 +331,7 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
     fig.update_yaxes(title_text="MB",     row=3, col=1,
                      title_font=dict(color=C_ECS_MEM), tickfont=dict(color=C_ECS_MEM))
     fig.update_yaxes(title_text="%",      row=4, col=1)
-    fig.update_xaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
-    if x_min is not None and x_max is not None:
-        for r in range(1, 5):
-            fig.update_xaxes(range=[x_min, x_max], row=r, col=1)
+    _set_absolute_xaxes(fig, range(1, 5), x_min, x_max)
     fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
     fig.update_layout(
         **LAYOUT_BASE, height=1300,
@@ -344,20 +385,22 @@ def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None, x_mi
     if not bal_df.empty:
         bal_agg = bal_df.groupby('Timestamp')['Value'].mean().reset_index()
         fig.add_trace(go.Scatter(
-            x=bal_agg['Timestamp'], y=bal_agg['Value'],
+            x=_plot_x(bal_agg['Timestamp']), y=bal_agg['Value'],
+            customdata=_plot_times(bal_agg['Timestamp']),
             name="Credit Balance", mode='lines',
             line=dict(**LINE_OPTS, color=C_CREDIT_BAL),
             legend="legend",
-            hovertemplate="%{x|%H:%M}<br><b>%{y:.1f} credits</b><extra></extra>"
+            hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} credits</b><extra></extra>"
         ), row=1, col=1, secondary_y=False)
     if not use_df.empty:
         use_agg = use_df.groupby('Timestamp')['Value'].mean().reset_index()
         fig.add_trace(go.Scatter(
-            x=use_agg['Timestamp'], y=use_agg['Value'],
+            x=_plot_x(use_agg['Timestamp']), y=use_agg['Value'],
+            customdata=_plot_times(use_agg['Timestamp']),
             name="Credit Usage", mode='lines',
             line=dict(**LINE_OPTS, color=C_CREDIT_USE, dash='dot'),
             legend="legend",
-            hovertemplate="%{x|%H:%M}<br><b>%{y:.3f} vCPU·min</b><extra></extra>"
+            hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.3f}} vCPU·min</b><extra></extra>"
         ), row=1, col=1, secondary_y=True)
     if bal_df.empty and use_df.empty:
         fig.add_annotation(text="No CPU credit data (non-burstable instance?)",
@@ -376,11 +419,12 @@ def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None, x_mi
         if not mdf.empty:
             agg = mdf.groupby('Timestamp')['Value'].mean().reset_index()
             fig.add_trace(go.Scatter(
-                x=agg['Timestamp'], y=agg['Value'],
+                x=_plot_x(agg['Timestamp']), y=agg['Value'],
+                customdata=_plot_times(agg['Timestamp']),
                 name=label, mode='lines',
                 line=dict(**LINE_OPTS, color=color, dash=dash),
                 legend="legend2",
-                hovertemplate="%{x|%H:%M}<br><b>%{y:.1f} \u00b5s</b><extra></extra>"
+                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} \u00b5s</b><extra></extra>"
             ), row=2, col=1)
             lat_shown = True
     if not lat_shown:
@@ -401,11 +445,12 @@ def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None, x_mi
             agg = mdf.groupby('Timestamp')['Value'].sum().reset_index()
             if agg['Value'].sum() > 0:
                 fig.add_trace(go.Scatter(
-                    x=agg['Timestamp'], y=agg['Value'],
+                    x=_plot_x(agg['Timestamp']), y=agg['Value'],
+                    customdata=_plot_times(agg['Timestamp']),
                     name=label, mode='lines',
                     line=dict(**LINE_OPTS, color=color),
                     legend="legend3",
-                    hovertemplate="%{x|%H:%M}<br><b>%{y:,}</b><extra></extra>"
+                    hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:,}}</b><extra></extra>"
                 ), row=3, col=1)
                 throttle_shown = True
     if not throttle_shown:
@@ -418,20 +463,22 @@ def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None, x_mi
     if not conn_df.empty:
         conn_agg = conn_df.groupby('Timestamp')['Value'].mean().reset_index()
         fig.add_trace(go.Scatter(
-            x=conn_agg['Timestamp'], y=conn_agg['Value'],
+            x=_plot_x(conn_agg['Timestamp']), y=conn_agg['Value'],
+            customdata=_plot_times(conn_agg['Timestamp']),
             name="Connections", mode='lines',
             line=dict(**LINE_OPTS, color=C_CURR_CONN),
             legend="legend4",
-            hovertemplate="%{x|%H:%M}<br><b>%{y:,.0f} conns</b><extra></extra>"
+            hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:,.0f}} conns</b><extra></extra>"
         ), row=4, col=1, secondary_y=False)
     if not frag_df.empty:
         frag_agg = frag_df.groupby('Timestamp')['Value'].mean().reset_index()
         fig.add_trace(go.Scatter(
-            x=frag_agg['Timestamp'], y=frag_agg['Value'],
+            x=_plot_x(frag_agg['Timestamp']), y=frag_agg['Value'],
+            customdata=_plot_times(frag_agg['Timestamp']),
             name="Frag Ratio", mode='lines',
             line=dict(**LINE_OPTS, color=C_MEM_FRAG, dash='dot'),
             legend="legend4",
-            hovertemplate="%{x|%H:%M}<br><b>%{y:.2f}x</b><extra></extra>"
+            hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.2f}}x</b><extra></extra>"
         ), row=4, col=1, secondary_y=True)
     if conn_df.empty and frag_df.empty:
         fig.add_annotation(text="No connection/fragmentation data",
@@ -450,10 +497,7 @@ def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None, x_mi
     fig.update_yaxes(title_text="ratio",    row=4, col=1, secondary_y=True,
                      title_font=dict(color=C_MEM_FRAG),  tickfont=dict(color=C_MEM_FRAG),
                      showgrid=False)
-    fig.update_xaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
-    if x_min is not None and x_max is not None:
-        for r in range(1, 5):
-            fig.update_xaxes(range=[x_min, x_max], row=r, col=1)
+    _set_absolute_xaxes(fig, range(1, 5), x_min, x_max)
     fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
 
     fig.update_layout(

@@ -1,21 +1,21 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import html
 import io
 import json
 import os
 import re
-from datetime import datetime, timedelta
+import sys
+from datetime import datetime, timezone
 
 import boto3
 
-from parsers import parse_memtier_logs
 from report_generator import run_uploaded_report
 
 
 STATISTICS = ["Average", "Sum", "Maximum", "Minimum"]
-EXPORT_BUFFER_MINUTES = 5
 LOG_EXPORT_PART_SIZE = 6 * 1024 * 1024
 
 REQUIRED_ELASTICACHE_METRICS = [
@@ -84,10 +84,21 @@ REPORT_CONTRACT_METRICS = [
 ]
 
 
-cloudwatch = boto3.client("cloudwatch")
-logs = boto3.client("logs")
-s3 = boto3.client("s3")
-elasticache = boto3.client("elasticache")
+class _LazyBoto3Client:
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+        self.client = None
+
+    def __getattr__(self, name: str):
+        if self.client is None:
+            self.client = boto3.client(self.service_name)
+        return getattr(self.client, name)
+
+
+cloudwatch = _LazyBoto3Client("cloudwatch")
+logs = _LazyBoto3Client("logs")
+s3 = _LazyBoto3Client("s3")
+elasticache = _LazyBoto3Client("elasticache")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -95,12 +106,6 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
-
-
-def _time_window(duration_minutes: int) -> tuple[datetime, datetime]:
-    end_time = datetime.utcnow()
-    lookback_minutes = max(duration_minutes, 1) + EXPORT_BUFFER_MINUTES
-    return end_time - timedelta(minutes=lookback_minutes), end_time
 
 
 def _dimensions_to_str(dimensions: list[dict[str, str]]) -> str:
@@ -121,6 +126,36 @@ def _put_json(bucket: str, key: str, payload: dict) -> None:
         Body=json.dumps(payload, indent=2, default=str).encode("utf-8"),
         ContentType="application/json",
     )
+
+
+def _safe_s3_key_part(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._=-]+", "_", value.strip())
+    return safe or "_"
+
+
+def _log_stream_key(key_prefix: str, stream_name: str) -> str:
+    parts = [_safe_s3_key_part(part) for part in stream_name.split("/") if part]
+    filename = "/".join(parts) if parts else _safe_s3_key_part(stream_name)
+    return f"{key_prefix.rstrip('/')}/{filename}.txt"
+
+
+def _list_log_stream_names(log_group: str) -> list[str]:
+    streams = []
+    token = None
+    while True:
+        params = {
+            "logGroupName": log_group,
+            "orderBy": "LogStreamName",
+        }
+        if token:
+            params["nextToken"] = token
+
+        response = logs.describe_log_streams(**params)
+        streams.extend(stream["logStreamName"] for stream in response.get("logStreams", []))
+        token = response.get("nextToken")
+        if not token:
+            break
+    return sorted(dict.fromkeys(streams))
 
 
 def _fallback_member_clusters(replication_group_id: str) -> list[str]:
@@ -323,7 +358,7 @@ def export_logs_to_s3(log_group, bucket, key, start_time=None, end_time=None, lo
 
             response = logs.filter_log_events(**params)
             for event in response.get("events", []):
-                ts = datetime.fromtimestamp(event["timestamp"] / 1000).isoformat()
+                ts = datetime.fromtimestamp(event["timestamp"] / 1000, tz=timezone.utc).replace(tzinfo=None).isoformat()
                 stream = event.get("logStreamName", "")
                 message = event.get("message", "").rstrip("\n")
                 buffer.extend(f"[{ts}] [{stream}] {message}\n".encode("utf-8", "replace"))
@@ -352,39 +387,129 @@ def export_logs_to_s3(log_group, bucket, key, start_time=None, end_time=None, lo
     return f"s3://{bucket}/{key}"
 
 
-def _benchmark_rows_in_s3(bucket: str, key: str) -> int:
-    try:
-        content = _read_s3_text(bucket, key)
-        df = parse_memtier_logs(content)
-        return 0 if df.empty else len(df)
-    except Exception as exc:
-        print(f"Benchmark log validation failed for s3://{bucket}/{key}: {exc}")
-        return 0
+def iter_log_stream_events(log_group, log_stream_name):
+    token = None
+    args = {
+        "logGroupName": log_group,
+        "logStreamName": log_stream_name,
+        "startFromHead": True,
+    }
+
+    while True:
+        if token:
+            args["nextToken"] = token
+
+        response = logs.get_log_events(**args)
+
+        for event in response["events"]:
+            yield event
+
+        next_token = response["nextForwardToken"]
+        if next_token == token:
+            break
+        token = next_token
 
 
-def export_loadgen_logs_to_s3(log_group, bucket, key) -> dict:
+def _log_stream_event_line(event: dict) -> bytes:
+    return json.dumps(event, separators=(",", ":")).encode("utf-8", "replace") + b"\n"
+
+
+def write_log_stream(log_group: str, log_stream_name: str, write_line) -> int:
+    event_count = 0
+    for event in iter_log_stream_events(log_group, log_stream_name):
+        write_line(_log_stream_event_line(event))
+        event_count += 1
+    return event_count
+
+
+def write_log_stream_to_file(log_group: str, log_stream_name: str, output_path: str) -> int:
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    with open(output_path, "wb") as output_file:
+        return write_log_stream(log_group, log_stream_name, output_file.write)
+
+
+def export_log_stream_to_s3(log_group, log_stream_name, bucket, key) -> str | None:
+    if not log_group or not log_stream_name:
+        return None
+
+    buffer = bytearray()
+    upload_id = None
+    parts = []
+    part_number = 1
+
+    def _start_multipart():
+        nonlocal upload_id
+        if upload_id is None:
+            resp = s3.create_multipart_upload(Bucket=bucket, Key=key, ContentType="text/plain")
+            upload_id = resp["UploadId"]
+
+    def _upload_part(data):
+        nonlocal part_number
+        _start_multipart()
+        resp = s3.upload_part(Bucket=bucket, Key=key, UploadId=upload_id, PartNumber=part_number, Body=data)
+        parts.append({"ETag": resp["ETag"], "PartNumber": part_number})
+        part_number += 1
+
+    def _flush(force=False):
+        nonlocal buffer
+        if not buffer:
+            return
+        if len(buffer) < LOG_EXPORT_PART_SIZE and not force:
+            return
+        _upload_part(bytes(buffer))
+        buffer = bytearray()
+
+    def _append_line(line: bytes):
+        buffer.extend(line)
+        if len(buffer) >= LOG_EXPORT_PART_SIZE:
+            _flush()
+
+    write_log_stream(log_group, log_stream_name, _append_line)
+
+    if upload_id:
+        try:
+            _flush(force=True)
+            s3.complete_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id, MultipartUpload={"Parts": parts})
+        except Exception:
+            s3.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+            raise
+    else:
+        s3.put_object(Bucket=bucket, Key=key, Body=bytes(buffer), ContentType="text/plain")
+
+    print(f"Log stream {log_stream_name} exported to s3://{bucket}/{key}")
+    return f"s3://{bucket}/{key}"
+
+
+def _export_log_streams_to_s3(log_group, bucket, key_prefix, streams) -> list[dict]:
+    files = []
+    for stream in streams:
+        key = _log_stream_key(key_prefix, stream)
+        artifact = export_log_stream_to_s3(log_group, stream, bucket, key)
+        files.append({
+            "stream": stream,
+            "artifact": artifact,
+        })
+    return files
+
+
+def export_loadgen_logs_to_s3(log_group, bucket, key_prefix) -> dict:
+    key_prefix = key_prefix.rstrip("/")
     status = {
-        "artifact": f"s3://{bucket}/{key}",
-        "attempts": [],
-        "benchmark_rows": 0,
+        "artifact": f"s3://{bucket}/{key_prefix}/",
+        "files": [],
         "complete": False,
     }
     if not log_group:
-        status["attempts"].append({"mode": "missing-log-group", "benchmark_rows": 0})
         return status
 
-    export_logs_to_s3(log_group, bucket, key, log_stream_name_prefix="memtier/")
-    rows = _benchmark_rows_in_s3(bucket, key)
-    status["attempts"].append({"mode": "memtier-prefix", "benchmark_rows": rows})
-
-    if rows == 0:
-        print("No benchmark rows found in memtier/ streams; retrying loadgen log export without a stream prefix.")
-        export_logs_to_s3(log_group, bucket, key)
-        rows = _benchmark_rows_in_s3(bucket, key)
-        status["attempts"].append({"mode": "full-log-group", "benchmark_rows": rows})
-
-    status["benchmark_rows"] = rows
-    status["complete"] = rows > 0
+    streams = _list_log_stream_names(log_group)
+    files = _export_log_streams_to_s3(log_group, bucket, key_prefix, streams)
+    status["files"] = files
+    status["stream_count"] = len(streams)
+    status["complete"] = len(files) == len(streams) and len(streams) > 0
     return status
 
 
@@ -510,10 +635,9 @@ def main() -> None:
     if not timestamp:
         raise RuntimeError("REPORT_TIMESTAMP or RUN_FOLDER is required")
 
-    start_time, end_time = _time_window(_env_int("TEST_DURATION_MINUTES", 60))
     metrics_key = f"{prefix}{timestamp}/metrics/{cluster_id}.csv"
     ecs_metrics_key = f"{prefix}{timestamp}/metrics/{cluster_id}-ecs.csv"
-    logs_key = f"{prefix}{timestamp}/logs/{cluster_id}.txt"
+    loadgen_logs_prefix = f"{prefix}{timestamp}/logs/loadgen"
     status_key = f"{prefix}{timestamp}/report_status.json"
     status = {
         "cluster_id": cluster_id,
@@ -523,18 +647,31 @@ def main() -> None:
         "artifacts": {
             "metrics": f"s3://{bucket}/{metrics_key}",
             "ecs_metrics": f"s3://{bucket}/{ecs_metrics_key}",
-            "loadgen_logs": f"s3://{bucket}/{logs_key}",
+            "loadgen_logs": f"s3://{bucket}/{loadgen_logs_prefix}/",
         },
     }
 
-    export_elasticache_metrics_to_s3(elasticache_id, bucket, metrics_key, start_time, end_time)
-    export_ecs_metrics_to_s3(ecs_cluster, ecs_service, bucket, ecs_metrics_key, start_time, end_time)
     loadgen_status = export_loadgen_logs_to_s3(
         os.environ.get("LOADGEN_LOG_GROUP") or os.environ.get("LOG_GROUP"),
         bucket,
-        logs_key,
+        loadgen_logs_prefix,
     )
     status["checks"]["loadgen_logs"] = loadgen_status
+    start_time = loadgen_status.get("first_message_ts")
+    end_time = loadgen_status.get("last_message_ts")
+    if start_time is None or end_time is None:
+        status["checks"]["metrics"] = {
+            "complete": False,
+            "error": "memtier log message window is unavailable",
+        }
+        _put_json(bucket, status_key, status)
+        raise RuntimeError(
+            "Report data contract incomplete; memtier log message window is unavailable. "
+            f"Details written to s3://{bucket}/{status_key}"
+        )
+
+    export_elasticache_metrics_to_s3(elasticache_id, bucket, metrics_key, start_time, end_time)
+    export_ecs_metrics_to_s3(ecs_cluster, ecs_service, bucket, ecs_metrics_key, start_time, end_time)
     status["checks"]["metrics"] = _metric_contract_status(bucket, metrics_key)
 
     export_logs_to_s3(
@@ -577,7 +714,7 @@ def main() -> None:
 
     os.environ["METRICS_CSV"] = f"s3://{bucket}/{metrics_key}"
     os.environ["ECS_METRICS_CSV"] = f"s3://{bucket}/{ecs_metrics_key}"
-    os.environ["LOGS_TXT"] = f"s3://{bucket}/{logs_key}"
+    os.environ["LOGS_PREFIX"] = f"s3://{bucket}/{loadgen_logs_prefix}/"
     os.environ["OUTPUT_BUCKET"] = bucket
     os.environ["OUTPUT_PREFIX"] = prefix
     os.environ["SUFFIX"] = timestamp
@@ -592,5 +729,22 @@ def main() -> None:
     send_report_ready_email(cluster_id, report_uri, summary_uri, bucket, prefix, timestamp)
 
 
+def download_stream_cli(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Download one CloudWatch log stream as raw JSONL events.")
+    parser.add_argument("--log-group", required=True)
+    parser.add_argument("--log-stream", required=True)
+    parser.add_argument("--region", required=True)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args(argv)
+
+    global logs
+    logs = boto3.client("logs", region_name=args.region)
+    event_count = write_log_stream_to_file(args.log_group, args.log_stream, args.output)
+    print(f"Wrote {event_count} events from {args.log_stream} to {args.output}")
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "download-stream":
+        download_stream_cli(sys.argv[2:])
+    else:
+        main()

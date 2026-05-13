@@ -1,7 +1,5 @@
 """Build a structured summary dict suitable for JSON serialisation and comparison reports."""
 
-import pandas as pd
-
 from helpers import metric_filter, cache_hit_rate_df, select_mem_dims
 
 
@@ -48,9 +46,9 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
     {
       "meta": { cluster_id, time_range, engine_type, engine_version, node_type, node_count, cluster_mode },
       "benchmark": { avg_ops, peak_ops, cv_pct, avg_latency_ms, max_latency_ms,
-                     avg_bandwidth_kbs, active_window_min, prefill_min },
+                     avg_bandwidth_kbs },
       "cache_efficiency": { avg_hit_rate_pct, total_evictions, min_freeable_memory_mb, peak_key_count,
-                            first_eviction_offset_min },
+                            first_eviction_ts },
       "engine_cpu": { avg_pct, max_pct, credit_balance_avg, credit_usage_avg },
       "memory": { avg_usage_pct, max_usage_pct, headroom_pct, fragmentation_avg },
       "network": {
@@ -77,6 +75,12 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
         'node_count':      config.get('node_count', ''),
         'cluster_mode':    str(config.get('cluster_mode', 'false')).lower(),
     }
+    first_message_ts = extra_stats.get('first_message_ts')
+    last_message_ts = extra_stats.get('last_message_ts')
+    if first_message_ts is not None:
+        meta['report_start'] = _safe(first_message_ts)
+    if last_message_ts is not None:
+        meta['report_end'] = _safe(last_message_ts)
 
     # ------------------------------------------------------------------ #
     #  benchmark (memtier logs)                                            #
@@ -97,24 +101,6 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
         if 'Bandwidth_KBs' in logs_df.columns and logs_df['Bandwidth_KBs'].notna().any():
             benchmark['avg_bandwidth_kbs'] = _safe(float(logs_df['Bandwidth_KBs'].mean()), 2)
 
-        ts = logs_df['Timestamp']
-        benchmark['active_window_min'] = _safe(
-            float((ts.max() - ts.min()).total_seconds() / 60), 1)
-
-        process_start_ts = extra_stats.get('process_start_ts')
-        benchmark['prefill_min'] = None
-        if process_start_ts is not None:
-            bench_start = ts.min()
-            ps = process_start_ts
-            if hasattr(ps, 'tzinfo') and ps.tzinfo is not None:
-                ps = ps.replace(tzinfo=None)
-            bs = bench_start
-            if hasattr(bs, 'tzinfo') and bs.tzinfo is not None:
-                bs = bs.replace(tzinfo=None)
-            prefill_min = float((bs - ps).total_seconds() / 60)
-            if prefill_min >= 0:
-                benchmark['prefill_min'] = _safe(prefill_min, 1)
-
     # ------------------------------------------------------------------ #
     #  cache_efficiency                                                    #
     # ------------------------------------------------------------------ #
@@ -123,15 +109,7 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
         # Hit rate
         hr_df = cache_hit_rate_df(metrics_df)
         if not hr_df.empty:
-            if not logs_df.empty:
-                bench_start = logs_df['Timestamp'].min()
-                hr_ts = hr_df['Timestamp']
-                if hr_ts.dt.tz is not None:
-                    hr_ts = hr_ts.dt.tz_localize(None)
-                bench_vals = hr_df[hr_ts >= bench_start]['Value']
-                avg_hr = float(bench_vals.mean()) if not bench_vals.empty else float(hr_df['Value'].mean())
-            else:
-                avg_hr = float(hr_df['Value'].mean())
+            avg_hr = float(hr_df['Value'].mean())
             cache_efficiency['avg_hit_rate_pct'] = _safe(avg_hr, 2)
 
         # Evictions
@@ -150,20 +128,12 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
         if not items_df.empty:
             cache_efficiency['peak_key_count'] = int(items_df['Value'].max())
 
-    # First eviction offset
+    # First eviction timestamp
     first_eviction_ts = extra_stats.get('first_eviction_ts')
-    if first_eviction_ts is not None and not logs_df.empty:
-        bench_start = logs_df['Timestamp'].min()
-        fets = first_eviction_ts
-        if hasattr(fets, 'tzinfo') and fets.tzinfo is not None:
-            fets = fets.replace(tzinfo=None)
-        bs = bench_start
-        if hasattr(bs, 'tzinfo') and bs.tzinfo is not None:
-            bs = bs.replace(tzinfo=None)
-        cache_efficiency['first_eviction_offset_min'] = _safe(
-            float((fets - bs).total_seconds() / 60), 1)
+    if first_eviction_ts is not None:
+        cache_efficiency['first_eviction_ts'] = _safe(first_eviction_ts)
     else:
-        cache_efficiency['first_eviction_offset_min'] = None
+        cache_efficiency['first_eviction_ts'] = None
 
     # ------------------------------------------------------------------ #
     #  engine_cpu                                                          #

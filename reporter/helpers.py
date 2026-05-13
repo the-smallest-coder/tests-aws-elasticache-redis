@@ -1,7 +1,5 @@
 """Shared helpers, constants and small utilities for the report generator."""
 
-import pandas as pd
-
 # ------------------------------------------------------------------ #
 #  Design tokens / shared constants                                    #
 # ------------------------------------------------------------------ #
@@ -154,12 +152,3 @@ def select_mem_dims(dim_series, node_count):
         return aggregate if aggregate else unique
     else:
         return per_shard if per_shard else aggregate
-
-
-def resample_logs(logs_df, rule='1min'):
-    """Resample memtier log data to *rule* intervals using mean."""
-    if logs_df.empty:
-        return logs_df
-    df = logs_df.set_index('Timestamp').sort_index()
-    df = df.resample(rule).mean().dropna().reset_index()
-    return df

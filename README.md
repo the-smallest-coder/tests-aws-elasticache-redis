@@ -116,7 +116,7 @@ flowchart LR
 |------|--------|------|
 | ElastiCache Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster}.csv` |
 | ECS Task Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster}-ecs.csv` |
-| Logs | Text | `s3://{bucket}/exports/{timestamp}/logs/{cluster}.txt` |
+| Loadgen logs | Text | `s3://{bucket}/exports/{timestamp}/logs/loadgen/{stream}.txt` |
 
 ---
 
@@ -191,10 +191,12 @@ The same `reporter/report_generator.py` entrypoint is used in ECS and for local 
 
 ### Report Window
 
-Reports and plots use the memtier log message window:
+Reports and plots use one absolute memtier log message window across all memtier streams:
 
 - **Start time**: timestamp of the very first memtier log message.
 - **End time**: timestamp of the very last memtier log message.
+
+Every plotted value is placed at the absolute timestamp from its source log or metric row.
 
 For local comparison:
 

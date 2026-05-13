@@ -9,7 +9,7 @@ from pathlib import Path
 
 from report_common import ECS_ENV_VARS
 from report_compare import run_compare_report
-from helpers import read_file_content, resample_logs
+from helpers import read_file_content
 from parsers import parse_metrics_csv, parse_memtier_logs, parse_memtier_extra_stats
 from summary import build_summary
 from cards import header_pills, stat_cards_html
@@ -50,23 +50,20 @@ def missing_ecs_env_vars() -> list[str]:
     return [name for name in ECS_ENV_VARS if not os.environ.get(name)]
 
 
-def _compute_time_range(*frames) -> str:
-    all_timestamps = []
-    for df in frames:
-        if df is None or df.empty or "Timestamp" not in df.columns:
-            continue
-        ts_min = df["Timestamp"].min()
-        ts_max = df["Timestamp"].max()
-        if hasattr(ts_min, "tzinfo") and ts_min.tzinfo is not None:
-            ts_min = ts_min.replace(tzinfo=None)
-            ts_max = ts_max.replace(tzinfo=None)
-        all_timestamps.extend([ts_min, ts_max])
-    if not all_timestamps:
+def _normalize_ts(value):
+    if value is None:
+        return None
+    if hasattr(value, "tzinfo") and value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    return value
+
+
+def _format_time_range(start, end) -> str:
+    start = _normalize_ts(start)
+    end = _normalize_ts(end)
+    if start is None or end is None:
         return ""
-    t0 = min(all_timestamps)
-    t1 = max(all_timestamps)
-    duration_min = int((t1 - t0).total_seconds() / 60)
-    return f"{t0.strftime('%Y-%m-%d %H:%M')} \u2013 {t1.strftime('%H:%M')} ({duration_min} min)"
+    return f"{start.strftime('%Y-%m-%d %H:%M:%S')} UTC - {end.strftime('%Y-%m-%d %H:%M:%S')} UTC"
 
 
 def _clip_to_time_window(df, start, end):
@@ -118,6 +115,58 @@ def _warn_if_cache_hit_rate_missing(metrics_df, source: str) -> None:
         )
 
 
+def _s3_bucket_key(uri: str) -> tuple[str, str]:
+    if not uri.startswith("s3://"):
+        raise ValueError(f"Invalid S3 URI: {uri}")
+    parts = uri[5:].split("/", 1)
+    if len(parts) != 2 or not parts[1]:
+        raise ValueError(f"Invalid S3 URI: {uri}")
+    return parts[0], parts[1]
+
+
+def _read_s3_prefix_log_contents(prefix_uri: str) -> list[tuple[str, str]]:
+    import boto3
+
+    bucket, prefix = _s3_bucket_key(prefix_uri)
+    if prefix and not prefix.endswith("/"):
+        prefix = f"{prefix}/"
+
+    s3 = boto3.client("s3")
+    paginator = s3.get_paginator("list_objects_v2")
+    entries = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for item in page.get("Contents", []):
+            key = item.get("Key", "")
+            if not key.endswith(".txt"):
+                continue
+            uri = f"s3://{bucket}/{key}"
+            entries.append((uri, read_file_content(uri)))
+    return sorted(entries, key=lambda item: item[0])
+
+
+def _read_local_log_contents(logs_dir: Path, cluster_id: str) -> list[tuple[str, str]]:
+    loadgen_dir = logs_dir / "loadgen"
+    files = sorted(path for path in loadgen_dir.rglob("*.txt") if path.is_file()) if loadgen_dir.exists() else []
+
+    return [
+        (str(path), path.read_text(encoding="utf-8", errors="replace"))
+        for path in files
+    ]
+
+
+def _read_uploaded_log_contents(logs_prefix: str) -> list[tuple[str, str]]:
+    return _read_s3_prefix_log_contents(logs_prefix) if logs_prefix else []
+
+
+def _parse_memtier_log_entries(entries: list[tuple[str, str]]):
+    import pandas as pd
+
+    if not entries:
+        return pd.DataFrame(), {}
+    combined = "\n".join(content for _, content in entries)
+    return parse_memtier_logs(combined), parse_memtier_extra_stats(combined)
+
+
 def create_report(
     metrics_df,
     logs_df,
@@ -139,23 +188,19 @@ def create_report(
     config = config or {}
     extra_stats = extra_stats or {}
 
-    logs_resampled = resample_logs(logs_df)
-    if not logs_resampled.empty:
-        x_min = logs_resampled["Timestamp"].min()
-        x_max = logs_resampled["Timestamp"].max()
-    else:
-        x_min = x_max = None
+    x_min = _normalize_ts(extra_stats.get("first_message_ts"))
+    x_max = _normalize_ts(extra_stats.get("last_message_ts"))
 
     oom_df = extra_stats.get("oom_df", pd.DataFrame())
 
     metrics_window_df = _clip_to_time_window(metrics_df, x_min, x_max)
     ecs_window_df = _clip_to_time_window(ecs_df, x_min, x_max)
 
-    fig_m = build_memtier_figure(logs_resampled, oom_df, metrics_window_df, x_min, x_max)
+    fig_m = build_memtier_figure(logs_df, oom_df, metrics_window_df, x_min, x_max)
     fig_i = build_infra_figure(ecs_window_df, metrics_window_df, cluster_id, config, x_min, x_max)
     fig_d = build_elasticache_deep_dive_figure(metrics_window_df, cluster_id, config, x_min, x_max)
 
-    time_range = _compute_time_range(logs_df) if not logs_df.empty else _compute_time_range(metrics_df, ecs_df)
+    time_range = _format_time_range(x_min, x_max)
     cluster_mode = str(config.get("cluster_mode", "false")).lower() == "true"
     id_label = "Cluster" if cluster_mode else "Replication Group"
 
@@ -197,18 +242,14 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     metrics_df = parse_metrics_csv(ec_csvs[0].read_text(encoding="utf-8"))
     ecs_df = parse_metrics_csv(ecs_csvs[0].read_text(encoding="utf-8")) if ecs_csvs else pd.DataFrame()
 
-    # Find and parse the main loadgen log file (directly in logs/, not in subdirs)
-    log_files = [p for p in logs_dir.glob(f"{cluster_id}.txt")]
-    if not log_files:
-        log_files = [p for p in logs_dir.glob("*.txt")]
-    if not log_files:
+    log_entries = _read_local_log_contents(logs_dir, cluster_id)
+    if not log_entries:
         print(f"No log file found in {logs_dir}")
         logs_df = pd.DataFrame()
         extra_stats = {}
     else:
-        log_content = log_files[0].read_text(encoding="utf-8")
-        logs_df = parse_memtier_logs(log_content)
-        extra_stats = parse_memtier_extra_stats(log_content)
+        print(f"Reading {len(log_entries)} loadgen log file(s)")
+        logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
 
     _warn_if_cache_hit_rate_missing(metrics_df, str(ec_csvs[0]))
 
@@ -226,9 +267,17 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     out_path.write_text(summary_json, encoding="utf-8")
     print(f"Written: {out_path}")
 
+    canonical_json_path = run_path / f"results_{run_path.name}.json"
+    canonical_json_path.write_text(summary_json, encoding="utf-8")
+    print(f"Written: {canonical_json_path}")
+
     html_path = run_path / "results_local.html"
     html_path.write_text(html_content, encoding="utf-8")
     print(f"Written: {html_path}")
+
+    canonical_html_path = run_path / f"results_{run_path.name}.html"
+    canonical_html_path.write_text(html_content, encoding="utf-8")
+    print(f"Written: {canonical_html_path}")
 
 
 def run_uploaded_report() -> None:
@@ -242,24 +291,24 @@ def run_uploaded_report() -> None:
 
     metrics_csv = os.environ.get("METRICS_CSV")
     ecs_metrics_csv = os.environ.get("ECS_METRICS_CSV", "")
-    logs_txt = os.environ.get("LOGS_TXT")
+    logs_prefix = os.environ.get("LOGS_PREFIX", "")
     if not metrics_csv and s3_bucket and s3_prefix and timestamp and cluster_id:
         metrics_csv = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/metrics/{cluster_id}.csv"
     if not ecs_metrics_csv and s3_bucket and s3_prefix and timestamp and cluster_id:
         ecs_metrics_csv = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/metrics/{cluster_id}-ecs.csv"
-    if not logs_txt and s3_bucket and s3_prefix and timestamp and cluster_id:
-        logs_txt = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/logs/{cluster_id}.txt"
+    if not logs_prefix and s3_bucket and s3_prefix and timestamp:
+        logs_prefix = f"s3://{s3_bucket}/{s3_prefix}{timestamp}/logs/loadgen/"
 
     output_bucket = os.environ.get("OUTPUT_BUCKET") or s3_bucket
     output_prefix = os.environ.get("OUTPUT_PREFIX", s3_prefix)
     suffix = os.environ.get("SUFFIX", timestamp)
 
-    if not metrics_csv or not logs_txt or not output_bucket:
+    if not metrics_csv or not logs_prefix or not output_bucket:
         missing = [
             name
             for name, value in {
                 "METRICS_CSV": metrics_csv,
-                "LOGS_TXT": logs_txt,
+                "LOGS_PREFIX": logs_prefix,
                 "OUTPUT_BUCKET": output_bucket,
             }.items()
             if not value
@@ -271,10 +320,12 @@ def run_uploaded_report() -> None:
     metrics_df = parse_metrics_csv(read_file_content(metrics_csv))
     _warn_if_cache_hit_rate_missing(metrics_df, metrics_csv)
 
-    print(f"Reading logs from {logs_txt}")
-    logs_content = read_file_content(logs_txt)
-    logs_df = parse_memtier_logs(logs_content)
-    extra_stats = parse_memtier_extra_stats(logs_content)
+    log_entries = _read_uploaded_log_contents(logs_prefix)
+    if not log_entries:
+        print(f"No loadgen log files found from {logs_prefix}")
+        sys.exit(2)
+    print(f"Reading {len(log_entries)} loadgen log file(s)")
+    logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
 
     ecs_df = pd.DataFrame()
     if ecs_metrics_csv:

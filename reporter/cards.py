@@ -1,7 +1,5 @@
 """Stat-cards and header-pills HTML builders."""
 
-import pandas as pd
-
 from helpers import metric_filter, cache_hit_rate_df, select_mem_dims
 
 
@@ -54,34 +52,6 @@ def stat_cards_html(logs_df, metrics_df, ecs_df, extra_stats=None, config=None):
             cards.append(('Avg Bandwidth', bw_str, bw_unit, '#0097a7',
                           'Average network throughput reported by memtier.'))
 
-        active_min = (logs_df['Timestamp'].max() - logs_df['Timestamp'].min()).total_seconds() / 60
-        cards.append(('Active Load Window', f"{active_min:.0f}", 'min', '#5c6bc0',
-                      'Time with measurable benchmark traffic (ops/sec stats window). '
-                      'Excludes silent key pre-population phase.'))
-
-        process_start_ts = extra_stats.get('process_start_ts')
-        prefill_value = 'n/a'
-        prefill_tip = (
-            'Pre-fill duration could not be derived because the CloudWatch startup '
-            'timestamp was not earlier than the reconstructed benchmark start.'
-        )
-        if process_start_ts is not None:
-            bench_start = logs_df['Timestamp'].min()
-            ps = process_start_ts
-            if hasattr(ps, 'tzinfo') and ps.tzinfo is not None:
-                ps = ps.replace(tzinfo=None)
-            bs = bench_start
-            if hasattr(bs, 'tzinfo') and bs.tzinfo is not None:
-                bs = bs.replace(tzinfo=None)
-            prefill_min = (bs - ps).total_seconds() / 60
-            if prefill_min >= 0:
-                prefill_value = f"{prefill_min:.0f}"
-                prefill_tip = (
-                    'Time memtier spent silently loading keys before benchmark traffic began. '
-                    'Scales with keyspace size relative to instance memory.'
-                )
-        cards.append(('Pre-fill Duration', prefill_value, 'min', '#78909c', prefill_tip))
-
     # ---- ECS CPU / Memory ----
     if not ecs_df.empty:
         cpu_df = metric_filter(ecs_df, 'CPUUtilization', 'Average')
@@ -126,20 +96,14 @@ def stat_cards_html(logs_df, metrics_df, ecs_df, extra_stats=None, config=None):
             cards.append(('Engine CPU Peak', f"{eng_cpu_df['Value'].max():.1f}", '%', '#e65100',
                           'Peak Redis engine thread CPU utilization. More precise than host CPU for burstable T-type instances.'))
 
-    # ---- Cache Hit Rate (benchmark window) ----
-    if not metrics_df.empty and not logs_df.empty:
+    # ---- Cache Hit Rate (report window) ----
+    if not metrics_df.empty:
         hr_df = cache_hit_rate_df(metrics_df)
         if not hr_df.empty:
-            bench_start = logs_df['Timestamp'].min()
-            hr_ts = hr_df['Timestamp']
-            if hr_ts.dt.tz is not None:
-                hr_ts = hr_ts.dt.tz_localize(None)
-            avg_hr = hr_df[hr_ts >= bench_start]['Value'].mean()
-            if pd.isna(avg_hr):
-                avg_hr = hr_df['Value'].mean()
+            avg_hr = hr_df['Value'].mean()
             hr_color = '#188038' if avg_hr >= 90 else ('#e8710a' if avg_hr >= 70 else '#d93025')
             cards.append(('Cache Hit Rate', f"{avg_hr:.1f}", '%', hr_color,
-                          'Avg Redis CacheHitRate during benchmark window. <70% = significant misses/evictions.'))
+                          'Avg Redis CacheHitRate in the report window. <70% = significant misses/evictions.'))
 
     # ---- Total Evictions (CloudWatch) ----
     if not metrics_df.empty:
@@ -169,15 +133,12 @@ def stat_cards_html(logs_df, metrics_df, ecs_df, extra_stats=None, config=None):
     # ---- Time to first eviction (OOM) ----
     first_eviction_ts = extra_stats.get('first_eviction_ts')
     if first_eviction_ts is not None and not logs_df.empty:
-        bench_start = logs_df['Timestamp'].min()
         fets = first_eviction_ts
         if hasattr(fets, 'tzinfo') and fets.tzinfo is not None:
             fets = fets.replace(tzinfo=None)
-        delta_min = (fets - bench_start).total_seconds() / 60
-        offset_str = f" (+{delta_min:.0f} min)" if delta_min > 0 else ""
-        oom_label = f"{fets.strftime('%H:%M')} UTC{offset_str}"
+        oom_label = f"{fets.strftime('%Y-%m-%d %H:%M:%S')} UTC"
         oom_color = '#d93025'
-        oom_tip = 'Approximate time the Redis instance first ran out of memory. "+N min" is relative to benchmark start.'
+        oom_tip = 'Absolute timestamp of the first Redis out-of-memory rejection.'
     else:
         oom_label, oom_color = 'None', '#188038'
         oom_tip = 'No -OOM rejections. The instance had sufficient memory for the entire benchmark.'

@@ -109,7 +109,9 @@ resource "aws_iam_role_policy" "ecs_task_exporter" {
         Action = [
           "cloudwatch:GetMetricStatistics",
           "cloudwatch:ListMetrics",
+          "logs:DescribeLogStreams",
           "logs:FilterLogEvents",
+          "logs:GetLogEvents",
           "elasticache:DescribeReplicationGroups"
         ]
         Resource = "*"
