@@ -62,9 +62,15 @@ resource "aws_ecs_task_definition" "loadgen" {
       command = [
         join(" ", concat(
           [
-            "UUID=$(cat /proc/sys/kernel/random/uuid)",
-            "&&",
-            "exec",
+            "set -u;",
+            "FIFO=/tmp/memtier-output.$$;",
+            "mkfifo \"$FIFO\";",
+            "UUID=$(cat /proc/sys/kernel/random/uuid);",
+            "MEMTIER_PID=;",
+            "term() { if [ -n \"$MEMTIER_PID\" ]; then kill -INT \"$MEMTIER_PID\" 2>/dev/null || true; fi; };",
+            "trap term TERM INT;",
+            "awk 'BEGIN { RS = \"[\\r\\n]+\" } NF { print; fflush() }' < \"$FIFO\" &",
+            "FILTER_PID=$!;",
             "memtier_benchmark",
             "--server=${local.elasticache_endpoint}",
             "--port=${var.port}",
@@ -80,7 +86,15 @@ resource "aws_ecs_task_definition" "loadgen" {
             "--hide-histogram"
           ],
           var.cluster_mode_enabled ? ["--cluster-mode"] : [],
-          var.transit_encryption_enabled ? ["--tls", "--tls-skip-verify"] : []
+          var.transit_encryption_enabled ? ["--tls", "--tls-skip-verify"] : [],
+          [
+            "> \"$FIFO\" 2>&1 &",
+            "MEMTIER_PID=$!;",
+            "while true; do wait \"$MEMTIER_PID\"; STATUS=$?; if [ \"$STATUS\" -ge 128 ] && kill -0 \"$MEMTIER_PID\" 2>/dev/null; then continue; fi; break; done;",
+            "wait \"$FILTER_PID\" 2>/dev/null || true;",
+            "rm -f \"$FIFO\";",
+            "exit \"$STATUS\""
+          ]
         ))
       ]
 
