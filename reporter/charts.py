@@ -73,6 +73,17 @@ def build_memtier_figure(logs_resampled, oom_df, metrics_df, x_min, x_max):
             hovertemplate="%{x|%H:%M}<br><b>%{y:,} OOM/min</b><extra></extra>"
         ), row=2, col=1)
     else:
+        if x_min is not None and x_max is not None:
+            oom_plot = pd.DataFrame({
+                'Timestamp': pd.date_range(x_min, x_max, freq='1min'),
+                'OOM_per_min': 0,
+            })
+            fig.add_trace(go.Bar(
+                x=oom_plot['Timestamp'], y=oom_plot['OOM_per_min'],
+                name="OOM events/min", marker_color=C_OOM_BAR,
+                legend="legend2",
+                hovertemplate="%{x|%H:%M}<br><b>%{y:,} OOM/min</b><extra></extra>"
+            ), row=2, col=1)
         fig.add_annotation(text="No eviction pressure detected",
                            xref="paper", yref="paper",
                            x=0.5, y=0.32, showarrow=False)

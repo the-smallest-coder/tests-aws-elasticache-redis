@@ -53,9 +53,9 @@ resource "aws_ecs_task_definition" "loadgen" {
 
   container_definitions = jsonencode([
     {
-      name      = "memtier"
-      image     = "redislabs/memtier_benchmark:latest"
-      essential = true
+      name        = "memtier"
+      image       = "redislabs/memtier_benchmark:latest"
+      essential   = true
       stopTimeout = 120
 
       entryPoint = ["sh", "-c"]
@@ -83,7 +83,7 @@ resource "aws_ecs_task_definition" "loadgen" {
           var.transit_encryption_enabled ? ["--tls", "--tls-skip-verify"] : []
         ))
       ]
-      
+
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -109,8 +109,8 @@ resource "aws_ecs_service" "loadgen" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = var.subnet_ids
-    security_groups  = [aws_security_group.loadgen.id]
+    subnets         = var.subnet_ids
+    security_groups = [aws_security_group.loadgen.id]
     # Workaround only: enable when subnets have no NAT/egress for Docker Hub pulls.
     # Not recommended for normal use; prefer private subnets with NAT or ECR.
     assign_public_ip = var.loadgen_assign_public_ip
@@ -152,13 +152,13 @@ locals {
   # ---------------------------------------------------------------------------
   _node_memory_bytes = {
     # T4g family
-    "cache.t4g.micro"  = 536870912    # 512 MB advertised
-    "cache.t4g.small"  = 1610612736   # 1.5 GB advertised
-    "cache.t4g.medium" = 3435973836   # 3.2 GB advertised
+    "cache.t4g.micro"  = 536870912  # 512 MB advertised
+    "cache.t4g.small"  = 1610612736 # 1.5 GB advertised
+    "cache.t4g.medium" = 3435973836 # 3.2 GB advertised
     # T3 family
-    "cache.t3.micro"   = 536870912
-    "cache.t3.small"   = 1610612736
-    "cache.t3.medium"  = 3435973836
+    "cache.t3.micro"  = 536870912
+    "cache.t3.small"  = 1610612736
+    "cache.t3.medium" = 3435973836
     # M7g family
     "cache.m7g.large"   = 7516192768   # 7 GB
     "cache.m7g.xlarge"  = 15032385536  # 14 GB
@@ -190,7 +190,7 @@ locals {
 
   # Advertised bytes for this run; fall back to t4g.micro if type is unknown.
   _advertised_bytes = lookup(local._node_memory_bytes, var.node_type,
-    local._node_memory_bytes["cache.t4g.micro"])
+  local._node_memory_bytes["cache.t4g.micro"])
 
   # key-maximum: how many data_size-byte values fit at the target fill factor.
   # Each Redis key has ~70 bytes of overhead on top of the value.

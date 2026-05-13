@@ -188,6 +188,14 @@ notification_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/aws
 ## Local Comparison
 
 The same `reporter/report_generator.py` entrypoint is used in ECS and for local comparison.
+
+### Report Window
+
+Reports and plots use the memtier log message window:
+
+- **Start time**: timestamp of the very first memtier log message.
+- **End time**: timestamp of the very last memtier log message.
+
 For local comparison:
 
 ```bash

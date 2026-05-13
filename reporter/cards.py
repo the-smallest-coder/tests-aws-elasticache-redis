@@ -60,6 +60,11 @@ def stat_cards_html(logs_df, metrics_df, ecs_df, extra_stats=None, config=None):
                       'Excludes silent key pre-population phase.'))
 
         process_start_ts = extra_stats.get('process_start_ts')
+        prefill_value = 'n/a'
+        prefill_tip = (
+            'Pre-fill duration could not be derived because the CloudWatch startup '
+            'timestamp was not earlier than the reconstructed benchmark start.'
+        )
         if process_start_ts is not None:
             bench_start = logs_df['Timestamp'].min()
             ps = process_start_ts
@@ -70,9 +75,12 @@ def stat_cards_html(logs_df, metrics_df, ecs_df, extra_stats=None, config=None):
                 bs = bs.replace(tzinfo=None)
             prefill_min = (bs - ps).total_seconds() / 60
             if prefill_min >= 0:
-                cards.append(('Pre-fill Duration', f"{prefill_min:.0f}", 'min', '#78909c',
-                              'Time memtier spent silently loading keys before benchmark traffic began. '
-                              'Scales with keyspace size relative to instance memory.'))
+                prefill_value = f"{prefill_min:.0f}"
+                prefill_tip = (
+                    'Time memtier spent silently loading keys before benchmark traffic began. '
+                    'Scales with keyspace size relative to instance memory.'
+                )
+        cards.append(('Pre-fill Duration', prefill_value, 'min', '#78909c', prefill_tip))
 
     # ---- ECS CPU / Memory ----
     if not ecs_df.empty:

@@ -102,6 +102,7 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
             float((ts.max() - ts.min()).total_seconds() / 60), 1)
 
         process_start_ts = extra_stats.get('process_start_ts')
+        benchmark['prefill_min'] = None
         if process_start_ts is not None:
             bench_start = ts.min()
             ps = process_start_ts

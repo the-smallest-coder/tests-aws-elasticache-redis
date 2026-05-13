@@ -65,7 +65,18 @@ def bytes_to_mb(value: Any) -> float | None:
 def resolve_results_path(raw_path: str) -> Path:
     path = Path(raw_path)
     if path.is_dir():
-        path = path / "results_local.json"
+        local_path = path / "results_local.json"
+        if local_path.exists():
+            return local_path
+
+        generated = sorted(path.glob("results_*.json"))
+        generated = [candidate for candidate in generated if candidate.name != "report_status.json"]
+        if len(generated) == 1:
+            return generated[0]
+        if len(generated) > 1:
+            names = ", ".join(candidate.name for candidate in generated)
+            raise FileExistsError(f"Multiple result JSON files found in {path}: {names}")
+        path = local_path
     return path
 
 

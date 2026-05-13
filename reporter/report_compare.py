@@ -277,9 +277,9 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
 
     # Determine tone based on strict improvement/worsening only; equality is neutral.
     cache_latency_signals = [
-        _metric_signal(hit_a, hit_b, "higher"),
-        _metric_signal(get_lat_a, get_lat_b, "lower"),
-        _metric_signal(set_lat_a, set_lat_b, "lower"),
+        metric_signal(hit_a, hit_b, higher_is_better=True),
+        metric_signal(get_lat_a, get_lat_b, higher_is_better=False),
+        metric_signal(set_lat_a, set_lat_b, higher_is_better=False),
     ]
     cache_latency_signals = [signal for signal in cache_latency_signals if signal != 0]
 
