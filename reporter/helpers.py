@@ -1,5 +1,7 @@
 """Shared helpers, constants and small utilities for the report generator."""
 
+import pandas as pd
+
 # ------------------------------------------------------------------ #
 #  Design tokens / shared constants                                    #
 # ------------------------------------------------------------------ #
@@ -106,6 +108,39 @@ def cache_hit_rate_df(df):
     merged['Stat'] = 'Average'
     merged['Unit'] = 'Percent'
     return merged[['Timestamp', 'Namespace', 'MetricName', 'Stat', 'Value', 'Unit', 'Dimensions']]
+
+
+def aggregate_memtier_progress(df):
+    """Aggregate per-stream progress samples at exact CloudWatch event timestamps."""
+    if df.empty:
+        return pd.DataFrame()
+    per_task = df.groupby(["Timestamp", "Stream"], as_index=False).agg({
+        "Ops/sec": "mean",
+        "Latency (ms)": "mean",
+    })
+    rows = []
+    for timestamp, group in per_task.groupby("Timestamp"):
+        ops = group["Ops/sec"]
+        latency = group["Latency (ms)"]
+        total_ops = float(ops.sum())
+        rows.append({
+            "Timestamp": timestamp,
+            "Overall Ops/sec": total_ops,
+            "Overall Latency (ms)": float((latency * ops).sum() / total_ops) if total_ops else 0.0,
+            "Ops median": float(ops.median()),
+            "Ops average": float(ops.mean()),
+            "Ops p10": float(ops.quantile(0.10)),
+            "Ops p90": float(ops.quantile(0.90)),
+            "Ops min": float(ops.min()),
+            "Ops max": float(ops.max()),
+            "Latency median": float(latency.median()),
+            "Latency average": float(latency.mean()),
+            "Latency p10": float(latency.quantile(0.10)),
+            "Latency p90": float(latency.quantile(0.90)),
+            "Latency min": float(latency.min()),
+            "Latency max": float(latency.max()),
+        })
+    return pd.DataFrame(rows).sort_values("Timestamp").reset_index(drop=True)
 
 
 def shorten_dim(dim, cluster_id=''):

@@ -10,7 +10,12 @@ from pathlib import Path
 from report_common import ECS_ENV_VARS
 from report_compare import run_compare_report
 from helpers import read_file_content
-from parsers import parse_metrics_csv, parse_memtier_logs, parse_memtier_extra_stats
+from parsers import (
+    parse_metrics_csv,
+    parse_memtier_logs,
+    parse_memtier_extra_stats,
+    parse_memtier_final_totals,
+)
 from summary import build_summary
 from cards import header_pills, stat_cards_html
 from charts import build_memtier_figure, build_infra_figure, build_elasticache_deep_dive_figure
@@ -63,7 +68,12 @@ def _format_time_range(start, end) -> str:
     end = _normalize_ts(end)
     if start is None or end is None:
         return ""
-    return f"{start.strftime('%Y-%m-%d %H:%M:%S')} UTC - {end.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+
+    def format_ts(value):
+        pattern = "%Y-%m-%d %H:%M:%S.%f" if value.microsecond else "%Y-%m-%d %H:%M:%S"
+        return f"{value.strftime(pattern)} UTC"
+
+    return f"{format_ts(start)} - {format_ts(end)}"
 
 
 def _clip_to_time_window(df, start, end):
@@ -163,14 +173,66 @@ def _is_memtier_log_entry(source: str) -> bool:
     return "/logs/loadgen/memtier/" in normalized
 
 
+def _memtier_stream_from_source(source: str) -> str:
+    normalized = source.replace("\\", "/")
+    marker = "/logs/loadgen/memtier/"
+    suffix = normalized.split(marker, 1)[1] if marker in normalized else normalized.rsplit("/", 1)[-1]
+    return suffix.removesuffix(".txt")
+
+
 def _parse_memtier_log_entries(entries: list[tuple[str, str]]):
     import pandas as pd
 
     memtier_entries = [(source, content) for source, content in entries if _is_memtier_log_entry(source)]
     if not memtier_entries:
         return pd.DataFrame(), {}
-    combined = "\n".join(content for _, content in memtier_entries)
-    return parse_memtier_logs(combined), parse_memtier_extra_stats(combined)
+
+    logs_frames = []
+    totals_frames = []
+    first_message_ts = None
+    last_message_ts = None
+    first_eviction_ts = None
+    oom_frames = []
+    for source, content in memtier_entries:
+        stream = _memtier_stream_from_source(source)
+        logs_frames.append(parse_memtier_logs(content, stream))
+        totals_frames.append(parse_memtier_final_totals(content, stream))
+        stats = parse_memtier_extra_stats(content, stream)
+        for key, current in (
+            ("first_message_ts", first_message_ts),
+            ("last_message_ts", last_message_ts),
+            ("first_eviction_ts", first_eviction_ts),
+        ):
+            value = stats.get(key)
+            if value is None:
+                continue
+            if key == "first_message_ts":
+                first_message_ts = value if current is None or value < current else current
+            elif key == "last_message_ts":
+                last_message_ts = value if current is None or value > current else current
+            else:
+                first_eviction_ts = value if current is None or value < current else current
+        oom_frames.append(stats.get("oom_df", pd.DataFrame()))
+
+    logs_df = pd.concat([frame for frame in logs_frames if not frame.empty], ignore_index=True) if any(
+        not frame.empty for frame in logs_frames
+    ) else pd.DataFrame()
+    totals_df = pd.concat([frame for frame in totals_frames if not frame.empty], ignore_index=True) if any(
+        not frame.empty for frame in totals_frames
+    ) else pd.DataFrame()
+    oom_df = pd.concat([frame for frame in oom_frames if not frame.empty], ignore_index=True) if any(
+        not frame.empty for frame in oom_frames
+    ) else pd.DataFrame(columns=["Timestamp", "OOM_events"])
+    if not oom_df.empty:
+        oom_df = oom_df.groupby("Timestamp", as_index=False)["OOM_events"].sum()
+
+    return logs_df, {
+        "first_message_ts": first_message_ts,
+        "last_message_ts": last_message_ts,
+        "first_eviction_ts": first_eviction_ts,
+        "oom_df": oom_df,
+        "final_totals_df": totals_df,
+    }
 
 
 def create_report(

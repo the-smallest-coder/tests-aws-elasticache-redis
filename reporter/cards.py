@@ -1,6 +1,6 @@
 """Stat-cards and header-pills HTML builders."""
 
-from helpers import metric_filter, cache_hit_rate_df, select_mem_dims
+from helpers import metric_filter, cache_hit_rate_df, select_mem_dims, aggregate_memtier_progress
 
 
 def header_pills(config):
@@ -30,21 +30,29 @@ def stat_cards_html(logs_df, metrics_df, ecs_df, extra_stats=None, config=None):
 
     # ---- Memtier throughput / latency / bandwidth ----
     if not logs_df.empty:
-        avg_ops = logs_df['Ops/sec'].mean()
+        progress_agg = aggregate_memtier_progress(logs_df)
+        final_totals_df = extra_stats.get('final_totals_df')
+        has_final_totals = final_totals_df is not None and not final_totals_df.empty
+        avg_ops = final_totals_df['Ops/sec'].sum() if has_final_totals else logs_df['Ops/sec'].mean()
         cards.append(('Avg Throughput', f"{avg_ops:,.0f}", 'ops/sec', '#1a56db', ''))
-        cards.append(('Peak Throughput', f"{logs_df['Ops/sec'].max():,.0f}", 'ops/sec', '#1a56db', ''))
+        cards.append(('Peak Throughput', f"{progress_agg['Overall Ops/sec'].max():,.0f}", 'ops/sec', '#1a56db', ''))
 
         if avg_ops > 0:
-            cv = logs_df['Ops/sec'].std() / avg_ops * 100
+            cv = progress_agg['Overall Ops/sec'].std() / avg_ops * 100
             cv_color = '#188038' if cv < 10 else ('#e8710a' if cv < 25 else '#d93025')
             cards.append(('Throughput CV', f"{cv:.1f}", '%', cv_color,
                           'Coefficient of Variation of ops/sec. Lower = more stable.'))
 
-        cards.append(('Avg Latency', f"{logs_df['Latency (ms)'].mean():.2f}", 'ms', '#e8710a', ''))
-        cards.append(('Max Latency', f"{logs_df['Latency (ms)'].max():.2f}", 'ms', '#e8710a', ''))
+        avg_latency = (
+            (final_totals_df['Latency (ms)'] * final_totals_df['Ops/sec']).sum()
+            / final_totals_df['Ops/sec'].sum()
+            if has_final_totals else logs_df['Latency (ms)'].mean()
+        )
+        cards.append(('Avg Latency', f"{avg_latency:.2f}", 'ms', '#e8710a', ''))
+        cards.append(('Max Latency', f"{progress_agg['Overall Latency (ms)'].max():.2f}", 'ms', '#e8710a', ''))
 
-        if 'Bandwidth_KBs' in logs_df.columns and logs_df['Bandwidth_KBs'].notna().any():
-            avg_bw = logs_df['Bandwidth_KBs'].mean()
+        if has_final_totals or ('Bandwidth_KBs' in logs_df.columns and logs_df['Bandwidth_KBs'].notna().any()):
+            avg_bw = final_totals_df['Bandwidth_KBs'].sum() if has_final_totals else logs_df['Bandwidth_KBs'].mean()
             if avg_bw >= 1024:
                 bw_str, bw_unit = f"{avg_bw / 1024:.2f}", 'MB/s'
             else:

@@ -1,6 +1,6 @@
 """Build a structured summary dict suitable for JSON serialisation and comparison reports."""
 
-from helpers import metric_filter, cache_hit_rate_df, select_mem_dims
+from helpers import metric_filter, cache_hit_rate_df, select_mem_dims, aggregate_memtier_progress
 
 
 def _safe(val, decimals=None):
@@ -87,18 +87,29 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
     # ------------------------------------------------------------------ #
     benchmark = {}
     if not logs_df.empty:
-        ops = logs_df['Ops/sec']
-        lat = logs_df['Latency (ms)']
-        avg_ops = float(ops.mean())
+        progress_agg = aggregate_memtier_progress(logs_df)
+        ops = progress_agg['Overall Ops/sec']
+        lat = progress_agg['Overall Latency (ms)']
+        final_totals_df = extra_stats.get('final_totals_df')
+        has_final_totals = final_totals_df is not None and not final_totals_df.empty
+        avg_ops = float(final_totals_df['Ops/sec'].sum()) if has_final_totals else float(ops.mean())
         benchmark['avg_ops']         = _safe(avg_ops, 1)
         benchmark['peak_ops']        = _safe(float(ops.max()), 1)
         benchmark['cv_pct']          = _safe(float(ops.std() / avg_ops * 100) if avg_ops > 0 else 0.0, 2)
-        benchmark['avg_latency_ms']  = _safe(float(lat.mean()), 3)
+        if has_final_totals:
+            weighted_latency = (
+                final_totals_df['Latency (ms)'] * final_totals_df['Ops/sec']
+            ).sum() / final_totals_df['Ops/sec'].sum()
+            benchmark['avg_latency_ms'] = _safe(float(weighted_latency), 3)
+        else:
+            benchmark['avg_latency_ms'] = _safe(float(lat.mean()), 3)
         benchmark['max_latency_ms']  = _safe(float(lat.max()), 3)
         benchmark['p95_latency_ms']  = _percentile(lat, 95)
         benchmark['p99_latency_ms']  = _percentile(lat, 99)
 
-        if 'Bandwidth_KBs' in logs_df.columns and logs_df['Bandwidth_KBs'].notna().any():
+        if has_final_totals:
+            benchmark['avg_bandwidth_kbs'] = _safe(float(final_totals_df['Bandwidth_KBs'].sum()), 2)
+        elif 'Bandwidth_KBs' in logs_df.columns and logs_df['Bandwidth_KBs'].notna().any():
             benchmark['avg_bandwidth_kbs'] = _safe(float(logs_df['Bandwidth_KBs'].mean()), 2)
 
     # ------------------------------------------------------------------ #

@@ -17,7 +17,7 @@ def _event_timestamp_ms_to_datetime(timestamp):
     return ts.tz_convert('UTC').tz_localize(None)
 
 
-def _iter_cloudwatch_memtier_lines(log_content):
+def _iter_cloudwatch_memtier_lines(log_content, source_stream=None):
     """Yield (absolute_timestamp, stream, message, raw_line) from raw JSONL or legacy text exports."""
     # Legacy export format: [2026-03-07T10:13:12.212000] [stream/name] rest-of-message
     legacy_header = re.compile(r'^\[([\d\-T:\.]+)\] \[([^\]]+)\] (.*)', re.DOTALL)
@@ -35,7 +35,7 @@ def _iter_cloudwatch_memtier_lines(log_content):
             ts = _event_timestamp_ms_to_datetime(event.get('timestamp'))
             if ts is None:
                 continue
-            yield ts, event.get('logStreamName', 'memtier'), str(event.get('message', '')), raw_line
+            yield ts, source_stream or event.get('logStreamName', 'memtier'), str(event.get('message', '')), raw_line
             continue
 
         header = legacy_header.match(raw_line)
@@ -50,14 +50,14 @@ def _iter_cloudwatch_memtier_lines(log_content):
         yield ts, header.group(2), header.group(3), raw_line
 
 
-def parse_memtier_logs(log_content):
+def parse_memtier_logs(log_content, source_stream=None):
     """Extract time-series data from memtier benchmark CloudWatch log export.
 
     Returns a DataFrame with columns: Timestamp, Ops/sec, Latency (ms), Bandwidth_KBs.
     """
     records = []
 
-    for timestamp, stream, message, _raw_line in _iter_cloudwatch_memtier_lines(log_content):
+    for timestamp, stream, message, _raw_line in _iter_cloudwatch_memtier_lines(log_content, source_stream):
         if 'ops/sec' not in message.lower() or 'latency' not in message.lower():
             continue
 
@@ -96,7 +96,29 @@ def parse_memtier_logs(log_content):
         df = df.sort_values(['Timestamp', 'Stream']).reset_index(drop=True)
     return df
 
-def parse_memtier_extra_stats(log_content):
+def parse_memtier_final_totals(log_content, source_stream=None):
+    """Extract the last per-stream memtier ``Totals`` row, if one exists."""
+    totals = []
+    totals_re = re.compile(
+        r'^Totals\s+([\d.]+)\s+[\d.]+\s+[\d.]+\s+([\d.]+)\s+'
+        r'[\d.]+\s+[\d.]+\s+[\d.]+\s+([\d.]+)\s*$'
+    )
+    for timestamp, stream, message, _raw_line in _iter_cloudwatch_memtier_lines(log_content, source_stream):
+        match = totals_re.match(message)
+        if match:
+            totals.append({
+                'Timestamp': timestamp,
+                'Stream': stream,
+                'Ops/sec': float(match.group(1)),
+                'Latency (ms)': float(match.group(2)),
+                'Bandwidth_KBs': float(match.group(3)),
+            })
+    if not totals:
+        return pd.DataFrame()
+    return pd.DataFrame(totals).sort_values(['Stream', 'Timestamp']).groupby('Stream', as_index=False).tail(1)
+
+
+def parse_memtier_extra_stats(log_content, source_stream=None):
     """Extract scalar statistics and OOM events from raw memtier log.
     Returns a dict with:
       first_message_ts   – datetime of the very first memtier log message
@@ -109,7 +131,7 @@ def parse_memtier_extra_stats(log_content):
     first_eviction_ts = None
     oom_events = []
 
-    for ts, _stream, message, raw_line in _iter_cloudwatch_memtier_lines(log_content):
+    for ts, _stream, message, raw_line in _iter_cloudwatch_memtier_lines(log_content, source_stream):
         if first_message_ts is None or ts < first_message_ts:
             first_message_ts = ts
         if last_message_ts is None or ts > last_message_ts:

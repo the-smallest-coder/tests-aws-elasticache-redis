@@ -14,6 +14,7 @@ from helpers import (
     C_THROTTLE_IN, C_THROTTLE_OUT, C_THROTTLE_PPS,
     C_CURR_CONN, C_MEM_FRAG,
     metric_filter, cache_hit_rate_df, shorten_dim, select_mem_dims,
+    aggregate_memtier_progress,
 )
 
 ABS_TIME_HOVER = "%{customdata}"
@@ -69,48 +70,137 @@ def _set_absolute_xaxes(fig, rows, x_min, x_max):
 # ------------------------------------------------------------------ #
 
 def build_memtier_figure(logs_df, oom_df, metrics_df, x_min, x_max):
-    """Build a 3-row figure: throughput+latency, eviction pressure, cache hit rate.
+    """Build memtier aggregate views plus eviction pressure and cache hit rate.
 
     Returns a Plotly Figure ready for ``to_html()``.
     """
     has_evictions = not oom_df.empty and oom_df['OOM_events'].sum() > 0
 
     fig = make_subplots(
-        rows=3, cols=1,
+        rows=5, cols=1,
         shared_xaxes=False,
-        vertical_spacing=0.18,
-        specs=[[{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]],
+        vertical_spacing=0.11,
+        specs=[
+            [{"secondary_y": True}],
+            [{"secondary_y": True}],
+            [{"secondary_y": True}],
+            [{"secondary_y": False}],
+            [{"secondary_y": False}],
+        ],
         subplot_titles=(
-            "Throughput & Latency",
+            "Overall Load",
+            "Task Distribution",
+            "Task Extremes",
             "Eviction Pressure (OOM events)",
             "Cache Hit Rate (%)",
         ),
-        row_heights=[0.50, 0.27, 0.23],
+        row_heights=[0.24, 0.24, 0.20, 0.17, 0.15],
     )
 
-    # ---- Row 1: Throughput + Latency ----
-    if not logs_df.empty:
+    memtier_df = aggregate_memtier_progress(logs_df)
+
+    # ---- Rows 1-3: Meaningful cross-task memtier aggregates ----
+    if not memtier_df.empty:
         fig.add_trace(go.Scatter(
-            x=_plot_x(logs_df['Timestamp']), y=logs_df['Ops/sec'],
-            customdata=_plot_times(logs_df['Timestamp']),
+            x=_plot_x(memtier_df['Timestamp']), y=memtier_df['Overall Ops/sec'],
+            customdata=_plot_times(memtier_df['Timestamp']),
             name="Throughput", mode='lines',
             line=dict(**LINE_OPTS, color=C_THROUGHPUT),
             legend="legend",
             hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:,.0f}} ops/sec</b><extra></extra>"
         ), row=1, col=1, secondary_y=False)
         fig.add_trace(go.Scatter(
-            x=_plot_x(logs_df['Timestamp']), y=logs_df['Latency (ms)'],
-            customdata=_plot_times(logs_df['Timestamp']),
+            x=_plot_x(memtier_df['Timestamp']), y=memtier_df['Overall Latency (ms)'],
+            customdata=_plot_times(memtier_df['Timestamp']),
             name="Latency", mode='lines',
             line=dict(**LINE_OPTS, color=C_LATENCY, dash='dot'),
             legend="legend",
             hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.2f}} ms</b><extra></extra>"
         ), row=1, col=1, secondary_y=True)
-    else:
-        fig.add_annotation(text="No Log Data", xref="paper", yref="y",
-                           x=0.5, y=0.5, showarrow=False, row=1, col=1)
 
-    # ---- Row 2: OOM bar + CW Evictions overlay ----
+        for row, prefix in ((2, "Ops"),):
+            fig.add_trace(go.Scatter(
+                x=_plot_x(memtier_df["Timestamp"]), y=memtier_df[f"{prefix} p90"],
+                customdata=_plot_times(memtier_df["Timestamp"]),
+                name="Throughput p10-p90", mode="lines", line=dict(width=0),
+                showlegend=True, legend="legend2",
+                hoverinfo="skip",
+            ), row=row, col=1, secondary_y=False)
+            fig.add_trace(go.Scatter(
+                x=_plot_x(memtier_df["Timestamp"]), y=memtier_df[f"{prefix} p10"],
+                customdata=_plot_times(memtier_df["Timestamp"]),
+                name="Throughput p10-p90", mode="lines", line=dict(width=0),
+                fill="tonexty", fillcolor="rgba(31,119,180,0.18)",
+                showlegend=False,
+                hoverinfo="skip",
+            ), row=row, col=1, secondary_y=False)
+        fig.add_trace(go.Scatter(
+            x=_plot_x(memtier_df["Timestamp"]), y=memtier_df["Ops median"],
+            customdata=_plot_times(memtier_df["Timestamp"]),
+            name="Throughput median", mode="lines",
+            line=dict(**LINE_OPTS, color=C_THROUGHPUT),
+            legend="legend4",
+            hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:,.0f}} ops/sec</b><extra></extra>",
+        ), row=2, col=1, secondary_y=False)
+        fig.add_trace(go.Scatter(
+            x=_plot_x(memtier_df["Timestamp"]), y=memtier_df["Ops average"],
+            customdata=_plot_times(memtier_df["Timestamp"]),
+            name="Throughput average", mode="lines",
+            line=dict(width=1, color=C_THROUGHPUT, dash="dash"),
+            legend="legend2",
+            hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:,.0f}} ops/sec</b><extra></extra>",
+        ), row=2, col=1, secondary_y=False)
+        fig.add_trace(go.Scatter(
+            x=_plot_x(memtier_df["Timestamp"]), y=memtier_df["Latency p90"],
+            customdata=_plot_times(memtier_df["Timestamp"]),
+            name="Latency p10-p90", mode="lines", line=dict(width=0),
+            showlegend=True, legend="legend2",
+            hoverinfo="skip",
+        ), row=2, col=1, secondary_y=True)
+        fig.add_trace(go.Scatter(
+            x=_plot_x(memtier_df["Timestamp"]), y=memtier_df["Latency p10"],
+            customdata=_plot_times(memtier_df["Timestamp"]),
+            name="Latency p10-p90", mode="lines", line=dict(width=0),
+            fill="tonexty", fillcolor="rgba(214,39,40,0.16)",
+            showlegend=False,
+            hoverinfo="skip",
+        ), row=2, col=1, secondary_y=True)
+        fig.add_trace(go.Scatter(
+            x=_plot_x(memtier_df["Timestamp"]), y=memtier_df["Latency median"],
+            customdata=_plot_times(memtier_df["Timestamp"]),
+            name="Latency median", mode="lines",
+            line=dict(**LINE_OPTS, color=C_LATENCY),
+            legend="legend2",
+            hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.2f}} ms</b><extra></extra>",
+        ), row=2, col=1, secondary_y=True)
+        fig.add_trace(go.Scatter(
+            x=_plot_x(memtier_df["Timestamp"]), y=memtier_df["Latency average"],
+            customdata=_plot_times(memtier_df["Timestamp"]),
+            name="Latency average", mode="lines",
+            line=dict(width=1, color=C_LATENCY, dash="dash"),
+            legend="legend2",
+            hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.2f}} ms</b><extra></extra>",
+        ), row=2, col=1, secondary_y=True)
+
+        for column, name, color, secondary in (
+            ("Ops min", "Throughput min", C_THROUGHPUT, False),
+            ("Ops max", "Throughput max", C_THROUGHPUT, False),
+            ("Latency min", "Latency min", C_LATENCY, True),
+            ("Latency max", "Latency max", C_LATENCY, True),
+        ):
+            fig.add_trace(go.Scatter(
+                x=_plot_x(memtier_df["Timestamp"]), y=memtier_df[column],
+                customdata=_plot_times(memtier_df["Timestamp"]),
+                name=name, mode="lines",
+                line=dict(**LINE_OPTS, color=color, dash="dash" if "min" in name else "solid"),
+                legend="legend3",
+                hovertemplate=(
+                    f"{ABS_TIME_HOVER}<br><b>%{{y:,.0f}} ops/sec</b><extra></extra>"
+                    if not secondary else f"{ABS_TIME_HOVER}<br><b>%{{y:.2f}} ms</b><extra></extra>"
+                ),
+            ), row=3, col=1, secondary_y=secondary)
+
+    # ---- Row 4: OOM bar + CW Evictions overlay ----
     if has_evictions:
         oom_plot = oom_df.copy()
         if x_min is not None and x_max is not None:
@@ -121,11 +211,11 @@ def build_memtier_figure(logs_df, oom_df, metrics_df, x_min, x_max):
             name="OOM events", marker_color=C_OOM_BAR,
             legend="legend2",
             hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:,}} OOM events</b><extra></extra>"
-        ), row=2, col=1)
+        ), row=4, col=1)
     else:
         fig.add_annotation(text="No eviction pressure detected",
                            xref="paper", yref="paper",
-                           x=0.5, y=0.32, showarrow=False)
+                           x=0.5, y=0.19, showarrow=False)
 
     if not metrics_df.empty:
         ev_df = metric_filter(metrics_df, 'Evictions', 'Sum', 'CacheClusterId')
@@ -136,11 +226,11 @@ def build_memtier_figure(logs_df, oom_df, metrics_df, x_min, x_max):
                 customdata=_plot_times(ev_agg['Timestamp']),
                 name="Evictions (CW)", mode='lines',
                 line=dict(**LINE_OPTS, color=C_EVICTION_CW, dash='dash'),
-                legend="legend2",
+                legend="legend4",
                 hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:,.0f}} evictions</b><extra></extra>"
-            ), row=2, col=1)
+            ), row=4, col=1)
 
-    # ---- Row 3: Cache Hit Rate ----
+    # ---- Row 5: Cache Hit Rate ----
     if not metrics_df.empty:
         hr_df = cache_hit_rate_df(metrics_df)
         if not hr_df.empty:
@@ -150,15 +240,15 @@ def build_memtier_figure(logs_df, oom_df, metrics_df, x_min, x_max):
                 customdata=_plot_times(hr_agg['Timestamp']),
                 name="Cache Hit Rate", mode='lines',
                 line=dict(**LINE_OPTS, color=C_HIT_RATE),
-                legend="legend3",
+                legend="legend5",
                 hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}}%</b><extra></extra>"
-            ), row=3, col=1)
+            ), row=5, col=1)
         else:
             fig.add_annotation(text="No CacheHitRate metric", xref="paper", yref="paper",
-                               x=0.5, y=0.08, showarrow=False)
+                               x=0.5, y=0.04, showarrow=False)
     else:
         fig.add_annotation(text="No ElastiCache metrics", xref="paper", yref="paper",
-                           x=0.5, y=0.08, showarrow=False)
+                           x=0.5, y=0.04, showarrow=False)
 
     # ---- Axes styling ----
     fig.update_yaxes(title_text="ops/sec", row=1, col=1, secondary_y=False,
@@ -166,18 +256,26 @@ def build_memtier_figure(logs_df, oom_df, metrics_df, x_min, x_max):
     fig.update_yaxes(title_text="ms", row=1, col=1, secondary_y=True,
                      title_font=dict(color=C_LATENCY), tickfont=dict(color=C_LATENCY),
                      showgrid=False)
-    fig.update_yaxes(title_text="events", row=2, col=1,
+    for row in (2, 3):
+        fig.update_yaxes(title_text="ops/sec", row=row, col=1, secondary_y=False,
+                         title_font=dict(color=C_THROUGHPUT), tickfont=dict(color=C_THROUGHPUT))
+        fig.update_yaxes(title_text="ms", row=row, col=1, secondary_y=True,
+                         title_font=dict(color=C_LATENCY), tickfont=dict(color=C_LATENCY),
+                         showgrid=False)
+    fig.update_yaxes(title_text="events", row=4, col=1,
                      title_font=dict(color=C_OOM_BAR), tickfont=dict(color=C_OOM_BAR))
-    fig.update_yaxes(title_text="%", row=3, col=1,
+    fig.update_yaxes(title_text="%", row=5, col=1,
                      title_font=dict(color=C_HIT_RATE), tickfont=dict(color=C_HIT_RATE))
-    _set_absolute_xaxes(fig, range(1, 4), x_min, x_max)
+    _set_absolute_xaxes(fig, range(1, 6), x_min, x_max)
     fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
 
     fig.update_layout(
-        **LAYOUT_BASE, height=880,
-        legend =dict(**LEGEND_H, x=0.5, y=0.64),
-        legend2=dict(**LEGEND_H, x=0.5, y=0.30),
-        legend3=dict(**LEGEND_H, x=0.5, y=-0.04),
+        **LAYOUT_BASE, height=1380,
+        legend =dict(**LEGEND_H, x=0.5, y=0.81),
+        legend2=dict(**LEGEND_H, x=0.5, y=0.58),
+        legend3=dict(**LEGEND_H, x=0.5, y=0.37),
+        legend4=dict(**LEGEND_H, x=0.5, y=0.18),
+        legend5=dict(**LEGEND_H, x=0.5, y=-0.04),
     )
     return fig
 
