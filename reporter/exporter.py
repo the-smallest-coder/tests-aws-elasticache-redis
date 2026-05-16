@@ -414,15 +414,42 @@ def _log_stream_event_line(event: dict) -> bytes:
     return json.dumps(event, separators=(",", ":")).encode("utf-8", "replace") + b"\n"
 
 
-def write_log_stream(log_group: str, log_stream_name: str, write_line) -> int:
-    event_count = 0
+def _cloudwatch_event_datetime(event: dict) -> datetime | None:
+    timestamp = event.get("timestamp")
+    if timestamp is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(timestamp) / 1000, tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _is_memtier_stream(log_stream_name: str) -> bool:
+    return log_stream_name.split("/", 1)[0] == "memtier"
+
+
+def write_log_stream(log_group: str, log_stream_name: str, write_line) -> dict:
+    result = {
+        "event_count": 0,
+        "first_message_ts": None,
+        "last_message_ts": None,
+    }
     for event in iter_log_stream_events(log_group, log_stream_name):
         write_line(_log_stream_event_line(event))
-        event_count += 1
-    return event_count
+        result["event_count"] += 1
+        event_ts = _cloudwatch_event_datetime(event)
+        if event_ts is None:
+            continue
+        first_ts = result["first_message_ts"]
+        last_ts = result["last_message_ts"]
+        if first_ts is None or event_ts < first_ts:
+            result["first_message_ts"] = event_ts
+        if last_ts is None or event_ts > last_ts:
+            result["last_message_ts"] = event_ts
+    return result
 
 
-def write_log_stream_to_file(log_group: str, log_stream_name: str, output_path: str) -> int:
+def write_log_stream_to_file(log_group: str, log_stream_name: str, output_path: str) -> dict:
     output_dir = os.path.dirname(os.path.abspath(output_path))
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -431,7 +458,7 @@ def write_log_stream_to_file(log_group: str, log_stream_name: str, output_path: 
         return write_log_stream(log_group, log_stream_name, output_file.write)
 
 
-def export_log_stream_to_s3(log_group, log_stream_name, bucket, key) -> str | None:
+def _export_log_stream_to_s3_with_status(log_group, log_stream_name, bucket, key) -> dict | None:
     if not log_group or not log_stream_name:
         return None
 
@@ -467,7 +494,7 @@ def export_log_stream_to_s3(log_group, log_stream_name, bucket, key) -> str | No
         if len(buffer) >= LOG_EXPORT_PART_SIZE:
             _flush()
 
-    write_log_stream(log_group, log_stream_name, _append_line)
+    result = write_log_stream(log_group, log_stream_name, _append_line)
 
     if upload_id:
         try:
@@ -480,17 +507,29 @@ def export_log_stream_to_s3(log_group, log_stream_name, bucket, key) -> str | No
         s3.put_object(Bucket=bucket, Key=key, Body=bytes(buffer), ContentType="text/plain")
 
     print(f"Log stream {log_stream_name} exported to s3://{bucket}/{key}")
-    return f"s3://{bucket}/{key}"
+    result["artifact"] = f"s3://{bucket}/{key}"
+    return result
+
+
+def export_log_stream_to_s3(log_group, log_stream_name, bucket, key) -> str | None:
+    result = _export_log_stream_to_s3_with_status(log_group, log_stream_name, bucket, key)
+    if result is None:
+        return None
+    return result["artifact"]
 
 
 def _export_log_streams_to_s3(log_group, bucket, key_prefix, streams) -> list[dict]:
     files = []
     for stream in streams:
         key = _log_stream_key(key_prefix, stream)
-        artifact = export_log_stream_to_s3(log_group, stream, bucket, key)
+        result = _export_log_stream_to_s3_with_status(log_group, stream, bucket, key)
+        artifact = result.get("artifact") if result else None
         files.append({
             "stream": stream,
             "artifact": artifact,
+            "event_count": result.get("event_count", 0) if result else 0,
+            "first_message_ts": result.get("first_message_ts") if result else None,
+            "last_message_ts": result.get("last_message_ts") if result else None,
         })
     return files
 
@@ -510,6 +549,19 @@ def export_loadgen_logs_to_s3(log_group, bucket, key_prefix) -> dict:
     status["files"] = files
     status["stream_count"] = len(streams)
     status["complete"] = len(files) == len(streams) and len(streams) > 0
+    first_ts = None
+    last_ts = None
+    for file_status in files:
+        if not _is_memtier_stream(file_status.get("stream", "")):
+            continue
+        file_first_ts = file_status.get("first_message_ts")
+        file_last_ts = file_status.get("last_message_ts")
+        if file_first_ts is not None and (first_ts is None or file_first_ts < first_ts):
+            first_ts = file_first_ts
+        if file_last_ts is not None and (last_ts is None or file_last_ts > last_ts):
+            last_ts = file_last_ts
+    status["first_message_ts"] = first_ts
+    status["last_message_ts"] = last_ts
     return status
 
 
@@ -739,8 +791,8 @@ def download_stream_cli(argv: list[str] | None = None) -> None:
 
     global logs
     logs = boto3.client("logs", region_name=args.region)
-    event_count = write_log_stream_to_file(args.log_group, args.log_stream, args.output)
-    print(f"Wrote {event_count} events from {args.log_stream} to {args.output}")
+    result = write_log_stream_to_file(args.log_group, args.log_stream, args.output)
+    print(f"Wrote {result['event_count']} events from {args.log_stream} to {args.output}")
 
 
 if __name__ == "__main__":
