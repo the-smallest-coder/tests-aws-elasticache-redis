@@ -1,9 +1,53 @@
 """Parsers for memtier benchmark logs and CloudWatch metrics CSVs."""
 
+import json
 import re
 from io import StringIO
 
 import pandas as pd
+
+
+def _event_timestamp_ms_to_datetime(timestamp):
+    if timestamp is None:
+        return None
+    try:
+        ts = pd.to_datetime(int(timestamp), unit='ms', utc=True)
+    except Exception:
+        return None
+    return ts.tz_convert('UTC').tz_localize(None)
+
+
+def _iter_cloudwatch_memtier_lines(log_content):
+    """Yield (absolute_timestamp, stream, message, raw_line) from raw JSONL or legacy text exports."""
+    # Legacy export format: [2026-03-07T10:13:12.212000] [stream/name] rest-of-message
+    legacy_header = re.compile(r'^\[([\d\-T:\.]+)\] \[([^\]]+)\] (.*)', re.DOTALL)
+
+    for raw_line in log_content.splitlines():
+        if not raw_line:
+            continue
+
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            event = None
+
+        if isinstance(event, dict) and 'timestamp' in event and 'message' in event:
+            ts = _event_timestamp_ms_to_datetime(event.get('timestamp'))
+            if ts is None:
+                continue
+            yield ts, event.get('logStreamName', 'memtier'), str(event.get('message', '')), raw_line
+            continue
+
+        header = legacy_header.match(raw_line)
+        if not header:
+            continue
+        try:
+            ts = pd.to_datetime(header.group(1), format='ISO8601')
+        except Exception:
+            continue
+        if getattr(ts, 'tzinfo', None) is not None:
+            ts = ts.tz_convert('UTC').tz_localize(None)
+        yield ts, header.group(2), header.group(3), raw_line
 
 
 def parse_memtier_logs(log_content):
@@ -11,33 +55,23 @@ def parse_memtier_logs(log_content):
 
     Returns a DataFrame with columns: Timestamp, Ops/sec, Latency (ms), Bandwidth_KBs.
     """
-    # Matches: [2026-03-07T10:13:12.212000] [stream/name] rest-of-message
-    _HEADER = re.compile(r'^\[([\d\-T:\.]+)\] \[([^\]]+)\] (.*)', re.DOTALL)
-
     records = []
 
-    for line in log_content.split('\n'):
-        header = _HEADER.match(line)
-        if not header:
-            continue
-        timestamp = header.group(1)
-        stream = header.group(2)
-        rest = header.group(3)
-
-        if 'ops/sec' not in rest.lower() or 'latency' not in rest.lower():
+    for timestamp, stream, message, _raw_line in _iter_cloudwatch_memtier_lines(log_content):
+        if 'ops/sec' not in message.lower() or 'latency' not in message.lower():
             continue
 
-        ops_match = re.search(r'\(avg:\s*([\d\.]+)\)\s*ops/sec', rest)
+        ops_match = re.search(r'\(avg:\s*([\d\.]+)\)\s*ops/sec', message)
         if not ops_match:
-            ops_match = re.search(r'([\d\.]+)\s*ops/sec', rest)
+            ops_match = re.search(r'([\d\.]+)\s*ops/sec', message)
         ops_sec = float(ops_match.group(1)) if ops_match else None
 
-        lat_match = re.search(r'\(avg:\s*([\d\.]+)\)\s*msec latency', rest)
+        lat_match = re.search(r'\(avg:\s*([\d\.]+)\)\s*msec latency', message)
         if not lat_match:
-            lat_match = re.search(r'([\d\.]+)\s*msec latency', rest)
+            lat_match = re.search(r'([\d\.]+)\s*msec latency', message)
         latency = float(lat_match.group(1)) if lat_match else None
 
-        bw_match = re.search(r'\(avg:\s*([\d\.]+)(KB|MB)/sec\)', rest)
+        bw_match = re.search(r'\(avg:\s*([\d\.]+)(KB|MB)/sec\)', message)
         if bw_match:
             bw_val = float(bw_match.group(1))
             bw_kbs = bw_val * 1024 if bw_match.group(2) == 'MB' else bw_val
@@ -46,7 +80,7 @@ def parse_memtier_logs(log_content):
 
         if ops_sec is not None and latency is not None:
             records.append({
-                'Timestamp':      pd.to_datetime(timestamp, format='ISO8601'),
+                'Timestamp':      timestamp,
                 'Stream':         stream,
                 'Ops/sec':        ops_sec,
                 'Latency (ms)':   latency,
@@ -70,26 +104,17 @@ def parse_memtier_extra_stats(log_content):
       first_eviction_ts  – datetime of first -OOM line
       oom_df             – DataFrame [Timestamp, OOM_events] using the event log timestamp
     """
-    ts_pat = re.compile(r'^\[([\d\-T:\.]+)\]')
     first_message_ts = None
     last_message_ts = None
     first_eviction_ts = None
     oom_events = []
 
-    for line in log_content.split('\n'):
-        m = ts_pat.match(line)
-        if not m:
-            continue
-        try:
-            ts = pd.to_datetime(m.group(1), format='ISO8601')
-        except Exception:
-            continue
-
+    for ts, _stream, message, raw_line in _iter_cloudwatch_memtier_lines(log_content):
         if first_message_ts is None or ts < first_message_ts:
             first_message_ts = ts
         if last_message_ts is None or ts > last_message_ts:
             last_message_ts = ts
-        if '-OOM command not allowed' in line:
+        if '-OOM command not allowed' in message or '-OOM command not allowed' in raw_line:
             if first_eviction_ts is None or ts < first_eviction_ts:
                 first_eviction_ts = ts
             oom_events.append(ts)

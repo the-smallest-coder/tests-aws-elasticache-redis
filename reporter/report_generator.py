@@ -158,12 +158,18 @@ def _read_uploaded_log_contents(logs_prefix: str) -> list[tuple[str, str]]:
     return _read_s3_prefix_log_contents(logs_prefix) if logs_prefix else []
 
 
+def _is_memtier_log_entry(source: str) -> bool:
+    normalized = source.replace("\\", "/")
+    return "/logs/loadgen/memtier/" in normalized
+
+
 def _parse_memtier_log_entries(entries: list[tuple[str, str]]):
     import pandas as pd
 
-    if not entries:
+    memtier_entries = [(source, content) for source, content in entries if _is_memtier_log_entry(source)]
+    if not memtier_entries:
         return pd.DataFrame(), {}
-    combined = "\n".join(content for _, content in entries)
+    combined = "\n".join(content for _, content in memtier_entries)
     return parse_memtier_logs(combined), parse_memtier_extra_stats(combined)
 
 
