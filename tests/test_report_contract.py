@@ -159,5 +159,44 @@ class EvictionSeriesTests(unittest.TestCase):
         }
 
 
+class CardRenderingTests(unittest.TestCase):
+    def test_first_eviction_card_shows_elapsed_time_from_report_start(self):
+        try:
+            import sys
+
+            import pandas as pd
+
+            sys.path.insert(0, str(ROOT / "reporter"))
+            from cards import stat_cards_html
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+        finally:
+            if str(ROOT / "reporter") in sys.path:
+                sys.path.remove(str(ROOT / "reporter"))
+
+        empty = pd.DataFrame()
+        metrics = pd.DataFrame([
+            EvictionSeriesTests._metric("2026-05-01T00:00:00Z", 0, "CacheClusterId=cluster-a"),
+            EvictionSeriesTests._metric("2026-05-01T01:02:07Z", 1, "CacheClusterId=cluster-a"),
+        ])
+        metrics["Timestamp"] = pd.to_datetime(metrics["Timestamp"], utc=True).dt.tz_localize(None)
+
+        html = stat_cards_html(
+            empty,
+            empty,
+            metrics,
+            empty,
+            extra_stats={"first_message_ts": pd.Timestamp("2026-05-01T00:00:00Z")},
+            config={"cluster_id": "cluster-a"},
+        )
+
+        self.assertIn("<div class='card-label'>First Eviction</div>", html)
+        self.assertIn("1h 02m 07s", html)
+        self.assertIn("Elapsed time from report start", html)
+        self.assertIn("2026-05-01 01:02:07 UTC", html)
+
+
 if __name__ == "__main__":
     unittest.main()

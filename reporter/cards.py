@@ -1,5 +1,7 @@
 """Stat-cards and header-pills HTML builders."""
 
+import pandas as pd
+
 from helpers import (
     metric_filter,
     cache_hit_rate_df,
@@ -7,6 +9,16 @@ from helpers import (
     cloudwatch_eviction_series,
     first_positive_timestamp,
 )
+
+
+def _format_elapsed(delta):
+    """Return compact elapsed text suitable for a stat card."""
+    total_seconds = max(0, int(delta.total_seconds()))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {seconds:02d}s"
+    return f"{minutes}m {seconds:02d}s"
 
 
 def header_pills(config):
@@ -146,9 +158,23 @@ def stat_cards_html(memtier_minute_df, memtier_totals_df, metrics_df, ecs_df, ex
         fets = first_eviction_ts
         if hasattr(fets, 'tzinfo') and fets.tzinfo is not None:
             fets = fets.replace(tzinfo=None)
-        eviction_label = f"{fets.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        first_message_ts = extra_stats.get('first_message_ts')
+        if first_message_ts is not None:
+            fmts = pd.Timestamp(first_message_ts)
+            if fmts.tzinfo is not None:
+                fmts = fmts.tz_convert(None)
+            eviction_label = _format_elapsed(fets - fmts)
+            eviction_tip = (
+                'Elapsed time from report start to the first positive CloudWatch '
+                f"Evictions datapoint. Event timestamp: {fets.strftime('%Y-%m-%d %H:%M:%S')} UTC."
+            )
+        else:
+            eviction_label = 'Unavailable'
+            eviction_tip = (
+                'Report start timestamp unavailable; first positive CloudWatch '
+                f"Evictions datapoint occurred at {fets.strftime('%Y-%m-%d %H:%M:%S')} UTC."
+            )
         eviction_color = '#d93025'
-        eviction_tip = 'Absolute timestamp of the first positive CloudWatch Evictions datapoint.'
     else:
         eviction_label, eviction_color = 'None', '#188038'
         eviction_tip = 'No positive CloudWatch Evictions datapoints in the report window.'
