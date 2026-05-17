@@ -50,6 +50,7 @@ METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("engine_memory", "Peak Swap", ("memory", "swap_max_bytes"), "MB", 1, "lower", "Highest swap consumption observed on the cache node.", normalizer=bytes_to_mb),
     MetricSpec("cache_latency", "Cache Hit Rate", ("cache_efficiency", "avg_hit_rate_pct"), "%", 2, "higher", "Average CacheHitRate during the report window.", "points"),
     MetricSpec("cache_latency", "Total Evictions", ("cache_efficiency", "total_evictions"), "", 0, "lower", "Total key evictions reported by CloudWatch."),
+    MetricSpec("cache_latency", "OOM Rejections", ("oom", "rejection_count"), "", 0, "lower", "Total memtier -OOM command rejections."),
     MetricSpec("cache_latency", "Min Freeable Memory", ("cache_efficiency", "min_freeable_memory_mb"), "MB", 1, "higher", "Lowest freeable memory value seen during the run."),
     MetricSpec("cache_latency", "Peak Key Count", ("cache_efficiency", "peak_key_count"), "", 0, "neutral", "Maximum total key count recorded on the cache node."),
     MetricSpec("cache_latency", "GET Latency", ("latency_server_us", "get_avg"), "us", 3, "lower", "Average server-side GET command latency."),

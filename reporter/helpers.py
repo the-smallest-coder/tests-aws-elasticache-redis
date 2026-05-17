@@ -110,6 +110,60 @@ def cache_hit_rate_df(df):
     return merged[['Timestamp', 'Namespace', 'MetricName', 'Stat', 'Value', 'Unit', 'Dimensions']]
 
 
+def cloudwatch_eviction_series(df, cluster_id=None):
+    """Return one CloudWatch Evictions series without mixing aggregate and node rows."""
+    evictions = metric_filter(df, 'Evictions', 'Sum', 'CacheClusterId')
+    if evictions.empty:
+        return evictions
+
+    dimensions = evictions['Dimensions'].astype(str)
+    if cluster_id:
+        exact_dimension = f'CacheClusterId={cluster_id}'
+        cluster_prefix = f'{exact_dimension}-'
+        candidates = evictions[
+            dimensions.eq(exact_dimension)
+            | dimensions.str.startswith(f'{exact_dimension};')
+            | dimensions.str.startswith(cluster_prefix)
+        ]
+        if candidates.empty:
+            return candidates
+        candidate_dims = candidates['Dimensions'].astype(str)
+        aggregate = candidates[candidate_dims == exact_dimension]
+        if aggregate.empty:
+            # Non-cluster ElastiCache metrics use node-scoped CacheClusterId values
+            # like "<replication-group>-001". If a bare aggregate series exists for
+            # one of those IDs, keep exactly that series instead of also summing
+            # CacheNodeId rows.
+            bare_rows = candidates[candidate_dims.str.match(r'^CacheClusterId=[^;]+$')]
+            bare_ids = bare_rows['Dimensions'].unique()
+            aggregate = bare_rows if len(bare_ids) == 1 else bare_rows.iloc[0:0]
+        node_rows = candidates[candidate_dims.str.contains(';CacheNodeId=')]
+    else:
+        aggregate_mask = dimensions.str.match(r'^CacheClusterId=[^;]+$')
+        aggregate = evictions[aggregate_mask]
+        node_rows = evictions[~aggregate_mask]
+
+    selected = aggregate if not aggregate.empty else node_rows
+    if selected.empty:
+        return selected
+
+    series = selected.groupby('Timestamp', as_index=False)['Value'].sum()
+    series['Namespace'] = 'AWS/ElastiCache'
+    series['MetricName'] = 'Evictions'
+    series['Stat'] = 'Sum'
+    series['Unit'] = selected['Unit'].iloc[0] if 'Unit' in selected else 'Count'
+    series['Dimensions'] = f'CacheClusterId={cluster_id}' if cluster_id else 'selected_eviction_series'
+    return series[['Timestamp', 'Namespace', 'MetricName', 'Stat', 'Value', 'Unit', 'Dimensions']]
+
+
+def first_positive_timestamp(df):
+    """Return the first absolute timestamp with a positive Value."""
+    if df.empty:
+        return None
+    positive = df[df['Value'] > 0]
+    return None if positive.empty else positive['Timestamp'].min()
+
+
 def aggregate_memtier_progress(df):
     """Aggregate per-stream progress samples at exact CloudWatch event timestamps."""
     if df.empty:

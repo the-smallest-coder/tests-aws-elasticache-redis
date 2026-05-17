@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from io import StringIO
 import json
 import os
 import re
@@ -12,9 +13,7 @@ from report_compare import run_compare_report
 from helpers import read_file_content
 from parsers import (
     parse_metrics_csv,
-    parse_memtier_logs,
     parse_memtier_extra_stats,
-    parse_memtier_final_totals,
 )
 from summary import build_summary
 from cards import header_pills, stat_cards_html
@@ -134,7 +133,7 @@ def _s3_bucket_key(uri: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def _read_s3_prefix_log_contents(prefix_uri: str) -> list[tuple[str, str]]:
+def _read_s3_prefix_contents(prefix_uri: str, suffixes: tuple[str, ...]) -> list[tuple[str, str]]:
     import boto3
 
     bucket, prefix = _s3_bucket_key(prefix_uri)
@@ -147,7 +146,7 @@ def _read_s3_prefix_log_contents(prefix_uri: str) -> list[tuple[str, str]]:
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for item in page.get("Contents", []):
             key = item.get("Key", "")
-            if not key.endswith(".txt"):
+            if not key.endswith(suffixes):
                 continue
             uri = f"s3://{bucket}/{key}"
             entries.append((uri, read_file_content(uri)))
@@ -165,7 +164,11 @@ def _read_local_log_contents(logs_dir: Path, cluster_id: str) -> list[tuple[str,
 
 
 def _read_uploaded_log_contents(logs_prefix: str) -> list[tuple[str, str]]:
-    return _read_s3_prefix_log_contents(logs_prefix) if logs_prefix else []
+    return _read_s3_prefix_contents(logs_prefix, (".txt",)) if logs_prefix else []
+
+
+def _read_uploaded_memtier_artifact_contents(logs_prefix: str) -> list[tuple[str, str]]:
+    return _read_s3_prefix_contents(logs_prefix, (".minute.csv", ".totals.json")) if logs_prefix else []
 
 
 def _is_memtier_log_entry(source: str) -> bool:
@@ -187,21 +190,17 @@ def _parse_memtier_log_entries(entries: list[tuple[str, str]]):
     if not memtier_entries:
         return pd.DataFrame(), {}
 
-    logs_frames = []
-    totals_frames = []
     first_message_ts = None
     last_message_ts = None
-    first_eviction_ts = None
+    first_oom_rejection_ts = None
     oom_frames = []
     for source, content in memtier_entries:
         stream = _memtier_stream_from_source(source)
-        logs_frames.append(parse_memtier_logs(content, stream))
-        totals_frames.append(parse_memtier_final_totals(content, stream))
         stats = parse_memtier_extra_stats(content, stream)
         for key, current in (
             ("first_message_ts", first_message_ts),
             ("last_message_ts", last_message_ts),
-            ("first_eviction_ts", first_eviction_ts),
+            ("first_oom_rejection_ts", first_oom_rejection_ts),
         ):
             value = stats.get(key)
             if value is None:
@@ -211,33 +210,126 @@ def _parse_memtier_log_entries(entries: list[tuple[str, str]]):
             elif key == "last_message_ts":
                 last_message_ts = value if current is None or value > current else current
             else:
-                first_eviction_ts = value if current is None or value < current else current
+                first_oom_rejection_ts = value if current is None or value < current else current
         oom_frames.append(stats.get("oom_df", pd.DataFrame()))
 
-    logs_df = pd.concat([frame for frame in logs_frames if not frame.empty], ignore_index=True) if any(
-        not frame.empty for frame in logs_frames
-    ) else pd.DataFrame()
-    totals_df = pd.concat([frame for frame in totals_frames if not frame.empty], ignore_index=True) if any(
-        not frame.empty for frame in totals_frames
-    ) else pd.DataFrame()
     oom_df = pd.concat([frame for frame in oom_frames if not frame.empty], ignore_index=True) if any(
         not frame.empty for frame in oom_frames
     ) else pd.DataFrame(columns=["Timestamp", "OOM_events"])
     if not oom_df.empty:
         oom_df = oom_df.groupby("Timestamp", as_index=False)["OOM_events"].sum()
 
-    return logs_df, {
+    return pd.DataFrame(), {
         "first_message_ts": first_message_ts,
         "last_message_ts": last_message_ts,
-        "first_eviction_ts": first_eviction_ts,
+        "first_oom_rejection_ts": first_oom_rejection_ts,
         "oom_df": oom_df,
-        "final_totals_df": totals_df,
     }
+
+
+_MINUTE_COLUMN_ALIASES = {
+    "Timestamp": ("Timestamp", "timestamp", "minute_utc", "minute_start_utc"),
+    "throughput_sum": ("throughput_sum",),
+    "latency_weighted_avg": ("latency_weighted_avg",),
+    "throughput_median": ("throughput_median",),
+    "throughput_avg": ("throughput_avg",),
+    "throughput_p10": ("throughput_p10",),
+    "throughput_p90": ("throughput_p90",),
+    "throughput_min": ("throughput_min",),
+    "throughput_max": ("throughput_max",),
+    "latency_median": ("latency_median",),
+    "latency_avg": ("latency_avg",),
+    "latency_p10": ("latency_p10",),
+    "latency_p90": ("latency_p90",),
+    "latency_min": ("latency_min",),
+    "latency_max": ("latency_max",),
+}
+
+_TOTAL_FIELD_ALIASES = {
+    "throughput_avg": ("throughput_avg", "avg_throughput", "ops_per_sec", "ops_sec", "Ops/sec"),
+    "latency_avg_ms": ("latency_avg_ms", "avg_latency_ms", "latency_weighted_avg", "Latency (ms)"),
+    "total_bandwidth_kbs": ("total_bandwidth_kbs", "bandwidth_kbs", "Bandwidth_KBs"),
+}
+
+
+def _first_present(mapping, names):
+    for name in names:
+        if name in mapping:
+            return mapping[name]
+    return None
+
+
+def _normalize_memtier_minute_artifact(content: str, source: str):
+    import pandas as pd
+
+    df = pd.read_csv(StringIO(content))
+    rename = {}
+    for canonical, aliases in _MINUTE_COLUMN_ALIASES.items():
+        source_name = next((name for name in aliases if name in df.columns), None)
+        if source_name is None:
+            raise ValueError(f"Memtier minute artifact {source} is missing required column {canonical}")
+        rename[source_name] = canonical
+    df = df.rename(columns=rename)[list(_MINUTE_COLUMN_ALIASES)]
+    df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True).dt.tz_localize(None)
+    return df.sort_values("Timestamp").reset_index(drop=True)
+
+
+def _normalize_memtier_totals_artifacts(entries: list[tuple[str, str]]):
+    import pandas as pd
+
+    rows = []
+    for source, content in entries:
+        payload = json.loads(content)
+        row = {"source": source}
+        for canonical, aliases in _TOTAL_FIELD_ALIASES.items():
+            value = _first_present(payload, aliases)
+            if value is None:
+                raise ValueError(f"Memtier totals artifact {source} is missing required field {canonical}")
+            row[canonical] = value
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    for column in _TOTAL_FIELD_ALIASES:
+        df[column] = pd.to_numeric(df[column])
+    return df
+
+
+def _load_memtier_artifacts(entries: list[tuple[str, str]]):
+    import pandas as pd
+
+    minute_entries = [(source, content) for source, content in entries if source.endswith("_memtier.minute.csv")]
+    totals_entries = [(source, content) for source, content in entries if source.endswith(".totals.json")]
+    if len(minute_entries) > 1:
+        raise ValueError("Expected exactly one combined _memtier.minute.csv artifact")
+    minute_df = (
+        _normalize_memtier_minute_artifact(minute_entries[0][1], minute_entries[0][0])
+        if minute_entries
+        else pd.DataFrame(columns=list(_MINUTE_COLUMN_ALIASES))
+    )
+    totals_df = (
+        _normalize_memtier_totals_artifacts(totals_entries)
+        if totals_entries
+        else pd.DataFrame(columns=["source", *_TOTAL_FIELD_ALIASES])
+    )
+    return minute_df, totals_df
+
+
+def _read_local_memtier_artifact_contents(logs_dir: Path) -> list[tuple[str, str]]:
+    loadgen_dir = logs_dir / "loadgen"
+    if not loadgen_dir.exists():
+        return []
+    files = sorted(
+        path
+        for path in loadgen_dir.rglob("*")
+        if path.is_file() and (path.name.endswith(".minute.csv") or path.name.endswith(".totals.json"))
+    )
+    return [(str(path), path.read_text(encoding="utf-8")) for path in files]
 
 
 def create_report(
     metrics_df,
     logs_df,
+    memtier_minute_df,
+    memtier_totals_df,
     cluster_id: str,
     suffix: str,
     ecs_metrics_df=None,
@@ -264,7 +356,7 @@ def create_report(
     metrics_window_df = _clip_to_time_window(metrics_df, x_min, x_max)
     ecs_window_df = _clip_to_time_window(ecs_df, x_min, x_max)
 
-    fig_m = build_memtier_figure(logs_df, oom_df, metrics_window_df, x_min, x_max)
+    fig_m = build_memtier_figure(memtier_minute_df, oom_df, metrics_window_df, x_min, x_max)
     fig_i = build_infra_figure(ecs_window_df, metrics_window_df, cluster_id, config, x_min, x_max)
     fig_d = build_elasticache_deep_dive_figure(metrics_window_df, cluster_id, config, x_min, x_max)
 
@@ -272,7 +364,9 @@ def create_report(
     cluster_mode = str(config.get("cluster_mode", "false")).lower() == "true"
     id_label = "Cluster" if cluster_mode else "Replication Group"
 
-    summary = build_summary(metrics_window_df, logs_df, ecs_window_df, extra_stats, config, cluster_id, time_range)
+    summary = build_summary(
+        metrics_window_df, memtier_minute_df, memtier_totals_df, ecs_window_df, extra_stats, config, cluster_id, time_range
+    )
     summary_json = json.dumps(summary, indent=2, default=str)
 
     html_content = render_html(
@@ -281,7 +375,7 @@ def create_report(
         id_label=id_label,
         time_range=time_range,
         pills_html=header_pills(config),
-        cards_html=stat_cards_html(logs_df, metrics_window_df, ecs_window_df, extra_stats, config),
+        cards_html=stat_cards_html(memtier_minute_df, memtier_totals_df, metrics_window_df, ecs_window_df, extra_stats, config),
         chart_memtier_html=fig_m.to_html(include_plotlyjs="cdn", full_html=False),
         chart_infra_html=fig_i.to_html(include_plotlyjs=False, full_html=False),
         chart_deep_dive_html=fig_d.to_html(include_plotlyjs=False, full_html=False),
@@ -311,6 +405,7 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     ecs_df = parse_metrics_csv(ecs_csvs[0].read_text(encoding="utf-8")) if ecs_csvs else pd.DataFrame()
 
     log_entries = _read_local_log_contents(logs_dir, cluster_id)
+    artifact_entries = _read_local_memtier_artifact_contents(logs_dir)
     if not log_entries:
         print(f"No log file found in {logs_dir}")
         logs_df = pd.DataFrame()
@@ -318,12 +413,15 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     else:
         print(f"Reading {len(log_entries)} loadgen log file(s)")
         logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
+    memtier_minute_df, memtier_totals_df = _load_memtier_artifacts(artifact_entries)
 
     _warn_if_cache_hit_rate_missing(metrics_df, str(ec_csvs[0]))
 
     html_content, summary_json = create_report(
         metrics_df=metrics_df,
         logs_df=logs_df,
+        memtier_minute_df=memtier_minute_df,
+        memtier_totals_df=memtier_totals_df,
         cluster_id=cluster_id,
         suffix=run_path.name,
         ecs_metrics_df=ecs_df,
@@ -394,6 +492,8 @@ def run_uploaded_report() -> None:
         sys.exit(2)
     print(f"Reading {len(log_entries)} loadgen log file(s)")
     logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
+    artifact_entries = _read_uploaded_memtier_artifact_contents(logs_prefix)
+    memtier_minute_df, memtier_totals_df = _load_memtier_artifacts(artifact_entries)
 
     ecs_df = pd.DataFrame()
     if ecs_metrics_csv:
@@ -406,6 +506,8 @@ def run_uploaded_report() -> None:
     html_content, summary_json = create_report(
         metrics_df=metrics_df,
         logs_df=logs_df,
+        memtier_minute_df=memtier_minute_df,
+        memtier_totals_df=memtier_totals_df,
         cluster_id=cluster_id,
         suffix=suffix,
         ecs_metrics_df=ecs_df,

@@ -67,6 +67,97 @@ class MemtierParserTests(unittest.TestCase):
         self.assertEqual(parsed["Ops/sec"].tolist(), [100.0, 150.0])
         self.assertEqual(parsed["Latency (ms)"].tolist(), [1.0, 1.5])
 
+    def test_extra_stats_keep_oom_rejections_separate_from_evictions(self):
+        try:
+            from reporter.parsers import parse_memtier_extra_stats
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        stats = parse_memtier_extra_stats(
+            "[2026-05-01T00:00:10] [memtier/task-a] -OOM command not allowed\n"
+            "[2026-05-01T00:00:20] [memtier/task-a] -OOM command not allowed\n"
+        )
+
+        self.assertNotIn("first_eviction_ts", stats)
+        self.assertEqual(str(stats["first_oom_rejection_ts"]), "2026-05-01 00:00:10")
+        self.assertEqual(int(stats["oom_df"]["OOM_events"].sum()), 2)
+
+
+class EvictionSeriesTests(unittest.TestCase):
+    def test_aggregate_evictions_win_over_node_rows(self):
+        try:
+            import pandas as pd
+            from reporter.helpers import cloudwatch_eviction_series, first_positive_timestamp
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        metrics = pd.DataFrame([
+            self._metric("2026-05-01T00:00:00Z", 0, "CacheClusterId=cluster-a"),
+            self._metric("2026-05-01T00:01:00Z", 3, "CacheClusterId=cluster-a"),
+            self._metric("2026-05-01T00:00:00Z", 0, "CacheClusterId=cluster-a;CacheNodeId=0001"),
+            self._metric("2026-05-01T00:01:00Z", 3, "CacheClusterId=cluster-a;CacheNodeId=0001"),
+            self._metric("2026-05-01T00:01:00Z", 4, "CacheClusterId=cluster-a;CacheNodeId=0002"),
+        ])
+        metrics["Timestamp"] = pd.to_datetime(metrics["Timestamp"], utc=True).dt.tz_localize(None)
+
+        selected = cloudwatch_eviction_series(metrics, "cluster-a")
+
+        self.assertEqual(selected["Value"].tolist(), [0, 3])
+        self.assertEqual(str(first_positive_timestamp(selected)), "2026-05-01 00:01:00")
+
+    def test_node_evictions_are_summed_when_aggregate_rows_are_absent(self):
+        try:
+            import pandas as pd
+            from reporter.helpers import cloudwatch_eviction_series
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        metrics = pd.DataFrame([
+            self._metric("2026-05-01T00:00:00Z", 1, "CacheClusterId=cluster-a;CacheNodeId=0001"),
+            self._metric("2026-05-01T00:00:00Z", 2, "CacheClusterId=cluster-a;CacheNodeId=0002"),
+        ])
+        metrics["Timestamp"] = pd.to_datetime(metrics["Timestamp"], utc=True).dt.tz_localize(None)
+
+        selected = cloudwatch_eviction_series(metrics, "cluster-a")
+
+        self.assertEqual(selected["Value"].tolist(), [3])
+
+    def test_replication_group_id_selects_suffixed_non_cluster_node_rows(self):
+        try:
+            import pandas as pd
+            from reporter.helpers import cloudwatch_eviction_series
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        metrics = pd.DataFrame([
+            self._metric("2026-05-01T00:00:00Z", 7, "CacheClusterId=cluster-a-001;CacheNodeId=0001"),
+        ])
+        metrics["Timestamp"] = pd.to_datetime(metrics["Timestamp"], utc=True).dt.tz_localize(None)
+
+        selected = cloudwatch_eviction_series(metrics, "cluster-a")
+
+        self.assertEqual(selected["Value"].tolist(), [7])
+
+    @staticmethod
+    def _metric(timestamp: str, value: int, dimensions: str) -> dict:
+        return {
+            "Timestamp": timestamp,
+            "Namespace": "AWS/ElastiCache",
+            "MetricName": "Evictions",
+            "Stat": "Sum",
+            "Value": value,
+            "Unit": "Count",
+            "Dimensions": dimensions,
+        }
+
 
 if __name__ == "__main__":
     unittest.main()

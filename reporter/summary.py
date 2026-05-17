@@ -1,6 +1,12 @@
 """Build a structured summary dict suitable for JSON serialisation and comparison reports."""
 
-from helpers import metric_filter, cache_hit_rate_df, select_mem_dims, aggregate_memtier_progress
+from helpers import (
+    metric_filter,
+    cache_hit_rate_df,
+    select_mem_dims,
+    cloudwatch_eviction_series,
+    first_positive_timestamp,
+)
 
 
 def _safe(val, decimals=None):
@@ -38,7 +44,7 @@ def _metric_agg(df, metric_name, stat, dim_prefix=None):
     }
 
 
-def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, time_range):
+def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extra_stats, config, cluster_id, time_range):
     """Return a fully-populated summary dict ready for json.dumps().
 
     Schema
@@ -49,6 +55,7 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
                      avg_bandwidth_kbs },
       "cache_efficiency": { avg_hit_rate_pct, total_evictions, min_freeable_memory_mb, peak_key_count,
                             first_eviction_ts },
+      "oom": { rejection_count, first_rejection_ts },
       "engine_cpu": { avg_pct, max_pct, credit_balance_avg, credit_usage_avg },
       "memory": { avg_usage_pct, max_usage_pct, headroom_pct, fragmentation_avg },
       "network": {
@@ -86,31 +93,24 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
     #  benchmark (memtier logs)                                            #
     # ------------------------------------------------------------------ #
     benchmark = {}
-    if not logs_df.empty:
-        progress_agg = aggregate_memtier_progress(logs_df)
-        ops = progress_agg['Overall Ops/sec']
-        lat = progress_agg['Overall Latency (ms)']
-        final_totals_df = extra_stats.get('final_totals_df')
-        has_final_totals = final_totals_df is not None and not final_totals_df.empty
-        avg_ops = float(final_totals_df['Ops/sec'].sum()) if has_final_totals else float(ops.mean())
+    if not memtier_minute_df.empty and not memtier_totals_df.empty:
+        ops = memtier_minute_df['throughput_sum']
+        lat = memtier_minute_df['latency_weighted_avg']
+        avg_ops = float(memtier_totals_df['throughput_avg'].sum())
         benchmark['avg_ops']         = _safe(avg_ops, 1)
         benchmark['peak_ops']        = _safe(float(ops.max()), 1)
         benchmark['cv_pct']          = _safe(float(ops.std() / avg_ops * 100) if avg_ops > 0 else 0.0, 2)
-        if has_final_totals:
-            weighted_latency = (
-                final_totals_df['Latency (ms)'] * final_totals_df['Ops/sec']
-            ).sum() / final_totals_df['Ops/sec'].sum()
-            benchmark['avg_latency_ms'] = _safe(float(weighted_latency), 3)
-        else:
-            benchmark['avg_latency_ms'] = _safe(float(lat.mean()), 3)
+        weighted_latency = (
+            memtier_totals_df['latency_avg_ms'] * memtier_totals_df['throughput_avg']
+        ).sum() / memtier_totals_df['throughput_avg'].sum()
+        benchmark['avg_latency_ms'] = _safe(float(weighted_latency), 3)
         benchmark['max_latency_ms']  = _safe(float(lat.max()), 3)
         benchmark['p95_latency_ms']  = _percentile(lat, 95)
         benchmark['p99_latency_ms']  = _percentile(lat, 99)
 
-        if has_final_totals:
-            benchmark['avg_bandwidth_kbs'] = _safe(float(final_totals_df['Bandwidth_KBs'].sum()), 2)
-        elif 'Bandwidth_KBs' in logs_df.columns and logs_df['Bandwidth_KBs'].notna().any():
-            benchmark['avg_bandwidth_kbs'] = _safe(float(logs_df['Bandwidth_KBs'].mean()), 2)
+        total_bandwidth = float(memtier_totals_df['total_bandwidth_kbs'].sum())
+        benchmark['total_bandwidth_kbs'] = _safe(total_bandwidth, 2)
+        benchmark['avg_bandwidth_kbs'] = _safe(total_bandwidth, 2)
 
     # ------------------------------------------------------------------ #
     #  cache_efficiency                                                    #
@@ -124,7 +124,7 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
             cache_efficiency['avg_hit_rate_pct'] = _safe(avg_hr, 2)
 
         # Evictions
-        ev_df = metric_filter(metrics_df, 'Evictions', 'Sum', 'CacheClusterId')
+        ev_df = cloudwatch_eviction_series(metrics_df, cluster_id)
         if not ev_df.empty:
             cache_efficiency['total_evictions'] = int(ev_df['Value'].sum())
 
@@ -139,12 +139,14 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
         if not items_df.empty:
             cache_efficiency['peak_key_count'] = int(items_df['Value'].max())
 
-    # First eviction timestamp
-    first_eviction_ts = extra_stats.get('first_eviction_ts')
-    if first_eviction_ts is not None:
-        cache_efficiency['first_eviction_ts'] = _safe(first_eviction_ts)
-    else:
-        cache_efficiency['first_eviction_ts'] = None
+    ev_df = cloudwatch_eviction_series(metrics_df, cluster_id)
+    cache_efficiency['first_eviction_ts'] = _safe(first_positive_timestamp(ev_df))
+
+    oom_df = extra_stats.get('oom_df')
+    oom = {
+        'rejection_count': int(oom_df['OOM_events'].sum()) if oom_df is not None and not oom_df.empty else 0,
+        'first_rejection_ts': _safe(extra_stats.get('first_oom_rejection_ts')),
+    }
 
     # ------------------------------------------------------------------ #
     #  engine_cpu                                                          #
@@ -259,6 +261,7 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
         'meta':               meta,
         'benchmark':          benchmark,
         'cache_efficiency':   cache_efficiency,
+        'oom':                oom,
         'engine_cpu':         engine_cpu,
         'memory':             memory,
         'network':            network,

@@ -22,7 +22,7 @@ def _iter_cloudwatch_memtier_lines(log_content, source_stream=None):
     # Legacy export format: [2026-03-07T10:13:12.212000] [stream/name] rest-of-message
     legacy_header = re.compile(r'^\[([\d\-T:\.]+)\] \[([^\]]+)\] (.*)', re.DOTALL)
 
-    for raw_line in log_content.splitlines():
+    for raw_line in log_content.split('\n'):
         if not raw_line:
             continue
 
@@ -47,7 +47,9 @@ def _iter_cloudwatch_memtier_lines(log_content, source_stream=None):
             continue
         if getattr(ts, 'tzinfo', None) is not None:
             ts = ts.tz_convert('UTC').tz_localize(None)
-        yield ts, header.group(2), header.group(3), raw_line
+        for message in header.group(3).split('\r'):
+            if message:
+                yield ts, header.group(2), message, raw_line
 
 
 def parse_memtier_logs(log_content, source_stream=None):
@@ -101,7 +103,7 @@ def parse_memtier_final_totals(log_content, source_stream=None):
     totals = []
     totals_re = re.compile(
         r'^Totals\s+([\d.]+)\s+[\d.]+\s+[\d.]+\s+([\d.]+)\s+'
-        r'[\d.]+\s+[\d.]+\s+[\d.]+\s+([\d.]+)\s*$'
+        r'([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$'
     )
     for timestamp, stream, message, _raw_line in _iter_cloudwatch_memtier_lines(log_content, source_stream):
         match = totals_re.match(message)
@@ -111,7 +113,10 @@ def parse_memtier_final_totals(log_content, source_stream=None):
                 'Stream': stream,
                 'Ops/sec': float(match.group(1)),
                 'Latency (ms)': float(match.group(2)),
-                'Bandwidth_KBs': float(match.group(3)),
+                'p50 Latency (ms)': float(match.group(3)),
+                'p99 Latency (ms)': float(match.group(4)),
+                'p999 Latency (ms)': float(match.group(5)),
+                'Bandwidth_KBs': float(match.group(6)),
             })
     if not totals:
         return pd.DataFrame()
@@ -123,12 +128,12 @@ def parse_memtier_extra_stats(log_content, source_stream=None):
     Returns a dict with:
       first_message_ts   – datetime of the very first memtier log message
       last_message_ts    – datetime of the very last memtier log message
-      first_eviction_ts  – datetime of first -OOM line
+      first_oom_rejection_ts – datetime of first -OOM line
       oom_df             – DataFrame [Timestamp, OOM_events] using the event log timestamp
     """
     first_message_ts = None
     last_message_ts = None
-    first_eviction_ts = None
+    first_oom_rejection_ts = None
     oom_events = []
 
     for ts, _stream, message, raw_line in _iter_cloudwatch_memtier_lines(log_content, source_stream):
@@ -137,8 +142,8 @@ def parse_memtier_extra_stats(log_content, source_stream=None):
         if last_message_ts is None or ts > last_message_ts:
             last_message_ts = ts
         if '-OOM command not allowed' in message or '-OOM command not allowed' in raw_line:
-            if first_eviction_ts is None or ts < first_eviction_ts:
-                first_eviction_ts = ts
+            if first_oom_rejection_ts is None or ts < first_oom_rejection_ts:
+                first_oom_rejection_ts = ts
             oom_events.append(ts)
 
     if oom_events:
@@ -152,7 +157,7 @@ def parse_memtier_extra_stats(log_content, source_stream=None):
     return {
         'first_message_ts': first_message_ts,
         'last_message_ts': last_message_ts,
-        'first_eviction_ts': first_eviction_ts,
+        'first_oom_rejection_ts': first_oom_rejection_ts,
         'oom_df': oom_df,
     }
 
