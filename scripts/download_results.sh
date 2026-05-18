@@ -22,6 +22,8 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=download_results_lib.sh
+source "$SCRIPT_DIR/download_results_lib.sh"
 
 OUTPUT_DIR=""
 REPORTS_ONLY=false
@@ -69,6 +71,11 @@ TF_OUTPUT=$(terraform output -json 2>/dev/null) || {
 REGION=$(echo "$TF_OUTPUT" | jq -r '.aws_region.value // "us-east-1"' 2>/dev/null || echo "us-east-1")
 S3_LOCATION=$(echo "$TF_OUTPUT" | jq -r '.metrics_export_location.value')
 CLUSTER_ID=$(echo "$TF_OUTPUT" | jq -r '.elasticache_cluster_id.value')
+CLUSTER_NAME=$(echo "$TF_OUTPUT" | jq -r '.loadgen_cluster_name.value')
+SERVICE_NAME=$(echo "$TF_OUTPUT" | jq -r '.loadgen_service_name.value')
+LOG_GROUP=$(echo "$TF_OUTPUT" | jq -r '.loadgen_log_group_name.value')
+RUN_TIMESTAMP=$(echo "$TF_OUTPUT" | jq -r '.run_timestamp.value')
+CURRENT_RUN="${RUN_TIMESTAMP:0:8}-${RUN_TIMESTAMP:8:6}"
 
 S3_BUCKET=$(echo "$S3_LOCATION" | sed 's|^s3://||' | cut -d/ -f1)
 S3_PREFIX=$(echo "$S3_LOCATION" | sed "s|^s3://${S3_BUCKET}/||")
@@ -77,6 +84,7 @@ S3_PREFIX=$(echo "$S3_LOCATION" | sed "s|^s3://${S3_BUCKET}/||")
 
 echo "  S3 Source:  s3://${S3_BUCKET}/${S3_PREFIX}"
 echo "  Cluster:    $CLUSTER_ID"
+echo "  Current Run:$CURRENT_RUN"
 echo "  Local Dir:  $OUTPUT_DIR"
 
 # -- List available files --
@@ -95,40 +103,145 @@ fi
 # Extract S3 keys (4th column from aws s3 ls output)
 ALL_KEYS=$(echo "$S3_LISTING" | awk '{print $4}')
 
-# If --latest, filter to the timestamped run with the newest S3 LastModified time.
+_read_status_json() {
+    local run="$1"
+    local status_key="${S3_PREFIX}${run}/report_status.json"
+
+    if ! _keys_contain "$ALL_KEYS" "$status_key"; then
+        return 1
+    fi
+
+    aws s3 cp "s3://${S3_BUCKET}/${status_key}" - --region "$REGION" 2>/dev/null
+}
+
+_current_reporter_state() {
+    REPORTER_COUNT=0
+    REPORTER_STATUS=""
+    local reporter_arns
+    local reporter_family="${CLUSTER_ID}-reporter"
+
+    reporter_arns=$(aws ecs list-tasks \
+        --cluster "$CLUSTER_NAME" \
+        --family "$reporter_family" \
+        --region "$REGION" \
+        --query "taskArns" \
+        --output json 2>/dev/null) || reporter_arns="[]"
+    REPORTER_COUNT=$(jq 'length' <<<"$reporter_arns")
+
+    if [[ "$REPORTER_COUNT" -gt 0 ]]; then
+        REPORTER_STATUS=$(aws ecs describe-tasks \
+            --cluster "$CLUSTER_NAME" \
+            --tasks $(jq -r '.[]' <<<"$reporter_arns") \
+            --region "$REGION" \
+            --query 'tasks | sort_by(@, &createdAt)[-1].lastStatus' \
+            --output text 2>/dev/null) || REPORTER_STATUS=""
+    fi
+}
+
+_current_service_state() {
+    local service_json
+    EC_STATUS=$(aws elasticache describe-replication-groups \
+        --replication-group-id "$CLUSTER_ID" \
+        --region "$REGION" \
+        --query "ReplicationGroups[0].Status" \
+        --output text 2>/dev/null) || EC_STATUS=""
+
+    service_json=$(aws ecs describe-services \
+        --cluster "$CLUSTER_NAME" \
+        --services "$SERVICE_NAME" \
+        --region "$REGION" \
+        --query "services[0]" \
+        --output json 2>/dev/null) || service_json=""
+    DESIRED=$(jq -r '.desiredCount // 0' <<<"${service_json:-null}")
+    RUNNING=$(jq -r '.runningCount // 0' <<<"${service_json:-null}")
+    PENDING=$(jq -r '.pendingCount // 0' <<<"${service_json:-null}")
+}
+
+_reporter_fatal_error() {
+    local latest_stream
+    latest_stream=$(aws logs describe-log-streams \
+        --log-group-name "$LOG_GROUP" \
+        --log-stream-name-prefix "reporter/reporter/" \
+        --region "$REGION" \
+        --query 'sort_by(logStreams, &lastEventTimestamp)[-1].logStreamName' \
+        --output text 2>/dev/null) || latest_stream=""
+    [[ -z "$latest_stream" || "$latest_stream" == "None" ]] && return 0
+
+    aws logs get-log-events \
+        --log-group-name "$LOG_GROUP" \
+        --log-stream-name "$latest_stream" \
+        --limit 100 \
+        --region "$REGION" \
+        --query 'events[].message' \
+        --output text 2>/dev/null |
+        grep -E 'RuntimeError:|Traceback|ERROR:' |
+        tail -n 1 || true
+}
+
+_print_current_run_status() {
+    local status_json="${1:-}"
+    local status_present=false
+    local status_complete=false
+    local status_has_outputs=false
+    local fatal_error=""
+    local phase
+
+    if [[ -n "$status_json" ]]; then
+        status_present=true
+        status_complete=$(jq -r '.complete == true' <<<"$status_json")
+        if jq -e '(.report | type == "string" and length > 0) and (.summary | type == "string" and length > 0)' \
+            >/dev/null 2>&1 <<<"$status_json"; then
+            status_has_outputs=true
+        fi
+    fi
+
+    _current_service_state
+    _current_reporter_state
+    if [[ "$REPORTER_COUNT" -gt 0 && "$REPORTER_STATUS" == "STOPPED" && "$status_has_outputs" != "true" ]]; then
+        fatal_error=$(_reporter_fatal_error)
+    fi
+    phase=$(_classify_current_run "$EC_STATUS" "$DESIRED" "$RUNNING" "$PENDING" \
+        "$REPORTER_COUNT" "$REPORTER_STATUS" "$status_present" "$status_complete" "$status_has_outputs" "$fatal_error")
+    echo "  Current Terraform run $CURRENT_RUN is not ready: $phase."
+}
+
+# If --latest, select the newest ready run rather than the newest run with any object.
 # Run folder timestamps can come from the test's own clock/timezone and are not
 # always ordered the same way as upload completion time.
 if $LATEST; then
-    LATEST_TS=$(echo "$S3_LISTING" | awk '
-        NF >= 4 {
-            key = $4
-            if (match(key, /[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]/)) {
-                run = substr(key, RSTART, RLENGTH)
-                modified = $1 " " $2
-                if (!(run in latest_modified) || modified > latest_modified[run]) {
-                    latest_modified[run] = modified
-                }
-            }
-        }
-        END {
-            for (run in latest_modified) {
-                if (best_run == "" ||
-                    latest_modified[run] > best_modified ||
-                    (latest_modified[run] == best_modified && run > best_run)) {
-                    best_run = run
-                    best_modified = latest_modified[run]
-                }
-            }
-            if (best_run != "") {
-                print best_run
-            }
-        }
-    ')
-    if [[ -n "$LATEST_TS" ]]; then
-        echo "  Latest run by upload time: $LATEST_TS"
-        ALL_KEYS=$(echo "$ALL_KEYS" | grep "$LATEST_TS")
+    NEWEST_S3_RUN=$(printf '%s\n' "$S3_LISTING" | _run_timestamps_by_recency | head -n 1)
+    LATEST_READY_RUN=""
+    CURRENT_STATUS_JSON=""
+
+    while IFS= read -r run; do
+        [[ -z "$run" ]] && continue
+        status_json=$(_read_status_json "$run" || true)
+        if [[ "$run" == "$CURRENT_RUN" ]]; then
+            CURRENT_STATUS_JSON="$status_json"
+        fi
+        if [[ -n "$status_json" ]] && _report_status_ready "$status_json" "$ALL_KEYS"; then
+            LATEST_READY_RUN="$run"
+            break
+        fi
+    done < <(printf '%s\n' "$S3_LISTING" | _run_timestamps_by_recency)
+
+    if [[ "$NEWEST_S3_RUN" == "$CURRENT_RUN" && "$LATEST_READY_RUN" != "$CURRENT_RUN" ]]; then
+        _print_current_run_status "$CURRENT_STATUS_JSON"
+    fi
+
+    if [[ -n "$LATEST_READY_RUN" ]]; then
+        if [[ "$NEWEST_S3_RUN" == "$CURRENT_RUN" && "$LATEST_READY_RUN" != "$CURRENT_RUN" ]]; then
+            echo "  Latest completed run is $LATEST_READY_RUN; downloading that result set instead."
+        else
+            echo "  Latest ready run by upload time: $LATEST_READY_RUN"
+        fi
+        ALL_KEYS=$(grep "$LATEST_READY_RUN" <<<"$ALL_KEYS")
     else
-        echo "  Could not identify timestamped runs. Downloading all files."
+        echo "  No ready result sets found yet."
+        if [[ "$NEWEST_S3_RUN" == "$CURRENT_RUN" ]]; then
+            echo "  Run ./scripts/check_status.sh for full infrastructure details."
+        fi
+        exit 0
     fi
 fi
 
