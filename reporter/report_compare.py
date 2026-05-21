@@ -15,7 +15,6 @@ from report_common import (
     load_run,
     metric_value,
     normalize_cluster_mode,
-    parse_duration_minutes,
     percent_change,
 )
 from template import render_report
@@ -30,7 +29,7 @@ SECTION_META: dict[str, dict[str, str]] = {
 
 
 METRICS: tuple[MetricSpec, ...] = (
-    MetricSpec("benchmark", "Avg Throughput", ("benchmark", "avg_ops"), "ops/sec", 1, "higher", "Average observed memtier throughput during the active benchmark window."),
+    MetricSpec("benchmark", "Avg Throughput", ("benchmark", "avg_ops"), "ops/sec", 1, "higher", "Average observed memtier throughput."),
     MetricSpec("benchmark", "Peak Throughput", ("benchmark", "peak_ops"), "ops/sec", 1, "higher", "Highest single observed throughput value."),
     MetricSpec("benchmark", "Throughput CV", ("benchmark", "cv_pct"), "%", 2, "lower", "Coefficient of variation. Lower values mean steadier throughput.", "points"),
     MetricSpec("benchmark", "Avg Latency", ("benchmark", "avg_latency_ms"), "ms", 3, "lower", "Average client-side latency reported by memtier."),
@@ -38,8 +37,6 @@ METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("benchmark", "P95 Latency", ("benchmark", "p95_latency_ms"), "ms", 2, "lower", "95th percentile client-side latency."),
     MetricSpec("benchmark", "P99 Latency", ("benchmark", "p99_latency_ms"), "ms", 2, "lower", "99th percentile client-side latency."),
     MetricSpec("benchmark", "Avg Bandwidth", ("benchmark", "avg_bandwidth_kbs"), "KB/s", 2, "neutral", "Average network throughput reported by memtier."),
-    MetricSpec("benchmark", "Active Load Window", ("benchmark", "active_window_min"), "min", 1, "neutral", "Measured benchmark window with non-zero traffic."),
-    MetricSpec("benchmark", "Pre-fill Duration", ("benchmark", "prefill_min"), "min", 1, "lower", "Warm-up or key pre-population time before steady benchmark traffic."),
     MetricSpec("engine_memory", "Avg Engine CPU", ("engine_cpu", "avg_pct"), "%", 2, "lower", "Average Redis engine CPU utilization.", "points"),
     MetricSpec("engine_memory", "Peak Engine CPU", ("engine_cpu", "max_pct"), "%", 2, "lower", "Highest Redis engine CPU utilization.", "points"),
     MetricSpec("engine_memory", "Avg CPU Credit Balance", ("engine_cpu", "credit_balance_avg"), "credits", 2, "higher", "Average burst credit balance for T-family cache nodes."),
@@ -51,11 +48,11 @@ METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("engine_memory", "Avg Fragmentation", ("memory", "fragmentation_avg"), "x", 3, "lower", "Average memory fragmentation ratio."),
     MetricSpec("engine_memory", "Peak Fragmentation", ("memory", "fragmentation_max"), "x", 2, "lower", "Highest memory fragmentation ratio."),
     MetricSpec("engine_memory", "Peak Swap", ("memory", "swap_max_bytes"), "MB", 1, "lower", "Highest swap consumption observed on the cache node.", normalizer=bytes_to_mb),
-    MetricSpec("cache_latency", "Cache Hit Rate", ("cache_efficiency", "avg_hit_rate_pct"), "%", 2, "higher", "Average CacheHitRate during the benchmark window.", "points"),
+    MetricSpec("cache_latency", "Cache Hit Rate", ("cache_efficiency", "avg_hit_rate_pct"), "%", 2, "higher", "Average CacheHitRate during the report window.", "points"),
     MetricSpec("cache_latency", "Total Evictions", ("cache_efficiency", "total_evictions"), "", 0, "lower", "Total key evictions reported by CloudWatch."),
+    MetricSpec("cache_latency", "OOM Rejections", ("oom", "rejection_count"), "", 0, "lower", "Total memtier -OOM command rejections."),
     MetricSpec("cache_latency", "Min Freeable Memory", ("cache_efficiency", "min_freeable_memory_mb"), "MB", 1, "higher", "Lowest freeable memory value seen during the run."),
     MetricSpec("cache_latency", "Peak Key Count", ("cache_efficiency", "peak_key_count"), "", 0, "neutral", "Maximum total key count recorded on the cache node."),
-    MetricSpec("cache_latency", "First Eviction Offset", ("cache_efficiency", "first_eviction_offset_min"), "min", 1, "higher", "Minutes from benchmark start to the first eviction event.", none_label="None"),
     MetricSpec("cache_latency", "GET Latency", ("latency_server_us", "get_avg"), "us", 3, "lower", "Average server-side GET command latency."),
     MetricSpec("cache_latency", "SET Latency", ("latency_server_us", "set_avg"), "us", 3, "lower", "Average server-side SET command latency."),
     MetricSpec("cache_latency", "String Latency", ("latency_server_us", "string_avg"), "us", 3, "lower", "Average server-side string command latency."),
@@ -85,8 +82,6 @@ TOPLINE_PATHS: tuple[tuple[str, ...], ...] = (
 def classify_delta(spec: MetricSpec, baseline: float | None, candidate: float | None) -> str:
     if baseline is None or candidate is None:
         return "neutral"
-    if spec.path == ("benchmark", "prefill_min") and (baseline < 0 or candidate < 0):
-        return "warning"
     # Use a stricter absolute tolerance for integer-like metrics (decimals == 0)
     # so that changes like 0 -> 1 are not treated as neutral.
     if spec.decimals == 0:
@@ -164,7 +159,8 @@ def build_run_context(run: RunData) -> dict[str, Any]:
     add("Source JSON", str(run.results_path))
     add("Cluster ID", meta.get("cluster_id"))
     add("Time range", meta.get("time_range"))
-    add("Duration", parse_duration_minutes(meta.get("time_range", "")))
+    add("Report start", meta.get("report_start"))
+    add("Report end", meta.get("report_end"))
     add("Engine", meta.get("engine_type") or elasticache.get("engine"))
     add("Engine version", meta.get("engine_version") or elasticache.get("engine_version_configured"))
     add("Node type", meta.get("node_type") or elasticache.get("node_type"))
@@ -277,9 +273,9 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
 
     # Determine tone based on strict improvement/worsening only; equality is neutral.
     cache_latency_signals = [
-        _metric_signal(hit_a, hit_b, "higher"),
-        _metric_signal(get_lat_a, get_lat_b, "lower"),
-        _metric_signal(set_lat_a, set_lat_b, "lower"),
+        metric_signal(hit_a, hit_b, higher_is_better=True),
+        metric_signal(get_lat_a, get_lat_b, higher_is_better=False),
+        metric_signal(set_lat_a, set_lat_b, higher_is_better=False),
     ]
     cache_latency_signals = [signal for signal in cache_latency_signals if signal != 0]
 
@@ -305,29 +301,16 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
         }
     )
 
-    prefill_a, prefill_b = number(("benchmark", "prefill_min"))
-    if (prefill_a is not None and prefill_a < 0) or (prefill_b is not None and prefill_b < 0):
-        items.append(
-            {
-                "tone": "warning",
-                "title": "Prefill timing anomaly",
-                "text": (
-                    f"Prefill duration is {format_number(prefill_a or 0, 1)} min for the baseline and "
-                    f"{format_number(prefill_b or 0, 1)} min for the candidate. Negative values are invalid and "
-                    "likely indicate a bug in the prefill or active-window calculation."
-                ),
-            }
-        )
-
-    first_evict_a, first_evict_b = number(("cache_efficiency", "first_eviction_offset_min"))
     evictions_a, evictions_b = number(("cache_efficiency", "total_evictions"))
-    if (evictions_a == 0 and first_evict_a is not None) or (evictions_b == 0 and first_evict_b is not None):
+    first_evict_a = get_nested(baseline.summary, ("cache_efficiency", "first_eviction_ts"))
+    first_evict_b = get_nested(candidate.summary, ("cache_efficiency", "first_eviction_ts"))
+    if (evictions_a == 0 and first_evict_a) or (evictions_b == 0 and first_evict_b):
         items.append(
             {
                 "tone": "warning",
                 "title": "Eviction fields need validation",
                 "text": (
-                    "At least one run reports a first eviction offset even though total evictions are zero. "
+                    "At least one run reports a first eviction timestamp even though total evictions are zero. "
                     "Those summary fields should be validated before using them for conclusions."
                 ),
             }

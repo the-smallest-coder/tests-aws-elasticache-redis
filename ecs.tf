@@ -53,20 +53,26 @@ resource "aws_ecs_task_definition" "loadgen" {
 
   container_definitions = jsonencode([
     {
-      name      = "memtier"
-      image     = "redislabs/memtier_benchmark:latest"
-      essential = true
+      name        = "memtier"
+      image       = "redislabs/memtier_benchmark:latest"
+      essential   = true
+      stopTimeout = 120
 
-      # Wrap in sh -c so $(cat /proc/sys/kernel/random/uuid) is expanded at task startup,
-      # giving each task a unique key prefix and avoiding keyspace collisions across tasks.
       entryPoint = ["sh", "-c"]
       command = [
         join(" ", concat(
           [
-            "UUID=$(cat /proc/sys/kernel/random/uuid)",
-            "&&",
-            "exec",
-            "memtier_benchmark",
+            "set -u;",
+            "FIFO=/tmp/memtier-output.$$;",
+            "mkfifo \"$FIFO\";",
+            "UUID=$(cat /proc/sys/kernel/random/uuid);",
+            "MEMTIER_PID=;",
+            "term() { if [ -n \"$MEMTIER_PID\" ]; then kill -INT \"$MEMTIER_PID\" 2>/dev/null || true; fi; };",
+            "trap term TERM INT;",
+            "awk 'BEGIN { RS = \"[\\r\\n]+\" } NF { print; fflush() }' < \"$FIFO\" &",
+            "FILTER_PID=$!;",
+            "if command -v stdbuf >/dev/null 2>&1; then STDBUF=\"stdbuf -o0\"; else STDBUF=\"\"; fi;",
+            "$STDBUF memtier_benchmark",
             "--server=${local.elasticache_endpoint}",
             "--port=${var.port}",
             "--threads=${var.loadgen_memtier_threads}",
@@ -78,13 +84,20 @@ resource "aws_ecs_task_definition" "loadgen" {
             "--key-pattern=${var.loadgen_memtier_key_pattern}",
             "--key-prefix=$UUID-",
             "--key-maximum=${local.memtier_key_maximum}",
-            "--hide-histogram",
+            "--hide-histogram"
           ],
           var.cluster_mode_enabled ? ["--cluster-mode"] : [],
-          var.transit_encryption_enabled ? ["--tls", "--tls-skip-verify"] : []
+          var.transit_encryption_enabled ? ["--tls", "--tls-skip-verify"] : [],
+          [
+            "> \"$FIFO\" 2>&1 &",
+            "MEMTIER_PID=$!;",
+            "while true; do wait \"$MEMTIER_PID\"; STATUS=$?; if [ \"$STATUS\" -ge 128 ] && kill -0 \"$MEMTIER_PID\" 2>/dev/null; then continue; fi; break; done;",
+            "wait \"$FILTER_PID\" 2>/dev/null || true;",
+            "rm -f \"$FIFO\";",
+            "exit \"$STATUS\""
+          ]
         ))
       ]
-
 
       logConfiguration = {
         logDriver = "awslogs"
@@ -111,8 +124,8 @@ resource "aws_ecs_service" "loadgen" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = var.subnet_ids
-    security_groups  = [aws_security_group.loadgen.id]
+    subnets         = var.subnet_ids
+    security_groups = [aws_security_group.loadgen.id]
     # Workaround only: enable when subnets have no NAT/egress for Docker Hub pulls.
     # Not recommended for normal use; prefer private subnets with NAT or ECR.
     assign_public_ip = var.loadgen_assign_public_ip
@@ -154,13 +167,13 @@ locals {
   # ---------------------------------------------------------------------------
   _node_memory_bytes = {
     # T4g family
-    "cache.t4g.micro"  = 536870912    # 512 MB advertised
-    "cache.t4g.small"  = 1610612736   # 1.5 GB advertised
-    "cache.t4g.medium" = 3435973836   # 3.2 GB advertised
+    "cache.t4g.micro"  = 536870912  # 512 MB advertised
+    "cache.t4g.small"  = 1610612736 # 1.5 GB advertised
+    "cache.t4g.medium" = 3435973836 # 3.2 GB advertised
     # T3 family
-    "cache.t3.micro"   = 536870912
-    "cache.t3.small"   = 1610612736
-    "cache.t3.medium"  = 3435973836
+    "cache.t3.micro"  = 536870912
+    "cache.t3.small"  = 1610612736
+    "cache.t3.medium" = 3435973836
     # M7g family
     "cache.m7g.large"   = 7516192768   # 7 GB
     "cache.m7g.xlarge"  = 15032385536  # 14 GB
@@ -192,7 +205,7 @@ locals {
 
   # Advertised bytes for this run; fall back to t4g.micro if type is unknown.
   _advertised_bytes = lookup(local._node_memory_bytes, var.node_type,
-    local._node_memory_bytes["cache.t4g.micro"])
+  local._node_memory_bytes["cache.t4g.micro"])
 
   # key-maximum: how many data_size-byte values fit at the target fill factor.
   # Each Redis key has ~70 bytes of overhead on top of the value.

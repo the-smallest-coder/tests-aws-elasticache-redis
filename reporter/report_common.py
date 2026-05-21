@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,7 +64,18 @@ def bytes_to_mb(value: Any) -> float | None:
 def resolve_results_path(raw_path: str) -> Path:
     path = Path(raw_path)
     if path.is_dir():
-        path = path / "results_local.json"
+        local_path = path / "results_local.json"
+        if local_path.exists():
+            return local_path
+
+        generated = sorted(path.glob("results_*.json"))
+        generated = [candidate for candidate in generated if candidate.name != "report_status.json"]
+        if len(generated) == 1:
+            return generated[0]
+        if len(generated) > 1:
+            names = ", ".join(candidate.name for candidate in generated)
+            raise FileExistsError(f"Multiple result JSON files found in {path}: {names}")
+        path = local_path
     return path
 
 
@@ -142,11 +152,6 @@ def display_value(spec: MetricSpec, raw_value: Any) -> str:
         return str(raw_value)
     suffix = f" {spec.unit}" if spec.unit else ""
     return f"{format_number(numeric, spec.decimals)}{suffix}"
-
-
-def parse_duration_minutes(time_range: str) -> str | None:
-    match = re.search(r"\(([-0-9.]+)\s+min\)", time_range or "")
-    return f"{match.group(1)} min" if match else None
 
 
 def normalize_cluster_mode(value: Any) -> str | None:

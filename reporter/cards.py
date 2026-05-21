@@ -2,7 +2,23 @@
 
 import pandas as pd
 
-from helpers import metric_filter, cache_hit_rate_df, select_mem_dims
+from helpers import (
+    metric_filter,
+    cache_hit_rate_df,
+    select_mem_dims,
+    cloudwatch_eviction_series,
+    first_positive_timestamp,
+)
+
+
+def _format_elapsed(delta):
+    """Return compact elapsed text suitable for a stat card."""
+    total_seconds = max(0, int(delta.total_seconds()))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {seconds:02d}s"
+    return f"{minutes}m {seconds:02d}s"
 
 
 def header_pills(config):
@@ -24,54 +40,46 @@ def header_pills(config):
     return f"<div class='pills'>{pills}</div>" if pills else ''
 
 
-def stat_cards_html(logs_df, metrics_df, ecs_df, extra_stats=None, config=None):
+def stat_cards_html(
+    memtier_minute_df,
+    memtier_totals_df,
+    metrics_df,
+    ecs_df,
+    extra_stats=None,
+    config=None,
+    cluster_id=None,
+):
     """Build the stat-cards grid HTML from all data sources."""
     extra_stats = extra_stats or {}
     config = config or {}
     cards = []  # tuples: (label, value_str, unit, color, tooltip)
 
     # ---- Memtier throughput / latency / bandwidth ----
-    if not logs_df.empty:
-        avg_ops = logs_df['Ops/sec'].mean()
+    if not memtier_minute_df.empty and not memtier_totals_df.empty:
+        avg_ops = memtier_totals_df['throughput_avg'].sum()
         cards.append(('Avg Throughput', f"{avg_ops:,.0f}", 'ops/sec', '#1a56db', ''))
-        cards.append(('Peak Throughput', f"{logs_df['Ops/sec'].max():,.0f}", 'ops/sec', '#1a56db', ''))
+        cards.append(('Peak Throughput', f"{memtier_minute_df['throughput_sum'].max():,.0f}", 'ops/sec', '#1a56db', ''))
 
         if avg_ops > 0:
-            cv = logs_df['Ops/sec'].std() / avg_ops * 100
+            cv = memtier_minute_df['throughput_sum'].std() / avg_ops * 100
             cv_color = '#188038' if cv < 10 else ('#e8710a' if cv < 25 else '#d93025')
             cards.append(('Throughput CV', f"{cv:.1f}", '%', cv_color,
                           'Coefficient of Variation of ops/sec. Lower = more stable.'))
 
-        cards.append(('Avg Latency', f"{logs_df['Latency (ms)'].mean():.2f}", 'ms', '#e8710a', ''))
-        cards.append(('Max Latency', f"{logs_df['Latency (ms)'].max():.2f}", 'ms', '#e8710a', ''))
+        avg_latency = (
+            (memtier_totals_df['latency_avg_ms'] * memtier_totals_df['throughput_avg']).sum()
+            / memtier_totals_df['throughput_avg'].sum()
+        )
+        cards.append(('Avg Latency', f"{avg_latency:.2f}", 'ms', '#e8710a', ''))
+        cards.append(('Max Latency', f"{memtier_minute_df['latency_max'].max():.2f}", 'ms', '#e8710a', ''))
 
-        if 'Bandwidth_KBs' in logs_df.columns and logs_df['Bandwidth_KBs'].notna().any():
-            avg_bw = logs_df['Bandwidth_KBs'].mean()
-            if avg_bw >= 1024:
-                bw_str, bw_unit = f"{avg_bw / 1024:.2f}", 'MB/s'
-            else:
-                bw_str, bw_unit = f"{avg_bw:.0f}", 'KB/s'
-            cards.append(('Avg Bandwidth', bw_str, bw_unit, '#0097a7',
-                          'Average network throughput reported by memtier.'))
-
-        active_min = (logs_df['Timestamp'].max() - logs_df['Timestamp'].min()).total_seconds() / 60
-        cards.append(('Active Load Window', f"{active_min:.0f}", 'min', '#5c6bc0',
-                      'Time with measurable benchmark traffic (ops/sec stats window). '
-                      'Excludes silent key pre-population phase.'))
-
-        process_start_ts = extra_stats.get('process_start_ts')
-        if process_start_ts is not None:
-            bench_start = logs_df['Timestamp'].min()
-            ps = process_start_ts
-            if hasattr(ps, 'tzinfo') and ps.tzinfo is not None:
-                ps = ps.replace(tzinfo=None)
-            bs = bench_start
-            if hasattr(bs, 'tzinfo') and bs.tzinfo is not None:
-                bs = bs.replace(tzinfo=None)
-            prefill_min = (bs - ps).total_seconds() / 60
-            cards.append(('Pre-fill Duration', f"{prefill_min:.0f}", 'min', '#78909c',
-                          'Time memtier spent silently loading keys before benchmark traffic began. '
-                          'Scales with keyspace size relative to instance memory.'))
+        total_bw = memtier_totals_df['total_bandwidth_kbs'].sum()
+        if total_bw >= 1024:
+            bw_str, bw_unit = f"{total_bw / 1024:.2f}", 'MB/s'
+        else:
+            bw_str, bw_unit = f"{total_bw:.0f}", 'KB/s'
+        cards.append(('Total Bandwidth', bw_str, bw_unit, '#0097a7',
+                      'Total network throughput reported by memtier totals artifacts.'))
 
     # ---- ECS CPU / Memory ----
     if not ecs_df.empty:
@@ -117,29 +125,23 @@ def stat_cards_html(logs_df, metrics_df, ecs_df, extra_stats=None, config=None):
             cards.append(('Engine CPU Peak', f"{eng_cpu_df['Value'].max():.1f}", '%', '#e65100',
                           'Peak Redis engine thread CPU utilization. More precise than host CPU for burstable T-type instances.'))
 
-    # ---- Cache Hit Rate (benchmark window) ----
-    if not metrics_df.empty and not logs_df.empty:
+    # ---- Cache Hit Rate (report window) ----
+    if not metrics_df.empty:
         hr_df = cache_hit_rate_df(metrics_df)
         if not hr_df.empty:
-            bench_start = logs_df['Timestamp'].min()
-            hr_ts = hr_df['Timestamp']
-            if hr_ts.dt.tz is not None:
-                hr_ts = hr_ts.dt.tz_localize(None)
-            avg_hr = hr_df[hr_ts >= bench_start]['Value'].mean()
-            if pd.isna(avg_hr):
-                avg_hr = hr_df['Value'].mean()
+            avg_hr = hr_df['Value'].mean()
             hr_color = '#188038' if avg_hr >= 90 else ('#e8710a' if avg_hr >= 70 else '#d93025')
             cards.append(('Cache Hit Rate', f"{avg_hr:.1f}", '%', hr_color,
-                          'Avg Redis CacheHitRate during benchmark window. <70% = significant misses/evictions.'))
+                          'Avg Redis CacheHitRate in the report window. <70% = significant misses/evictions.'))
 
     # ---- Total Evictions (CloudWatch) ----
     if not metrics_df.empty:
-        ev_df = metric_filter(metrics_df, 'Evictions', 'Sum', 'CacheClusterId')
+        ev_df = cloudwatch_eviction_series(metrics_df, cluster_id)
         if not ev_df.empty:
             total_ev = int(ev_df['Value'].sum())
             ev_color = '#188038' if total_ev == 0 else '#d93025'
             cards.append(('Total Evictions', f"{total_ev:,}", '', ev_color,
-                          'Total Redis key evictions reported by CloudWatch. Confirms OOM log data.'))
+                          'Total Redis key evictions reported by CloudWatch.'))
 
     # ---- FreeableMemory minimum ----
     if not metrics_df.empty:
@@ -157,22 +159,53 @@ def stat_cards_html(logs_df, metrics_df, ecs_df, extra_stats=None, config=None):
             cards.append(('Peak Key Count', f"{int(items_df['Value'].max()):,}", '', '#546e7a',
                           'Peak number of keys in cache. Drops below expected if eviction removed keys.'))
 
-    # ---- Time to first eviction (OOM) ----
-    first_eviction_ts = extra_stats.get('first_eviction_ts')
-    if first_eviction_ts is not None and not logs_df.empty:
-        bench_start = logs_df['Timestamp'].min()
+    # ---- CloudWatch eviction timing ----
+    ev_df = cloudwatch_eviction_series(metrics_df, cluster_id)
+    first_eviction_ts = first_positive_timestamp(ev_df)
+    if first_eviction_ts is not None:
         fets = first_eviction_ts
         if hasattr(fets, 'tzinfo') and fets.tzinfo is not None:
             fets = fets.replace(tzinfo=None)
-        delta_min = (fets - bench_start).total_seconds() / 60
-        offset_str = f" (+{delta_min:.0f} min)" if delta_min > 0 else ""
-        oom_label = f"{fets.strftime('%H:%M')} UTC{offset_str}"
-        oom_color = '#d93025'
-        oom_tip = 'Approximate time the Redis instance first ran out of memory. "+N min" is relative to benchmark start.'
+        first_message_ts = extra_stats.get('first_message_ts')
+        if first_message_ts is not None:
+            fmts = pd.Timestamp(first_message_ts)
+            if fmts.tzinfo is not None:
+                fmts = fmts.tz_convert(None)
+            eviction_label = _format_elapsed(fets - fmts)
+            eviction_tip = (
+                'Elapsed time from report start to the first positive CloudWatch '
+                f"Evictions datapoint. Event timestamp: {fets.strftime('%Y-%m-%d %H:%M:%S')} UTC."
+            )
+        else:
+            eviction_label = 'Unavailable'
+            eviction_tip = (
+                'Report start timestamp unavailable; first positive CloudWatch '
+                f"Evictions datapoint occurred at {fets.strftime('%Y-%m-%d %H:%M:%S')} UTC."
+            )
+        eviction_color = '#d93025'
     else:
-        oom_label, oom_color = 'None', '#188038'
-        oom_tip = 'No -OOM rejections. The instance had sufficient memory for the entire benchmark.'
-    cards.append(('First Eviction', oom_label, '', oom_color, oom_tip))
+        eviction_label, eviction_color = 'None', '#188038'
+        eviction_tip = 'No positive CloudWatch Evictions datapoints in the report window.'
+    cards.append(('First Eviction', eviction_label, '', eviction_color, eviction_tip))
+
+    # ---- Memtier OOM rejections ----
+    oom_df = extra_stats.get('oom_df')
+    oom_count = int(oom_df['OOM_events'].sum()) if oom_df is not None and not oom_df.empty else 0
+    oom_color = '#d93025' if oom_count else '#188038'
+    cards.append(('OOM Rejections', f"{oom_count:,}", '', oom_color,
+                  'Count of memtier log events containing -OOM command not allowed.'))
+
+    first_oom_ts = extra_stats.get('first_oom_rejection_ts')
+    if first_oom_ts is not None:
+        fots = first_oom_ts
+        if hasattr(fots, 'tzinfo') and fots.tzinfo is not None:
+            fots = fots.replace(tzinfo=None)
+        oom_label = f"{fots.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        oom_tip = 'Absolute timestamp of the first memtier -OOM command rejection.'
+    else:
+        oom_label = 'None'
+        oom_tip = 'No memtier -OOM command rejections in the report window.'
+    cards.append(('First OOM Rejection', oom_label, '', oom_color, oom_tip))
 
     if not cards:
         return ''

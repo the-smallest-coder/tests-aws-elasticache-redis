@@ -1,67 +1,89 @@
 """Parsers for memtier benchmark logs and CloudWatch metrics CSVs."""
 
+import json
 import re
 from io import StringIO
 
 import pandas as pd
 
 
-def parse_memtier_logs(log_content):
+def _sort_preserving_parse_order(df, keys):
+    """Sort parsed rows while keeping input order for equal sort keys."""
+    ordered = df.assign(_parse_order=range(len(df)))
+    return (
+        ordered.sort_values([*keys, '_parse_order'])
+        .drop(columns='_parse_order')
+        .reset_index(drop=True)
+    )
+
+
+def _event_timestamp_ms_to_datetime(timestamp):
+    if timestamp is None:
+        return None
+    try:
+        ts = pd.to_datetime(int(timestamp), unit='ms', utc=True)
+    except Exception:
+        return None
+    return ts.tz_convert('UTC').tz_localize(None)
+
+
+def _iter_cloudwatch_memtier_lines(log_content, source_stream=None):
+    """Yield (absolute_timestamp, stream, message, raw_line) from raw JSONL or legacy text exports."""
+    # Legacy export format: [2026-03-07T10:13:12.212000] [stream/name] rest-of-message
+    legacy_header = re.compile(r'^\[([\d\-T:\.]+)\] \[([^\]]+)\] (.*)', re.DOTALL)
+
+    for raw_line in log_content.split('\n'):
+        if not raw_line:
+            continue
+
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            event = None
+
+        if isinstance(event, dict) and 'timestamp' in event and 'message' in event:
+            ts = _event_timestamp_ms_to_datetime(event.get('timestamp'))
+            if ts is None:
+                continue
+            yield ts, source_stream or event.get('logStreamName', 'memtier'), str(event.get('message', '')), raw_line
+            continue
+
+        header = legacy_header.match(raw_line)
+        if not header:
+            continue
+        try:
+            ts = pd.to_datetime(header.group(1), format='ISO8601')
+        except Exception:
+            continue
+        if getattr(ts, 'tzinfo', None) is not None:
+            ts = ts.tz_convert('UTC').tz_localize(None)
+        for message in header.group(3).split('\r'):
+            if message:
+                yield ts, header.group(2), message, raw_line
+
+
+def parse_memtier_logs(log_content, source_stream=None):
     """Extract time-series data from memtier benchmark CloudWatch log export.
-
-    CloudWatch batches all per-second memtier progress lines into a single log
-    event, so only the *first* line in each batch carries a ``[CW_TS] [stream]``
-    prefix.  Continuation lines carry no prefix at all.  We therefore track the
-    last-seen (stream, CW ingestion timestamp) and propagate it to continuation
-    lines.  The actual wall-clock time is reconstructed per-stream by computing:
-
-        benchmark_start = max(CW_ingest_ts) - max(N_secs)
-        actual_ts(N)    = benchmark_start + N_secs
 
     Returns a DataFrame with columns: Timestamp, Ops/sec, Latency (ms), Bandwidth_KBs.
     """
-    # ------------------------------------------------------------------ #
-    #  Phase 1 – collect raw records with (stream, cw_ts, n_secs, values) #
-    # ------------------------------------------------------------------ #
-    # Matches: [2026-03-07T10:13:12.212000] [stream/name] rest-of-message
-    _HEADER = re.compile(r'^\[([\d\-T:\.]+)\] \[([^\]]+)\] (.*)', re.DOTALL)
-    # Matches the elapsed-seconds counter: "N secs]" or ", N secs]"
-    _SECS = re.compile(r',\s*(\d+)\s*secs\]')
+    records = []
 
-    raw = []
-    curr_cw_ts = None
-    curr_stream = None
-
-    for line in log_content.split('\n'):
-        header = _HEADER.match(line)
-        if header:
-            curr_cw_ts  = header.group(1)
-            curr_stream = header.group(2)
-            rest        = header.group(3)
-        else:
-            rest = line   # continuation line — reuse last stream/ts
-
-        if curr_cw_ts is None or curr_stream is None:
-            continue
-        if 'ops/sec' not in rest.lower() or 'latency' not in rest.lower():
+    for timestamp, stream, message, _raw_line in _iter_cloudwatch_memtier_lines(log_content, source_stream):
+        if 'ops/sec' not in message.lower() or 'latency' not in message.lower():
             continue
 
-        secs_match = _SECS.search(rest)
-        if not secs_match:
-            continue
-        n_secs = int(secs_match.group(1))
-
-        ops_match = re.search(r'\(avg:\s*([\d\.]+)\)\s*ops/sec', rest)
+        ops_match = re.search(r'\(avg:\s*([\d\.]+)\)\s*ops/sec', message)
         if not ops_match:
-            ops_match = re.search(r'([\d\.]+)\s*ops/sec', rest)
+            ops_match = re.search(r'([\d\.]+)\s*ops/sec', message)
         ops_sec = float(ops_match.group(1)) if ops_match else None
 
-        lat_match = re.search(r'\(avg:\s*([\d\.]+)\)\s*msec latency', rest)
+        lat_match = re.search(r'\(avg:\s*([\d\.]+)\)\s*msec latency', message)
         if not lat_match:
-            lat_match = re.search(r'([\d\.]+)\s*msec latency', rest)
+            lat_match = re.search(r'([\d\.]+)\s*msec latency', message)
         latency = float(lat_match.group(1)) if lat_match else None
 
-        bw_match = re.search(r'\(avg:\s*([\d\.]+)(KB|MB)/sec\)', rest)
+        bw_match = re.search(r'\(avg:\s*([\d\.]+)(KB|MB)/sec\)', message)
         if bw_match:
             bw_val = float(bw_match.group(1))
             bw_kbs = bw_val * 1024 if bw_match.group(2) == 'MB' else bw_val
@@ -69,83 +91,84 @@ def parse_memtier_logs(log_content):
             bw_kbs = None
 
         if ops_sec is not None and latency is not None:
-            raw.append({
-                'Stream':         curr_stream,
-                'CW_TS':          curr_cw_ts,
-                'N_secs':         n_secs,
+            records.append({
+                'Timestamp':      timestamp,
+                'Stream':         stream,
                 'Ops/sec':        ops_sec,
                 'Latency (ms)':   latency,
                 'Bandwidth_KBs':  bw_kbs,
             })
 
-    if not raw:
+    if not records:
         return pd.DataFrame()
-
-    # ------------------------------------------------------------------ #
-    #  Phase 2 – reconstruct wall-clock timestamps per stream             #
-    # ------------------------------------------------------------------ #
-    df_raw = pd.DataFrame(raw)
-    df_raw['CW_TS'] = pd.to_datetime(df_raw['CW_TS'], format='ISO8601')
-
-    records = []
-    for stream, grp in df_raw.groupby('Stream'):
-        max_cw_ts      = grp['CW_TS'].max()
-        max_n_secs     = grp['N_secs'].max()
-        benchmark_start = max_cw_ts - pd.Timedelta(seconds=int(max_n_secs))
-        for _, row in grp.iterrows():
-            records.append({
-                'Timestamp':      benchmark_start + pd.Timedelta(seconds=int(row['N_secs'])),
-                'Ops/sec':        row['Ops/sec'],
-                'Latency (ms)':   row['Latency (ms)'],
-                'Bandwidth_KBs':  row['Bandwidth_KBs'],
-            })
 
     df = pd.DataFrame(records)
     if not df.empty:
         df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+        df = _sort_preserving_parse_order(df, ['Timestamp', 'Stream'])
     return df
 
+def parse_memtier_final_totals(log_content, source_stream=None):
+    """Extract the last per-stream memtier ``Totals`` row, if one exists."""
+    totals = []
+    totals_re = re.compile(
+        r'^Totals\s+([\d.]+)\s+[\d.]+\s+[\d.]+\s+([\d.]+)\s+'
+        r'([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$'
+    )
+    for timestamp, stream, message, _raw_line in _iter_cloudwatch_memtier_lines(log_content, source_stream):
+        match = totals_re.match(message)
+        if match:
+            totals.append({
+                'Timestamp': timestamp,
+                'Stream': stream,
+                'Ops/sec': float(match.group(1)),
+                'Latency (ms)': float(match.group(2)),
+                'p50 Latency (ms)': float(match.group(3)),
+                'p99 Latency (ms)': float(match.group(4)),
+                'p999 Latency (ms)': float(match.group(5)),
+                'Bandwidth_KBs': float(match.group(6)),
+            })
+    if not totals:
+        return pd.DataFrame()
+    totals_df = _sort_preserving_parse_order(pd.DataFrame(totals), ['Stream', 'Timestamp'])
+    return totals_df.groupby('Stream', as_index=False).tail(1)
 
-def parse_memtier_extra_stats(log_content):
-    """Extract scalar statistics and per-minute OOM series from raw memtier log.
 
+def parse_memtier_extra_stats(log_content, source_stream=None):
+    """Extract scalar statistics and OOM events from raw memtier log.
     Returns a dict with:
-      process_start_ts   – datetime of the very first CloudWatch log entry
-      first_eviction_ts  – datetime of first -OOM line
-      oom_df             – DataFrame [Timestamp, OOM_per_min] (1-min buckets)
+      first_message_ts   – datetime of the very first memtier log message
+      last_message_ts    – datetime of the very last memtier log message
+      first_oom_rejection_ts – datetime of first -OOM line
+      oom_df             – DataFrame [Timestamp, OOM_events] using the event log timestamp
     """
-    ts_pat = re.compile(r'^\[([\d\-T:\.]+)\]')
-    last_ts = None
-    process_start_ts = None
-    first_eviction_ts = None
+    first_message_ts = None
+    last_message_ts = None
+    first_oom_rejection_ts = None
     oom_events = []
 
-    for line in log_content.splitlines():
-        m = ts_pat.match(line)
-        if m:
-            try:
-                last_ts = pd.to_datetime(m.group(1), format='ISO8601')
-                if process_start_ts is None:
-                    process_start_ts = last_ts
-            except Exception:
-                pass
-        if '-OOM command not allowed' in line and last_ts is not None:
-            if first_eviction_ts is None:
-                first_eviction_ts = last_ts
-            oom_events.append(last_ts)
+    for ts, _stream, message, raw_line in _iter_cloudwatch_memtier_lines(log_content, source_stream):
+        if first_message_ts is None or ts < first_message_ts:
+            first_message_ts = ts
+        if last_message_ts is None or ts > last_message_ts:
+            last_message_ts = ts
+        if '-OOM command not allowed' in message or '-OOM command not allowed' in raw_line:
+            if first_oom_rejection_ts is None or ts < first_oom_rejection_ts:
+                first_oom_rejection_ts = ts
+            oom_events.append(ts)
 
     if oom_events:
-        oom_series = pd.Series([1] * len(oom_events), index=pd.DatetimeIndex(oom_events))
-        oom_df = oom_series.resample('1min').sum().rename('OOM_per_min').reset_index()
-        oom_df.columns = ['Timestamp', 'OOM_per_min']
+        oom_df = pd.DataFrame({'Timestamp': pd.to_datetime(oom_events), 'OOM_events': 1})
         if oom_df['Timestamp'].dt.tz is not None:
             oom_df['Timestamp'] = oom_df['Timestamp'].dt.tz_localize(None)
+        oom_df = oom_df.groupby('Timestamp', as_index=False)['OOM_events'].sum()
     else:
-        oom_df = pd.DataFrame(columns=['Timestamp', 'OOM_per_min'])
+        oom_df = pd.DataFrame(columns=['Timestamp', 'OOM_events'])
 
     return {
-        'process_start_ts': process_start_ts,
-        'first_eviction_ts': first_eviction_ts,
+        'first_message_ts': first_message_ts,
+        'last_message_ts': last_message_ts,
+        'first_oom_rejection_ts': first_oom_rejection_ts,
         'oom_df': oom_df,
     }
 
@@ -164,4 +187,5 @@ def parse_metrics_csv(csv_content):
     if not df.empty:
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], format='ISO8601', utc=True)
         df['Timestamp'] = df['Timestamp'].dt.tz_localize(None)
+        df = df.sort_values(['Timestamp', 'Namespace', 'MetricName', 'Stat', 'Dimensions']).reset_index(drop=True)
     return df

@@ -110,6 +110,93 @@ def cache_hit_rate_df(df):
     return merged[['Timestamp', 'Namespace', 'MetricName', 'Stat', 'Value', 'Unit', 'Dimensions']]
 
 
+def cloudwatch_eviction_series(df, cluster_id=None):
+    """Return one CloudWatch Evictions series without mixing aggregate and node rows."""
+    evictions = metric_filter(df, 'Evictions', 'Sum', 'CacheClusterId')
+    if evictions.empty:
+        return evictions
+
+    dimensions = evictions['Dimensions'].astype(str)
+    if cluster_id:
+        exact_dimension = f'CacheClusterId={cluster_id}'
+        cluster_prefix = f'{exact_dimension}-'
+        candidates = evictions[
+            dimensions.eq(exact_dimension)
+            | dimensions.str.startswith(f'{exact_dimension};')
+            | dimensions.str.startswith(cluster_prefix)
+        ]
+        if candidates.empty:
+            return candidates
+        candidate_dims = candidates['Dimensions'].astype(str)
+        aggregate = candidates[candidate_dims == exact_dimension]
+        if aggregate.empty:
+            # Non-cluster ElastiCache metrics use node-scoped CacheClusterId values
+            # like "<replication-group>-001". If a bare aggregate series exists for
+            # one of those IDs, keep exactly that series instead of also summing
+            # CacheNodeId rows.
+            bare_rows = candidates[candidate_dims.str.match(r'^CacheClusterId=[^;]+$')]
+            bare_ids = bare_rows['Dimensions'].unique()
+            aggregate = bare_rows if len(bare_ids) == 1 else bare_rows.iloc[0:0]
+        node_rows = candidates[candidate_dims.str.contains(';CacheNodeId=')]
+    else:
+        aggregate_mask = dimensions.str.match(r'^CacheClusterId=[^;]+$')
+        aggregate = evictions[aggregate_mask]
+        node_rows = evictions[~aggregate_mask]
+
+    selected = aggregate if not aggregate.empty else node_rows
+    if selected.empty:
+        return selected
+
+    series = selected.groupby('Timestamp', as_index=False)['Value'].sum()
+    series['Namespace'] = 'AWS/ElastiCache'
+    series['MetricName'] = 'Evictions'
+    series['Stat'] = 'Sum'
+    series['Unit'] = selected['Unit'].iloc[0] if 'Unit' in selected else 'Count'
+    series['Dimensions'] = f'CacheClusterId={cluster_id}' if cluster_id else 'selected_eviction_series'
+    return series[['Timestamp', 'Namespace', 'MetricName', 'Stat', 'Value', 'Unit', 'Dimensions']]
+
+
+def first_positive_timestamp(df):
+    """Return the first absolute timestamp with a positive Value."""
+    if df.empty:
+        return None
+    positive = df[df['Value'] > 0]
+    return None if positive.empty else positive['Timestamp'].min()
+
+
+def aggregate_memtier_progress(df):
+    """Aggregate per-stream progress samples at exact CloudWatch event timestamps."""
+    if df.empty:
+        return pd.DataFrame()
+    per_task = df.groupby(["Timestamp", "Stream"], as_index=False).agg({
+        "Ops/sec": "mean",
+        "Latency (ms)": "mean",
+    })
+    rows = []
+    for timestamp, group in per_task.groupby("Timestamp"):
+        ops = group["Ops/sec"]
+        latency = group["Latency (ms)"]
+        total_ops = float(ops.sum())
+        rows.append({
+            "Timestamp": timestamp,
+            "Overall Ops/sec": total_ops,
+            "Overall Latency (ms)": float((latency * ops).sum() / total_ops) if total_ops else 0.0,
+            "Ops median": float(ops.median()),
+            "Ops average": float(ops.mean()),
+            "Ops p10": float(ops.quantile(0.10)),
+            "Ops p90": float(ops.quantile(0.90)),
+            "Ops min": float(ops.min()),
+            "Ops max": float(ops.max()),
+            "Latency median": float(latency.median()),
+            "Latency average": float(latency.mean()),
+            "Latency p10": float(latency.quantile(0.10)),
+            "Latency p90": float(latency.quantile(0.90)),
+            "Latency min": float(latency.min()),
+            "Latency max": float(latency.max()),
+        })
+    return pd.DataFrame(rows).sort_values("Timestamp").reset_index(drop=True)
+
+
 def shorten_dim(dim, cluster_id=''):
     """Return a concise label from a CloudWatch Dimensions string.
 
@@ -154,12 +241,3 @@ def select_mem_dims(dim_series, node_count):
         return aggregate if aggregate else unique
     else:
         return per_shard if per_shard else aggregate
-
-
-def resample_logs(logs_df, rule='1min'):
-    """Resample memtier log data to *rule* intervals using mean."""
-    if logs_df.empty:
-        return logs_df
-    df = logs_df.set_index('Timestamp').sort_index()
-    df = df.resample(rule).mean().dropna().reset_index()
-    return df

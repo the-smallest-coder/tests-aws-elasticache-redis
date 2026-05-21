@@ -48,7 +48,7 @@ Lambda deps are `boto3` only (built-in to Lambda runtime). Reporter deps are in 
 ### Naming
 - **Cluster ID**: `{project_name}-{engine_type}-{last-8-digits-of-timestamp}`. Keep `project_name` short enough that the full ID stays within ElastiCache's 40-character limit; only the timestamp is shortened.
 - **Run folders**: `results/YYYYmmdd-HHMMSS/`
-- **S3 paths**: `{s3_prefix}/{timestamp}/metrics/{cluster_id}.csv` and `{cluster_id}-ecs.csv`, `logs/{cluster_id}.txt`
+- **S3 paths**: `{s3_prefix}/{timestamp}/metrics/{cluster_id}.csv` and `{cluster_id}-ecs.csv`, `logs/loadgen/{stream}.txt`
 - **CloudWatch log groups**: `/aws/elasticache/{cluster_id}`, `/aws/ecs/{cluster_id}/loadgen`
 
 ### Metrics CSV format
@@ -56,6 +56,13 @@ Lambda deps are `boto3` only (built-in to Lambda runtime). Reporter deps are in 
 Timestamp,Namespace,MetricName,Stat,Value,Unit,Dimensions
 ```
 Produced by `lambda/shutdown.py`; consumed by `reporter/report_ecs.py`.
+
+### Report time requirements
+- **All report times are absolute timestamps only.**
+- **Reporting window start** is the absolute timestamp of the very first memtier log message across all memtier log streams.
+- **Reporting window end** is the absolute timestamp of the very latest memtier log message across all memtier log streams.
+- Every plotted and reported datapoint must use the absolute timestamp attached to its log or metric record.
+- No relative offsets, reconstructed timestamps, duration-derived windows, "N seconds/minutes after start", prefill windows, or active-window interpretations are allowed anywhere in reports.
 
 ### results_local.json structure
 Nested dict with top-level keys: `meta`, `benchmark`, `cache_efficiency`, `engine_cpu`, `memory`, `network`, `latency_server_us`, `connections`, `ecs`. Metric specs in `report_compare.py` use tuple paths e.g. `("benchmark", "avg_ops")` resolved via `get_nested()` in `report_common.py`.

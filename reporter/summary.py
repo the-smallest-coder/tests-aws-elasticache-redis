@@ -1,8 +1,12 @@
 """Build a structured summary dict suitable for JSON serialisation and comparison reports."""
 
-import pandas as pd
-
-from helpers import metric_filter, cache_hit_rate_df, select_mem_dims
+from helpers import (
+    metric_filter,
+    cache_hit_rate_df,
+    select_mem_dims,
+    cloudwatch_eviction_series,
+    first_positive_timestamp,
+)
 
 
 def _safe(val, decimals=None):
@@ -40,7 +44,7 @@ def _metric_agg(df, metric_name, stat, dim_prefix=None):
     }
 
 
-def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, time_range):
+def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extra_stats, config, cluster_id, time_range):
     """Return a fully-populated summary dict ready for json.dumps().
 
     Schema
@@ -48,9 +52,10 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
     {
       "meta": { cluster_id, time_range, engine_type, engine_version, node_type, node_count, cluster_mode },
       "benchmark": { avg_ops, peak_ops, cv_pct, avg_latency_ms, max_latency_ms,
-                     avg_bandwidth_kbs, active_window_min, prefill_min },
+                     avg_bandwidth_kbs },
       "cache_efficiency": { avg_hit_rate_pct, total_evictions, min_freeable_memory_mb, peak_key_count,
-                            first_eviction_offset_min },
+                            first_eviction_ts },
+      "oom": { rejection_count, first_rejection_ts },
       "engine_cpu": { avg_pct, max_pct, credit_balance_avg, credit_usage_avg },
       "memory": { avg_usage_pct, max_usage_pct, headroom_pct, fragmentation_avg },
       "network": {
@@ -77,40 +82,35 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
         'node_count':      config.get('node_count', ''),
         'cluster_mode':    str(config.get('cluster_mode', 'false')).lower(),
     }
+    first_message_ts = extra_stats.get('first_message_ts')
+    last_message_ts = extra_stats.get('last_message_ts')
+    if first_message_ts is not None:
+        meta['report_start'] = _safe(first_message_ts)
+    if last_message_ts is not None:
+        meta['report_end'] = _safe(last_message_ts)
 
     # ------------------------------------------------------------------ #
     #  benchmark (memtier logs)                                            #
     # ------------------------------------------------------------------ #
     benchmark = {}
-    if not logs_df.empty:
-        ops = logs_df['Ops/sec']
-        lat = logs_df['Latency (ms)']
-        avg_ops = float(ops.mean())
+    if not memtier_minute_df.empty and not memtier_totals_df.empty:
+        ops = memtier_minute_df['throughput_sum']
+        lat = memtier_minute_df['latency_weighted_avg']
+        avg_ops = float(memtier_totals_df['throughput_avg'].sum())
         benchmark['avg_ops']         = _safe(avg_ops, 1)
         benchmark['peak_ops']        = _safe(float(ops.max()), 1)
         benchmark['cv_pct']          = _safe(float(ops.std() / avg_ops * 100) if avg_ops > 0 else 0.0, 2)
-        benchmark['avg_latency_ms']  = _safe(float(lat.mean()), 3)
-        benchmark['max_latency_ms']  = _safe(float(lat.max()), 3)
+        weighted_latency = (
+            memtier_totals_df['latency_avg_ms'] * memtier_totals_df['throughput_avg']
+        ).sum() / memtier_totals_df['throughput_avg'].sum()
+        benchmark['avg_latency_ms'] = _safe(float(weighted_latency), 3)
+        benchmark['max_latency_ms']  = _safe(float(memtier_minute_df['latency_max'].max()), 3)
         benchmark['p95_latency_ms']  = _percentile(lat, 95)
         benchmark['p99_latency_ms']  = _percentile(lat, 99)
 
-        if 'Bandwidth_KBs' in logs_df.columns and logs_df['Bandwidth_KBs'].notna().any():
-            benchmark['avg_bandwidth_kbs'] = _safe(float(logs_df['Bandwidth_KBs'].mean()), 2)
-
-        ts = logs_df['Timestamp']
-        benchmark['active_window_min'] = _safe(
-            float((ts.max() - ts.min()).total_seconds() / 60), 1)
-
-        process_start_ts = extra_stats.get('process_start_ts')
-        if process_start_ts is not None:
-            bench_start = ts.min()
-            ps = process_start_ts
-            if hasattr(ps, 'tzinfo') and ps.tzinfo is not None:
-                ps = ps.replace(tzinfo=None)
-            bs = bench_start
-            if hasattr(bs, 'tzinfo') and bs.tzinfo is not None:
-                bs = bs.replace(tzinfo=None)
-            benchmark['prefill_min'] = _safe(float((bs - ps).total_seconds() / 60), 1)
+        total_bandwidth = float(memtier_totals_df['total_bandwidth_kbs'].sum())
+        benchmark['total_bandwidth_kbs'] = _safe(total_bandwidth, 2)
+        benchmark['avg_bandwidth_kbs'] = _safe(total_bandwidth, 2)
 
     # ------------------------------------------------------------------ #
     #  cache_efficiency                                                    #
@@ -120,19 +120,11 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
         # Hit rate
         hr_df = cache_hit_rate_df(metrics_df)
         if not hr_df.empty:
-            if not logs_df.empty:
-                bench_start = logs_df['Timestamp'].min()
-                hr_ts = hr_df['Timestamp']
-                if hr_ts.dt.tz is not None:
-                    hr_ts = hr_ts.dt.tz_localize(None)
-                bench_vals = hr_df[hr_ts >= bench_start]['Value']
-                avg_hr = float(bench_vals.mean()) if not bench_vals.empty else float(hr_df['Value'].mean())
-            else:
-                avg_hr = float(hr_df['Value'].mean())
+            avg_hr = float(hr_df['Value'].mean())
             cache_efficiency['avg_hit_rate_pct'] = _safe(avg_hr, 2)
 
         # Evictions
-        ev_df = metric_filter(metrics_df, 'Evictions', 'Sum', 'CacheClusterId')
+        ev_df = cloudwatch_eviction_series(metrics_df, cluster_id)
         if not ev_df.empty:
             cache_efficiency['total_evictions'] = int(ev_df['Value'].sum())
 
@@ -147,20 +139,14 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
         if not items_df.empty:
             cache_efficiency['peak_key_count'] = int(items_df['Value'].max())
 
-    # First eviction offset
-    first_eviction_ts = extra_stats.get('first_eviction_ts')
-    if first_eviction_ts is not None and not logs_df.empty:
-        bench_start = logs_df['Timestamp'].min()
-        fets = first_eviction_ts
-        if hasattr(fets, 'tzinfo') and fets.tzinfo is not None:
-            fets = fets.replace(tzinfo=None)
-        bs = bench_start
-        if hasattr(bs, 'tzinfo') and bs.tzinfo is not None:
-            bs = bs.replace(tzinfo=None)
-        cache_efficiency['first_eviction_offset_min'] = _safe(
-            float((fets - bs).total_seconds() / 60), 1)
-    else:
-        cache_efficiency['first_eviction_offset_min'] = None
+    ev_df = cloudwatch_eviction_series(metrics_df, cluster_id)
+    cache_efficiency['first_eviction_ts'] = _safe(first_positive_timestamp(ev_df))
+
+    oom_df = extra_stats.get('oom_df')
+    oom = {
+        'rejection_count': int(oom_df['OOM_events'].sum()) if oom_df is not None and not oom_df.empty else 0,
+        'first_rejection_ts': _safe(extra_stats.get('first_oom_rejection_ts')),
+    }
 
     # ------------------------------------------------------------------ #
     #  engine_cpu                                                          #
@@ -275,6 +261,7 @@ def build_summary(metrics_df, logs_df, ecs_df, extra_stats, config, cluster_id, 
         'meta':               meta,
         'benchmark':          benchmark,
         'cache_efficiency':   cache_efficiency,
+        'oom':                oom,
         'engine_cpu':         engine_cpu,
         'memory':             memory,
         'network':            network,
