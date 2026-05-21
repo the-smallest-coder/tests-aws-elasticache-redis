@@ -325,6 +325,57 @@ def _read_local_memtier_artifact_contents(logs_dir: Path) -> list[tuple[str, str
     return [(str(path), path.read_text(encoding="utf-8")) for path in files]
 
 
+def _memtier_dfs_from_log_entries(log_entries: list[tuple[str, str]]):
+    """Build memtier minute/totals DataFrames in-memory when ETL sidecar files are absent."""
+    import pandas as pd
+    from memtier_etl import generate_memtier_dataframes
+
+    pairs = [
+        (_memtier_stream_from_source(source), content)
+        for source, content in log_entries
+        if _is_memtier_log_entry(source)
+    ]
+    if not pairs:
+        return (
+            pd.DataFrame(columns=list(_MINUTE_COLUMN_ALIASES)),
+            pd.DataFrame(columns=["source", *_TOTAL_FIELD_ALIASES]),
+        )
+
+    combined_df, totals_list = generate_memtier_dataframes(pairs)
+
+    # Align to _load_memtier_artifacts output: rename minute_utc → Timestamp, strip tz
+    if not combined_df.empty:
+        if "minute_utc" in combined_df.columns:
+            combined_df = combined_df.rename(columns={"minute_utc": "Timestamp"})
+        combined_df["Timestamp"] = pd.to_datetime(combined_df["Timestamp"], utc=True).dt.tz_localize(None)
+
+    canonical_cols = list(_MINUTE_COLUMN_ALIASES)
+    if combined_df.empty:
+        combined_df = pd.DataFrame(columns=canonical_cols)
+    else:
+        combined_df = combined_df[[c for c in canonical_cols if c in combined_df.columns]]
+        combined_df = combined_df.sort_values("Timestamp").reset_index(drop=True)
+
+    totals_rows = [
+        {
+            "source": p["stream_id"],
+            "throughput_avg": float(p["ops_per_sec"]),
+            "latency_avg_ms": float(p["avg_latency_ms"]),
+            "total_bandwidth_kbs": float(p["bandwidth_kbs"]),
+        }
+        for p in totals_list
+    ]
+    totals_cols = ["source", *_TOTAL_FIELD_ALIASES]
+    if totals_rows:
+        totals_df = pd.DataFrame(totals_rows, columns=totals_cols)
+        for col in _TOTAL_FIELD_ALIASES:
+            totals_df[col] = pd.to_numeric(totals_df[col])
+    else:
+        totals_df = pd.DataFrame(columns=totals_cols)
+
+    return combined_df, totals_df
+
+
 def create_report(
     metrics_df,
     logs_df,
@@ -405,6 +456,11 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     ecs_df = parse_metrics_csv(ecs_csvs[0].read_text(encoding="utf-8")) if ecs_csvs else pd.DataFrame()
 
     log_entries = _read_local_log_contents(logs_dir, cluster_id)
+    try:
+        from memtier_etl import generate_memtier_artifacts as _gen_etl
+        _gen_etl(run_path)
+    except Exception as exc:
+        print(f"Warning: memtier ETL generation failed: {exc}")
     artifact_entries = _read_local_memtier_artifact_contents(logs_dir)
     if not log_entries:
         print(f"No log file found in {logs_dir}")
@@ -493,7 +549,10 @@ def run_uploaded_report() -> None:
     print(f"Reading {len(log_entries)} loadgen log file(s)")
     logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
     artifact_entries = _read_uploaded_memtier_artifact_contents(logs_prefix)
-    memtier_minute_df, memtier_totals_df = _load_memtier_artifacts(artifact_entries)
+    if artifact_entries:
+        memtier_minute_df, memtier_totals_df = _load_memtier_artifacts(artifact_entries)
+    else:
+        memtier_minute_df, memtier_totals_df = _memtier_dfs_from_log_entries(log_entries)
 
     ecs_df = pd.DataFrame()
     if ecs_metrics_csv:

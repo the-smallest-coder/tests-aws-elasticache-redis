@@ -11,6 +11,7 @@ locals {
     "template.py",
     "summary.py",
     "exporter.py",
+    "memtier_etl.py",
   ])
 }
 
@@ -120,6 +121,7 @@ modules = [
     "template.py",
     "summary.py",
     "exporter.py",
+    "memtier_etl.py",
 ]
 
 s3 = boto3.client("s3")
@@ -160,7 +162,7 @@ PY
         },
         {
           name  = "ELASTICACHE_ID"
-          value = aws_elasticache_replication_group.main.id
+          value = local.cluster_id
         },
         {
           name  = "ECS_CLUSTER"

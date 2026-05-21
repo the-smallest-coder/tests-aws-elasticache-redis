@@ -207,6 +207,29 @@ def generate_memtier_artifacts(run_dir: Path) -> dict:
     return {"streams": stream_results, "combined": combined_path, "combined_df": combined_df}
 
 
+def generate_memtier_dataframes(log_entries: list[tuple[str, str]]) -> tuple[pd.DataFrame, list[dict]]:
+    """Generate combined minute DataFrame and totals payload list from in-memory log content.
+
+    Args:
+        log_entries: List of (stream_id, content) pairs.
+
+    Returns:
+        (combined_df, totals_list) where combined_df has COMBINED_COLUMNS
+        and totals_list contains _totals_payload dicts.
+    """
+    frames = []
+    totals_list = []
+    for stream_id, content in log_entries:
+        logs_df = parse_memtier_logs(content, stream_id)
+        totals_df = parse_memtier_final_totals(content, stream_id)
+        minute_df = _per_stream_minutes(logs_df, stream_id)
+        frames.append(minute_df)
+        payload = _totals_payload(totals_df, stream_id)
+        if payload is not None:
+            totals_list.append(payload)
+    return _combined_minutes(frames), totals_list
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path, help="Local results run directory.")
