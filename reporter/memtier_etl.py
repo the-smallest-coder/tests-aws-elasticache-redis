@@ -219,14 +219,18 @@ def generate_memtier_dataframes(log_entries: list[tuple[str, str]]) -> tuple[pd.
     """
     frames = []
     totals_list = []
-    for stream_id, content in log_entries:
-        logs_df = parse_memtier_logs(content, stream_id)
-        totals_df = parse_memtier_final_totals(content, stream_id)
-        minute_df = _per_stream_minutes(logs_df, stream_id)
-        frames.append(minute_df)
-        payload = _totals_payload(totals_df, stream_id)
-        if payload is not None:
-            totals_list.append(payload)
+    for fallback_stream_id, content in log_entries:
+        logs_df = parse_memtier_logs(content, fallback_stream_id)
+        if not logs_df.empty:
+            for stream_id, stream_logs_df in logs_df.groupby("Stream", sort=True):
+                frames.append(_per_stream_minutes(stream_logs_df, stream_id))
+
+        totals_df = parse_memtier_final_totals(content, fallback_stream_id)
+        if not totals_df.empty:
+            for stream_id, stream_totals_df in totals_df.groupby("Stream", sort=True):
+                payload = _totals_payload(stream_totals_df, stream_id)
+                if payload is not None:
+                    totals_list.append(payload)
     return _combined_minutes(frames), totals_list
 
 

@@ -207,14 +207,14 @@ def export_metric_sources_to_s3(sources, bucket: str, key: str, start_time: date
     for source in sources:
         namespace = source["namespace"]
         filter_dimensions = source.get("dimensions") or []
-        metric_filter = set(source.get("metric_names", [])) if source.get("metric_names") else None
+        metric_name_filter = set(source.get("metric_names", [])) if source.get("metric_names") else None
 
-        for metric_name in sorted(metric_filter or []):
+        for metric_name in sorted(metric_name_filter or []):
             dims_key = tuple(sorted((d["Name"], d["Value"]) for d in filter_dimensions))
             metric_map[(namespace, metric_name, dims_key)] = filter_dimensions
 
         try:
-            metrics = _list_metrics(namespace, filter_dimensions)
+            metrics = _list_metrics(namespace, filter_dimensions, metric_name_filter)
         except Exception as exc:
             print(f"Error listing metrics for {namespace} {filter_dimensions}: {exc}")
             metrics = []

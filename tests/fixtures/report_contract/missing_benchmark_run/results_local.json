@@ -1,0 +1,54 @@
+{
+  "meta": {
+    "cluster_id": "elasticache-perf-test-redis-01083934",
+    "time_range": "2026-05-01 08:47 \u2013 09:55 (68 min)",
+    "engine_type": "redis",
+    "engine_version": "7.1",
+    "node_type": "cache.t4g.micro",
+    "node_count": "1",
+    "cluster_mode": "false"
+  },
+  "benchmark": {},
+  "cache_efficiency": {
+    "total_evictions": 0,
+    "min_freeable_memory_mb": 401.6,
+    "peak_key_count": 0,
+    "first_eviction_offset_min": null
+  },
+  "engine_cpu": {
+    "avg_pct": 0.22,
+    "max_pct": 0.28,
+    "credit_balance_avg": 6.02,
+    "credit_balance_min": 2.22,
+    "credit_usage_avg": 0.2455
+  },
+  "memory": {
+    "avg_usage_pct": 1.69,
+    "max_usage_pct": 1.69,
+    "headroom_pct": 98.31,
+    "fragmentation_avg": 2.952,
+    "fragmentation_max": 2.99,
+    "swap_max_bytes": 7483392.0
+  },
+  "network": {
+    "cache": {
+      "avg_out_kbs": 1105.35,
+      "avg_in_kbs": 881.42
+    },
+    "throttling": {
+      "bw_in_exceeded_total": 0,
+      "bw_out_exceeded_total": 0,
+      "pps_exceeded_total": 0
+    }
+  },
+  "latency_server_us": {},
+  "connections": {
+    "avg": 5.0,
+    "max": 5.0
+  },
+  "ecs": {
+    "avg_cpu_pct": 0.0,
+    "max_cpu_pct": 0.0,
+    "peak_mem_mb": 0.0
+  }
+}

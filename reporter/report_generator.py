@@ -156,6 +156,9 @@ def _read_s3_prefix_contents(prefix_uri: str, suffixes: tuple[str, ...]) -> list
 def _read_local_log_contents(logs_dir: Path, cluster_id: str) -> list[tuple[str, str]]:
     loadgen_dir = logs_dir / "loadgen"
     files = sorted(path for path in loadgen_dir.rglob("*.txt") if path.is_file()) if loadgen_dir.exists() else []
+    if not files:
+        legacy_loadgen = logs_dir / f"{cluster_id}.txt"
+        files = [legacy_loadgen] if legacy_loadgen.is_file() else []
 
     return [
         (str(path), path.read_text(encoding="utf-8", errors="replace"))
@@ -173,7 +176,10 @@ def _read_uploaded_memtier_artifact_contents(logs_prefix: str) -> list[tuple[str
 
 def _is_memtier_log_entry(source: str) -> bool:
     normalized = source.replace("\\", "/")
-    return "/logs/loadgen/memtier/" in normalized
+    path = Path(normalized)
+    return "/logs/loadgen/memtier/" in normalized or (
+        path.suffix == ".txt" and path.parent.name == "logs"
+    )
 
 
 def _memtier_stream_from_source(source: str) -> str:
@@ -426,7 +432,15 @@ def create_report(
         id_label=id_label,
         time_range=time_range,
         pills_html=header_pills(config),
-        cards_html=stat_cards_html(memtier_minute_df, memtier_totals_df, metrics_window_df, ecs_window_df, extra_stats, config),
+        cards_html=stat_cards_html(
+            memtier_minute_df,
+            memtier_totals_df,
+            metrics_window_df,
+            ecs_window_df,
+            extra_stats=extra_stats,
+            config=config,
+            cluster_id=cluster_id,
+        ),
         chart_memtier_html=fig_m.to_html(include_plotlyjs="cdn", full_html=False),
         chart_infra_html=fig_i.to_html(include_plotlyjs=False, full_html=False),
         chart_deep_dive_html=fig_d.to_html(include_plotlyjs=False, full_html=False),
@@ -469,7 +483,10 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     else:
         print(f"Reading {len(log_entries)} loadgen log file(s)")
         logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
-    memtier_minute_df, memtier_totals_df = _load_memtier_artifacts(artifact_entries)
+    if artifact_entries:
+        memtier_minute_df, memtier_totals_df = _load_memtier_artifacts(artifact_entries)
+    else:
+        memtier_minute_df, memtier_totals_df = _memtier_dfs_from_log_entries(log_entries)
 
     _warn_if_cache_hit_rate_missing(metrics_df, str(ec_csvs[0]))
 

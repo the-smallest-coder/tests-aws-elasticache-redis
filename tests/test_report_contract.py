@@ -1,13 +1,20 @@
 import json
 import re
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OLD_RUN = ROOT / "results" / "20260227-140039"
-GOOD_RUN = ROOT / "results" / "20260501-063922"
-BAD_RUN = ROOT / "results" / "20260501-083934"
+REPORTER_DIR = str(ROOT / "reporter")
+if REPORTER_DIR not in sys.path:
+    sys.path.insert(0, REPORTER_DIR)
+
+REPORT_CONTRACT_FIXTURES = ROOT / "tests" / "fixtures" / "report_contract"
+OLD_RUN = REPORT_CONTRACT_FIXTURES / "legacy_run"
+GOOD_RUN = REPORT_CONTRACT_FIXTURES / "current_run"
+BAD_RUN = REPORT_CONTRACT_FIXTURES / "missing_benchmark_run"
 
 
 def card_labels(run_dir: Path) -> set[str]:
@@ -47,7 +54,7 @@ class ReportContractTests(unittest.TestCase):
 class MemtierParserTests(unittest.TestCase):
     def test_parser_handles_carriage_return_progress_records(self):
         try:
-            from reporter.parsers import parse_memtier_logs
+            from parsers import parse_memtier_logs
         except ModuleNotFoundError as exc:
             if exc.name == "pandas":
                 self.skipTest("pandas is not installed in this environment")
@@ -69,7 +76,7 @@ class MemtierParserTests(unittest.TestCase):
 
     def test_extra_stats_keep_oom_rejections_separate_from_evictions(self):
         try:
-            from reporter.parsers import parse_memtier_extra_stats
+            from parsers import parse_memtier_extra_stats
         except ModuleNotFoundError as exc:
             if exc.name == "pandas":
                 self.skipTest("pandas is not installed in this environment")
@@ -89,7 +96,7 @@ class EvictionSeriesTests(unittest.TestCase):
     def test_aggregate_evictions_win_over_node_rows(self):
         try:
             import pandas as pd
-            from reporter.helpers import cloudwatch_eviction_series, first_positive_timestamp
+            from helpers import cloudwatch_eviction_series, first_positive_timestamp
         except ModuleNotFoundError as exc:
             if exc.name == "pandas":
                 self.skipTest("pandas is not installed in this environment")
@@ -112,7 +119,7 @@ class EvictionSeriesTests(unittest.TestCase):
     def test_node_evictions_are_summed_when_aggregate_rows_are_absent(self):
         try:
             import pandas as pd
-            from reporter.helpers import cloudwatch_eviction_series
+            from helpers import cloudwatch_eviction_series
         except ModuleNotFoundError as exc:
             if exc.name == "pandas":
                 self.skipTest("pandas is not installed in this environment")
@@ -131,7 +138,7 @@ class EvictionSeriesTests(unittest.TestCase):
     def test_replication_group_id_selects_suffixed_non_cluster_node_rows(self):
         try:
             import pandas as pd
-            from reporter.helpers import cloudwatch_eviction_series
+            from helpers import cloudwatch_eviction_series
         except ModuleNotFoundError as exc:
             if exc.name == "pandas":
                 self.skipTest("pandas is not installed in this environment")
@@ -162,24 +169,19 @@ class EvictionSeriesTests(unittest.TestCase):
 class CardRenderingTests(unittest.TestCase):
     def test_first_eviction_card_shows_elapsed_time_from_report_start(self):
         try:
-            import sys
-
             import pandas as pd
 
-            sys.path.insert(0, str(ROOT / "reporter"))
             from cards import stat_cards_html
         except ModuleNotFoundError as exc:
             if exc.name == "pandas":
                 self.skipTest("pandas is not installed in this environment")
             raise
-        finally:
-            if str(ROOT / "reporter") in sys.path:
-                sys.path.remove(str(ROOT / "reporter"))
 
         empty = pd.DataFrame()
         metrics = pd.DataFrame([
             EvictionSeriesTests._metric("2026-05-01T00:00:00Z", 0, "CacheClusterId=cluster-a"),
             EvictionSeriesTests._metric("2026-05-01T01:02:07Z", 1, "CacheClusterId=cluster-a"),
+            EvictionSeriesTests._metric("2026-05-01T00:15:00Z", 9, "CacheClusterId=cluster-b"),
         ])
         metrics["Timestamp"] = pd.to_datetime(metrics["Timestamp"], utc=True).dt.tz_localize(None)
 
@@ -189,13 +191,68 @@ class CardRenderingTests(unittest.TestCase):
             metrics,
             empty,
             extra_stats={"first_message_ts": pd.Timestamp("2026-05-01T00:00:00Z")},
-            config={"cluster_id": "cluster-a"},
+            config={},
+            cluster_id="cluster-a",
         )
 
         self.assertIn("<div class='card-label'>First Eviction</div>", html)
         self.assertIn("1h 02m 07s", html)
         self.assertIn("Elapsed time from report start", html)
         self.assertIn("2026-05-01 01:02:07 UTC", html)
+
+
+class LocalGenerateLegacyLogTests(unittest.TestCase):
+    def test_reader_falls_back_to_legacy_root_loadgen_log(self):
+        try:
+            from report_generator import _read_local_log_contents
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        with tempfile.TemporaryDirectory() as tmp:
+            logs_dir = Path(tmp) / "logs"
+            logs_dir.mkdir()
+            legacy_log = logs_dir / "cluster-a.txt"
+            legacy_log.write_text("legacy memtier log\n", encoding="utf-8")
+
+            self.assertEqual(
+                _read_local_log_contents(logs_dir, "cluster-a"),
+                [(str(legacy_log), "legacy memtier log\n")],
+            )
+
+    def test_legacy_merged_log_keeps_per_stream_memtier_totals(self):
+        try:
+            from report_generator import _memtier_dfs_from_log_entries, _parse_memtier_log_entries
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        content = (
+            "[2026-05-01T00:00:00] [memtier/memtier/stream-a] "
+            "[RUN #1 1%, 1 secs] 100 (avg: 100) ops/sec, "
+            "1KB/sec (avg: 1KB/sec), 1 (avg: 1) msec latency\n"
+            "[2026-05-01T00:00:01] [memtier/memtier/stream-b] "
+            "[RUN #1 1%, 1 secs] 200 (avg: 200) ops/sec, "
+            "2KB/sec (avg: 2KB/sec), 2 (avg: 2) msec latency\n"
+            "[2026-05-01T00:01:00] [memtier/memtier/stream-a] "
+            "Totals 100 0 0 1 0.5 2 3 10\n"
+            "[2026-05-01T00:01:01] [memtier/memtier/stream-b] "
+            "Totals 200 0 0 2 1.5 3 4 20\n"
+        )
+        entries = [("/tmp/run/logs/cluster-a.txt", content)]
+
+        _logs_df, extra_stats = _parse_memtier_log_entries(entries)
+        memtier_minute_df, memtier_totals_df = _memtier_dfs_from_log_entries(entries)
+
+        self.assertEqual(str(extra_stats["first_message_ts"]), "2026-05-01 00:00:00")
+        self.assertEqual(memtier_minute_df["throughput_sum"].tolist(), [300.0])
+        self.assertEqual(sorted(memtier_totals_df["source"].tolist()), [
+            "memtier/memtier/stream-a",
+            "memtier/memtier/stream-b",
+        ])
+        self.assertEqual(float(memtier_totals_df["throughput_avg"].sum()), 300.0)
 
 
 if __name__ == "__main__":
