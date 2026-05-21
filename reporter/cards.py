@@ -71,7 +71,7 @@ def stat_cards_html(
             / memtier_totals_df['throughput_avg'].sum()
         )
         cards.append(('Avg Latency', f"{avg_latency:.2f}", 'ms', '#e8710a', ''))
-        cards.append(('Max Latency', f"{memtier_minute_df['latency_weighted_avg'].max():.2f}", 'ms', '#e8710a', ''))
+        cards.append(('Max Latency', f"{memtier_minute_df['latency_max'].max():.2f}", 'ms', '#e8710a', ''))
 
         total_bw = memtier_totals_df['total_bandwidth_kbs'].sum()
         if total_bw >= 1024:

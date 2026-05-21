@@ -104,7 +104,7 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
             memtier_totals_df['latency_avg_ms'] * memtier_totals_df['throughput_avg']
         ).sum() / memtier_totals_df['throughput_avg'].sum()
         benchmark['avg_latency_ms'] = _safe(float(weighted_latency), 3)
-        benchmark['max_latency_ms']  = _safe(float(lat.max()), 3)
+        benchmark['max_latency_ms']  = _safe(float(memtier_minute_df['latency_max'].max()), 3)
         benchmark['p95_latency_ms']  = _percentile(lat, 95)
         benchmark['p99_latency_ms']  = _percentile(lat, 99)
 

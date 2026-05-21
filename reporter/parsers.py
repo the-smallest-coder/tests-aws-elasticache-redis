@@ -7,6 +7,16 @@ from io import StringIO
 import pandas as pd
 
 
+def _sort_preserving_parse_order(df, keys):
+    """Sort parsed rows while keeping input order for equal sort keys."""
+    ordered = df.assign(_parse_order=range(len(df)))
+    return (
+        ordered.sort_values([*keys, '_parse_order'])
+        .drop(columns='_parse_order')
+        .reset_index(drop=True)
+    )
+
+
 def _event_timestamp_ms_to_datetime(timestamp):
     if timestamp is None:
         return None
@@ -95,7 +105,7 @@ def parse_memtier_logs(log_content, source_stream=None):
     df = pd.DataFrame(records)
     if not df.empty:
         df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-        df = df.sort_values(['Timestamp', 'Stream']).reset_index(drop=True)
+        df = _sort_preserving_parse_order(df, ['Timestamp', 'Stream'])
     return df
 
 def parse_memtier_final_totals(log_content, source_stream=None):
@@ -120,7 +130,8 @@ def parse_memtier_final_totals(log_content, source_stream=None):
             })
     if not totals:
         return pd.DataFrame()
-    return pd.DataFrame(totals).sort_values(['Stream', 'Timestamp']).groupby('Stream', as_index=False).tail(1)
+    totals_df = _sort_preserving_parse_order(pd.DataFrame(totals), ['Stream', 'Timestamp'])
+    return totals_df.groupby('Stream', as_index=False).tail(1)
 
 
 def parse_memtier_extra_stats(log_content, source_stream=None):

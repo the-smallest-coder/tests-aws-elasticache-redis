@@ -160,8 +160,8 @@ def _combined_minutes(per_stream_frames: list[pd.DataFrame]) -> pd.DataFrame:
                 else 0.0,
                 "latency_avg": float(latency.mean()),
                 "latency_median": float(latency.median()),
-                "latency_min": float(latency.min()),
-                "latency_max": float(latency.max()),
+                "latency_min": float(group["latency_min"].min()),
+                "latency_max": float(group["latency_max"].max()),
                 "latency_p10": float(latency.quantile(0.10)),
                 "latency_p90": float(latency.quantile(0.90)),
             }

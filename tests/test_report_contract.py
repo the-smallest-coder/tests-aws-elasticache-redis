@@ -74,6 +74,24 @@ class MemtierParserTests(unittest.TestCase):
         self.assertEqual(parsed["Ops/sec"].tolist(), [100.0, 150.0])
         self.assertEqual(parsed["Latency (ms)"].tolist(), [1.0, 1.5])
 
+    def test_final_totals_keep_last_record_when_timestamp_ties(self):
+        try:
+            from parsers import parse_memtier_final_totals
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        content = (
+            "[2026-05-01T00:01:00] [memtier/task-a] Totals 100 0 0 1 0.5 2 3 10\n"
+            "[2026-05-01T00:01:00] [memtier/task-a] Totals 200 0 0 2 1.5 3 4 20\n"
+        )
+
+        parsed = parse_memtier_final_totals(content)
+
+        self.assertEqual(parsed["Ops/sec"].tolist(), [200.0])
+        self.assertEqual(parsed["Latency (ms)"].tolist(), [2.0])
+
     def test_extra_stats_keep_oom_rejections_separate_from_evictions(self):
         try:
             from parsers import parse_memtier_extra_stats
@@ -90,6 +108,89 @@ class MemtierParserTests(unittest.TestCase):
         self.assertNotIn("first_eviction_ts", stats)
         self.assertEqual(str(stats["first_oom_rejection_ts"]), "2026-05-01 00:00:10")
         self.assertEqual(int(stats["oom_df"]["OOM_events"].sum()), 2)
+
+
+class MemtierLatencyMaxTests(unittest.TestCase):
+    def test_combined_minutes_keep_progress_latency_max(self):
+        try:
+            from memtier_etl import generate_memtier_dataframes
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        content = (
+            "[2026-05-01T00:00:00] [memtier/stream-a] "
+            "[RUN #1 1%, 1 secs] 100 (avg: 100) ops/sec, "
+            "1KB/sec (avg: 1KB/sec), 1 (avg: 1) msec latency\n"
+            "[2026-05-01T00:00:10] [memtier/stream-a] "
+            "[RUN #1 2%, 2 secs] 100 (avg: 100) ops/sec, "
+            "1KB/sec (avg: 1KB/sec), 9 (avg: 9) msec latency\n"
+            "[2026-05-01T00:00:20] [memtier/stream-b] "
+            "[RUN #1 1%, 1 secs] 100 (avg: 100) ops/sec, "
+            "1KB/sec (avg: 1KB/sec), 6 (avg: 6) msec latency\n"
+        )
+
+        minutes, _totals = generate_memtier_dataframes([("legacy-log", content)])
+
+        self.assertEqual(minutes["latency_weighted_avg"].tolist(), [5.5])
+        self.assertEqual(minutes["latency_max"].tolist(), [9.0])
+
+    def test_max_latency_outputs_use_latency_max(self):
+        try:
+            import pandas as pd
+
+            from cards import stat_cards_html
+            from summary import build_summary
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        empty = pd.DataFrame()
+        minutes = pd.DataFrame([
+            {
+                "throughput_sum": 200.0,
+                "latency_weighted_avg": 5.5,
+                "latency_max": 9.0,
+            },
+            {
+                "throughput_sum": 200.0,
+                "latency_weighted_avg": 6.0,
+                "latency_max": 8.0,
+            },
+        ])
+        totals = pd.DataFrame([
+            {
+                "throughput_avg": 100.0,
+                "latency_avg_ms": 5.0,
+                "total_bandwidth_kbs": 10.0,
+            },
+            {
+                "throughput_avg": 100.0,
+                "latency_avg_ms": 6.0,
+                "total_bandwidth_kbs": 11.0,
+            },
+        ])
+
+        report_summary = build_summary(
+            empty,
+            minutes,
+            totals,
+            empty,
+            extra_stats={},
+            config={},
+            cluster_id="cluster-a",
+            time_range="",
+        )
+        html = stat_cards_html(minutes, totals, empty, empty)
+
+        self.assertEqual(report_summary["benchmark"]["max_latency_ms"], 9.0)
+        self.assertIn(
+            "<div class='card-label'>Max Latency</div>"
+            "<div class='card-value' style='color:#e8710a'>9.00",
+            html,
+        )
 
 
 class EvictionSeriesTests(unittest.TestCase):
