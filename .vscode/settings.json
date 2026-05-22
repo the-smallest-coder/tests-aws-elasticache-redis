@@ -1,2 +1,6 @@
 {
+  "chat.tools.terminal.autoApprove": {
+    "wsl": true,
+    "Tee-Object": true
+  }
 }
