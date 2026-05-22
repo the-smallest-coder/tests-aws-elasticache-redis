@@ -173,9 +173,11 @@ def build_run_context(run: RunData) -> dict[str, Any]:
     add("Ratio", memtier.get("ratio"))
     add("Data size", f"{memtier.get('data_size_bytes')} bytes" if memtier.get("data_size_bytes") else None)
     add("Key maximum", memtier.get("key_maximum"))
-    note = None
+    notes: list[str] = []
     if not run.cluster_details:
-        note = "cluster_details.json is missing for this run, so config fields are partial."
+        notes.append("cluster_details.json is missing for this run, so config fields are partial.")
+    notes.extend(run.warnings)
+    note = " ".join(notes) if notes else None
     return {"role": run.role, "folder": run.folder, "title": meta.get("cluster_id") or run.folder, "items": items, "note": note}
 
 

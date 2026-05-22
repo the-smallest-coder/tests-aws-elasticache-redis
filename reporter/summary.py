@@ -7,6 +7,7 @@ from helpers import (
     cloudwatch_eviction_series,
     first_positive_timestamp,
 )
+from report_common import GENERATOR_SCHEMA_VERSION
 
 
 def _safe(val, decimals=None):
@@ -81,6 +82,10 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         'node_type':       config.get('node_type', ''),
         'node_count':      config.get('node_count', ''),
         'cluster_mode':    str(config.get('cluster_mode', 'false')).lower(),
+        'generator_schema_version': GENERATOR_SCHEMA_VERSION,
+        'source_mode': extra_stats.get('source_mode', ''),
+        'memtier_window_source': extra_stats.get('memtier_window_source', 'memtier_log_messages'),
+        'artifact_source': extra_stats.get('artifact_source', ''),
     }
     first_message_ts = extra_stats.get('first_message_ts')
     last_message_ts = extra_stats.get('last_message_ts')
