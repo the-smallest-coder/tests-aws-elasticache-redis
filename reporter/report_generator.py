@@ -319,15 +319,19 @@ def _load_memtier_artifacts(entries: list[tuple[str, str]]):
     return minute_df, totals_df
 
 
-def _read_local_memtier_artifact_contents(logs_dir: Path) -> list[tuple[str, str]]:
-    loadgen_dir = logs_dir / "loadgen"
-    if not loadgen_dir.exists():
+def _read_generated_memtier_artifact_contents(generated: dict) -> list[tuple[str, str]]:
+    """Read only sidecars produced by the current local ETL invocation."""
+    combined_path = generated.get("combined")
+    if combined_path is None or not Path(combined_path).is_file():
         return []
-    files = sorted(
-        path
-        for path in loadgen_dir.rglob("*")
-        if path.is_file() and (path.name.endswith(".minute.csv") or path.name.endswith(".totals.json"))
+
+    files = [Path(combined_path)]
+    files.extend(
+        Path(totals_path)
+        for stream in generated.get("streams", [])
+        if (totals_path := stream.get("totals")) is not None and Path(totals_path).is_file()
     )
+    files = sorted(files)
     return [(str(path), path.read_text(encoding="utf-8")) for path in files]
 
 
@@ -470,18 +474,12 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     ecs_df = parse_metrics_csv(ecs_csvs[0].read_text(encoding="utf-8")) if ecs_csvs else pd.DataFrame()
 
     log_entries = _read_local_log_contents(logs_dir, cluster_id)
-    etl_ok = False
+    artifact_entries = []
     try:
         from memtier_etl import generate_memtier_artifacts as _gen_etl
-        _gen_etl(run_path)
-        etl_ok = True
+        artifact_entries = _read_generated_memtier_artifact_contents(_gen_etl(run_path))
     except Exception as exc:
         print(f"Warning: memtier ETL generation failed: {exc}")
-    if etl_ok:
-        artifact_entries = _read_local_memtier_artifact_contents(logs_dir)
-    else:
-        # ETL failed — skip potentially stale on-disk artifacts; regenerate in memory below.
-        artifact_entries = []
     if not log_entries:
         print(f"No log file found in {logs_dir}")
         logs_df = pd.DataFrame()
