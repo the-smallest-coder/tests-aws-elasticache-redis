@@ -69,10 +69,33 @@ def _format_time_range(start, end) -> str:
         return ""
 
     def format_ts(value):
-        pattern = "%Y-%m-%d %H:%M:%S.%f" if value.microsecond else "%Y-%m-%d %H:%M:%S"
-        return f"{value.strftime(pattern)} UTC"
+        base = value.strftime("%Y-%m-%d %H:%M:%S")
+        if value.microsecond:
+            if value.microsecond % 1000 == 0:
+                frac = f"{value.microsecond // 1000:03d}"
+            else:
+                frac = f"{value.microsecond:06d}".rstrip("0")
+            return f"{base}.{frac} UTC"
+        return f"{base} UTC"
 
     return f"{format_ts(start)} - {format_ts(end)}"
+
+
+def _validate_report_window(extra_stats: dict, context: str) -> tuple:
+    start = _normalize_ts(extra_stats.get("first_message_ts"))
+    end = _normalize_ts(extra_stats.get("last_message_ts"))
+
+    if start is None or end is None:
+        raise ValueError(
+            f"{context}: missing memtier log message window; first_message_ts and "
+            "last_message_ts are required."
+        )
+    if start > end:
+        raise ValueError(
+            f"{context}: invalid memtier log message window; "
+            f"first_message_ts ({start}) is after last_message_ts ({end})."
+        )
+    return start, end
 
 
 def _clip_to_time_window(df, start, end):
@@ -409,8 +432,7 @@ def create_report(
     config = config or {}
     extra_stats = extra_stats or {}
 
-    x_min = _normalize_ts(extra_stats.get("first_message_ts"))
-    x_max = _normalize_ts(extra_stats.get("last_message_ts"))
+    x_min, x_max = _validate_report_window(extra_stats, "report generation")
 
     oom_df = extra_stats.get("oom_df", pd.DataFrame())
 
@@ -481,12 +503,16 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     except Exception as exc:
         print(f"Warning: memtier ETL generation failed: {exc}")
     if not log_entries:
-        print(f"No log file found in {logs_dir}")
-        logs_df = pd.DataFrame()
-        extra_stats = {}
-    else:
-        print(f"Reading {len(log_entries)} loadgen log file(s)")
-        logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
+        print(f"No loadgen log files found in {logs_dir}; memtier log message window is required.")
+        sys.exit(2)
+
+    print(f"Reading {len(log_entries)} loadgen log file(s)")
+    logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
+    try:
+        _validate_report_window(extra_stats, f"local run {run_path}")
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(2)
     if artifact_entries:
         memtier_minute_df, memtier_totals_df = _load_memtier_artifacts(artifact_entries)
     else:
@@ -580,6 +606,12 @@ def run_uploaded_report() -> None:
         sys.exit(2)
     print(f"Reading {len(log_entries)} loadgen log file(s)")
     logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
+    try:
+        _validate_report_window(extra_stats, f"uploaded run {logs_prefix}")
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(2)
+
     artifact_entries = _read_uploaded_memtier_artifact_contents(logs_prefix)
     if not artifact_entries:
         print(

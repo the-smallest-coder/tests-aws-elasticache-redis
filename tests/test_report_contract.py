@@ -400,10 +400,9 @@ class LocalGenerateLegacyLogTests(unittest.TestCase):
             )
             self._write_stale_totals(stale_dir / "stale.totals.json")
 
-            run_generate_report(str(run_dir), {})
-
-            report_summary = json.loads((run_dir / "results_local.json").read_text(encoding="utf-8"))
-            self.assertFalse(report_summary["benchmark"])
+            with self.assertRaises(SystemExit) as raised:
+                run_generate_report(str(run_dir), {})
+            self.assertEqual(raised.exception.code, 2)
 
     def test_local_generate_ignores_stale_totals_for_incomplete_current_log(self):
         try:
@@ -430,6 +429,75 @@ class LocalGenerateLegacyLogTests(unittest.TestCase):
 
             report_summary = json.loads((run_dir / "results_local.json").read_text(encoding="utf-8"))
             self.assertFalse(report_summary["benchmark"])
+
+
+class ReportWindowValidationTests(unittest.TestCase):
+    def test_create_report_requires_memtier_message_window(self):
+        try:
+            import pandas as pd
+            from report_generator import create_report
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        empty = pd.DataFrame()
+        with self.assertRaisesRegex(ValueError, "missing memtier log message window"):
+            create_report(
+                metrics_df=empty,
+                logs_df=empty,
+                memtier_minute_df=empty,
+                memtier_totals_df=empty,
+                cluster_id="cluster-a",
+                suffix="run-1",
+                ecs_metrics_df=empty,
+                config={},
+                extra_stats={},
+            )
+
+    def test_create_report_rejects_inverted_memtier_window(self):
+        try:
+            import pandas as pd
+            from report_generator import create_report
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        empty = pd.DataFrame()
+        with self.assertRaisesRegex(ValueError, "invalid memtier log message window"):
+            create_report(
+                metrics_df=empty,
+                logs_df=empty,
+                memtier_minute_df=empty,
+                memtier_totals_df=empty,
+                cluster_id="cluster-a",
+                suffix="run-1",
+                ecs_metrics_df=empty,
+                config={},
+                extra_stats={
+                    "first_message_ts": pd.Timestamp("2026-05-01T00:01:00"),
+                    "last_message_ts": pd.Timestamp("2026-05-01T00:00:59"),
+                },
+            )
+
+    def test_time_range_formats_fractional_seconds_without_padding(self):
+        try:
+            import pandas as pd
+            from report_generator import _format_time_range
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        text = _format_time_range(
+            pd.Timestamp("2026-02-27T13:00:12.390000"),
+            pd.Timestamp("2026-02-27T14:00:39.089000"),
+        )
+        self.assertEqual(
+            text,
+            "2026-02-27 13:00:12.390 UTC - 2026-02-27 14:00:39.089 UTC",
+        )
 
 
 if __name__ == "__main__":
