@@ -470,12 +470,18 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     ecs_df = parse_metrics_csv(ecs_csvs[0].read_text(encoding="utf-8")) if ecs_csvs else pd.DataFrame()
 
     log_entries = _read_local_log_contents(logs_dir, cluster_id)
+    etl_ok = False
     try:
         from memtier_etl import generate_memtier_artifacts as _gen_etl
         _gen_etl(run_path)
+        etl_ok = True
     except Exception as exc:
         print(f"Warning: memtier ETL generation failed: {exc}")
-    artifact_entries = _read_local_memtier_artifact_contents(logs_dir)
+    if etl_ok:
+        artifact_entries = _read_local_memtier_artifact_contents(logs_dir)
+    else:
+        # ETL failed — skip potentially stale on-disk artifacts; regenerate in memory below.
+        artifact_entries = []
     if not log_entries:
         print(f"No log file found in {logs_dir}")
         logs_df = pd.DataFrame()
@@ -501,6 +507,17 @@ def run_generate_report(run_dir: str, config: dict) -> None:
         config=config,
         extra_stats=extra_stats,
     )
+
+    cluster_details_path = run_path / "cluster_details.json"
+    if cluster_details_path.exists():
+        try:
+            from report_common import enrich_summary_meta
+            cluster_details = json.loads(cluster_details_path.read_text(encoding="utf-8"))
+            summary_obj = json.loads(summary_json)
+            enrich_summary_meta(summary_obj, cluster_details)
+            summary_json = json.dumps(summary_obj, indent=2, default=str)
+        except Exception as exc:
+            print(f"Warning: failed to enrich summary with cluster_details.json: {exc}")
 
     out_path = run_path / "results_local.json"
     out_path.write_text(summary_json, encoding="utf-8")
@@ -566,10 +583,14 @@ def run_uploaded_report() -> None:
     print(f"Reading {len(log_entries)} loadgen log file(s)")
     logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
     artifact_entries = _read_uploaded_memtier_artifact_contents(logs_prefix)
-    if artifact_entries:
-        memtier_minute_df, memtier_totals_df = _load_memtier_artifacts(artifact_entries)
-    else:
-        memtier_minute_df, memtier_totals_df = _memtier_dfs_from_log_entries(log_entries)
+    if not artifact_entries:
+        print(
+            f"Error: no memtier ETL sidecar artifacts found under {logs_prefix}\n"
+            "Expected _memtier.minute.csv and *.totals.json to be present.\n"
+            "Run the exporter to generate them before calling the report generator."
+        )
+        sys.exit(2)
+    memtier_minute_df, memtier_totals_df = _load_memtier_artifacts(artifact_entries)
 
     ecs_df = pd.DataFrame()
     if ecs_metrics_csv:
@@ -590,6 +611,17 @@ def run_uploaded_report() -> None:
         config=_config_from_env(),
         extra_stats=extra_stats,
     )
+
+    cluster_details_uri = f"s3://{output_bucket}/{output_prefix}{timestamp}/cluster_details.json"
+    try:
+        from report_common import enrich_summary_meta
+        cluster_details = json.loads(read_file_content(cluster_details_uri))
+        summary_obj = json.loads(summary_json)
+        enrich_summary_meta(summary_obj, cluster_details)
+        summary_json = json.dumps(summary_obj, indent=2, default=str)
+        print(f"Summary enriched from {cluster_details_uri}")
+    except Exception:
+        pass  # cluster_details.json is optional
 
     output_key = f"{output_prefix}{timestamp}/results_{suffix}.html"
     output_json_key = re.sub(r"\.html$", ".json", output_key)
