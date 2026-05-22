@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-from report_common import ECS_ENV_VARS
+from report_common import ECS_ENV_VARS, inspect_run_directory
 from report_compare import run_compare_report
 from helpers import read_file_content
 from parsers import (
@@ -41,13 +41,40 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--node-type", default="", help="e.g. cache.t4g.micro")
     generate.add_argument("--node-count", default="", help="e.g. 1")
     generate.add_argument("--cluster-mode", default="false", help="true or false")
+    inspect = subparsers.add_parser("inspect", help="Inspect local run readiness and legacy warnings.")
+    inspect.add_argument("run_dir", help="Path to a run results directory to inspect.")
     return parser
 
 
 def normalize_argv(argv: list[str]) -> list[str]:
-    if argv and argv[0] not in {"compare", "generate"} and not argv[0].startswith("-"):
+    if argv and argv[0] not in {"compare", "generate", "inspect"} and not argv[0].startswith("-"):
         return ["compare", *argv]
     return argv
+
+
+def run_inspect_report(run_dir: str) -> None:
+    run_path = Path(run_dir)
+    inspection = inspect_run_directory(run_path)
+
+    print(f"Run: {inspection['run_folder']}")
+    print(f"Path: {run_path}")
+    print("\nFiles:")
+    for key, present in inspection["files"].items():
+        print(f"  - {key}: {'present' if present else 'missing'}")
+
+    canonical = inspection.get("canonical_json_path")
+    print("\nSelection:")
+    print(f"  - canonical_json_path: {canonical if canonical else 'none'}")
+    print(f"  - uploaded_ready: {inspection['uploaded_ready']}")
+    print(f"  - local_ready: {inspection['local_ready']}")
+
+    warnings = inspection.get("warnings", [])
+    print("\nWarnings:")
+    if warnings:
+        for warning in warnings:
+            print(f"  - {warning}")
+    else:
+        print("  - none")
 
 
 def missing_ecs_env_vars() -> list[str]:
@@ -508,6 +535,9 @@ def run_generate_report(run_dir: str, config: dict) -> None:
 
     print(f"Reading {len(log_entries)} loadgen log file(s)")
     logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
+    extra_stats["source_mode"] = "local"
+    extra_stats["memtier_window_source"] = "memtier_log_messages"
+    extra_stats["artifact_source"] = "generated" if artifact_entries else "missing"
     try:
         _validate_report_window(extra_stats, f"local run {run_path}")
     except ValueError as exc:
@@ -606,6 +636,9 @@ def run_uploaded_report() -> None:
         sys.exit(2)
     print(f"Reading {len(log_entries)} loadgen log file(s)")
     logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
+    extra_stats["source_mode"] = "uploaded"
+    extra_stats["memtier_window_source"] = "memtier_log_messages"
+    extra_stats["artifact_source"] = "uploaded"
     try:
         _validate_report_window(extra_stats, f"uploaded run {logs_prefix}")
     except ValueError as exc:
@@ -686,6 +719,10 @@ def main() -> None:
             "cluster_mode": args.cluster_mode,
         }
         run_generate_report(args.run_dir, config)
+        return
+
+    if args.command == "inspect":
+        run_inspect_report(args.run_dir)
         return
 
     parser.print_help()
