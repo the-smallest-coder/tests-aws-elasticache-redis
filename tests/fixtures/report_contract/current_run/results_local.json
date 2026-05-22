@@ -1,0 +1,70 @@
+{
+  "meta": {
+    "cluster_id": "elasticache-perf-test-redis-01183922",
+    "time_range": "2026-05-01 18:48 \u2013 19:48 (60 min)",
+    "engine_type": "redis",
+    "engine_version": "7.1",
+    "node_type": "cache.t4g.micro",
+    "node_count": "1",
+    "cluster_mode": "false"
+  },
+  "benchmark": {
+    "avg_ops": 2166.5,
+    "peak_ops": 8538.0,
+    "cv_pct": 56.13,
+    "avg_latency_ms": 1.304,
+    "max_latency_ms": 2.68,
+    "p95_latency_ms": 2.66,
+    "p99_latency_ms": 2.68,
+    "avg_bandwidth_kbs": 1096.92,
+    "active_window_min": 60.6,
+    "prefill_min": 0.0
+  },
+  "cache_efficiency": {
+    "avg_hit_rate_pct": 70.63,
+    "total_evictions": 196056,
+    "min_freeable_memory_mb": 122.3,
+    "peak_key_count": 284498,
+    "first_eviction_offset_min": 33.9
+  },
+  "engine_cpu": {
+    "avg_pct": 7.64,
+    "max_pct": 9.03,
+    "credit_balance_avg": 0.0,
+    "credit_balance_min": 0.0,
+    "credit_usage_avg": 1.0
+  },
+  "memory": {
+    "avg_usage_pct": 90.77,
+    "max_usage_pct": 100.0,
+    "headroom_pct": -0.0,
+    "fragmentation_avg": 1.037,
+    "fragmentation_max": 1.06,
+    "swap_max_bytes": 63754240.0
+  },
+  "network": {
+    "cache": {
+      "avg_out_kbs": 467954.42,
+      "avg_in_kbs": 133772.47
+    },
+    "throttling": {
+      "bw_in_exceeded_total": 0,
+      "bw_out_exceeded_total": 0,
+      "pps_exceeded_total": 0
+    }
+  },
+  "latency_server_us": {
+    "get_avg": 2.13,
+    "set_avg": 3.488,
+    "string_avg": 2.254
+  },
+  "connections": {
+    "avg": 10.3,
+    "max": 11.0
+  },
+  "ecs": {
+    "avg_cpu_pct": 24.67,
+    "max_cpu_pct": 27.66,
+    "peak_mem_mb": 5.0
+  }
+}

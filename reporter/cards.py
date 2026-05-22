@@ -40,7 +40,15 @@ def header_pills(config):
     return f"<div class='pills'>{pills}</div>" if pills else ''
 
 
-def stat_cards_html(memtier_minute_df, memtier_totals_df, metrics_df, ecs_df, extra_stats=None, config=None):
+def stat_cards_html(
+    memtier_minute_df,
+    memtier_totals_df,
+    metrics_df,
+    ecs_df,
+    extra_stats=None,
+    config=None,
+    cluster_id=None,
+):
     """Build the stat-cards grid HTML from all data sources."""
     extra_stats = extra_stats or {}
     config = config or {}
@@ -63,7 +71,7 @@ def stat_cards_html(memtier_minute_df, memtier_totals_df, metrics_df, ecs_df, ex
             / memtier_totals_df['throughput_avg'].sum()
         )
         cards.append(('Avg Latency', f"{avg_latency:.2f}", 'ms', '#e8710a', ''))
-        cards.append(('Max Latency', f"{memtier_minute_df['latency_weighted_avg'].max():.2f}", 'ms', '#e8710a', ''))
+        cards.append(('Max Latency', f"{memtier_minute_df['latency_max'].max():.2f}", 'ms', '#e8710a', ''))
 
         total_bw = memtier_totals_df['total_bandwidth_kbs'].sum()
         if total_bw >= 1024:
@@ -128,7 +136,7 @@ def stat_cards_html(memtier_minute_df, memtier_totals_df, metrics_df, ecs_df, ex
 
     # ---- Total Evictions (CloudWatch) ----
     if not metrics_df.empty:
-        ev_df = cloudwatch_eviction_series(metrics_df, config.get('cluster_id'))
+        ev_df = cloudwatch_eviction_series(metrics_df, cluster_id)
         if not ev_df.empty:
             total_ev = int(ev_df['Value'].sum())
             ev_color = '#188038' if total_ev == 0 else '#d93025'
@@ -152,7 +160,7 @@ def stat_cards_html(memtier_minute_df, memtier_totals_df, metrics_df, ecs_df, ex
                           'Peak number of keys in cache. Drops below expected if eviction removed keys.'))
 
     # ---- CloudWatch eviction timing ----
-    ev_df = cloudwatch_eviction_series(metrics_df, config.get('cluster_id'))
+    ev_df = cloudwatch_eviction_series(metrics_df, cluster_id)
     first_eviction_ts = first_positive_timestamp(ev_df)
     if first_eviction_ts is not None:
         fets = first_eviction_ts

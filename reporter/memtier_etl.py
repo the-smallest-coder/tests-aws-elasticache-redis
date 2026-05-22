@@ -160,8 +160,8 @@ def _combined_minutes(per_stream_frames: list[pd.DataFrame]) -> pd.DataFrame:
                 else 0.0,
                 "latency_avg": float(latency.mean()),
                 "latency_median": float(latency.median()),
-                "latency_min": float(latency.min()),
-                "latency_max": float(latency.max()),
+                "latency_min": float(group["latency_min"].min()),
+                "latency_max": float(group["latency_max"].max()),
                 "latency_p10": float(latency.quantile(0.10)),
                 "latency_p90": float(latency.quantile(0.90)),
             }
@@ -190,11 +190,13 @@ def generate_memtier_artifacts(run_dir: Path) -> dict:
 
         minute_df.to_csv(minute_path, index=False)
         totals_payload = _totals_payload(totals_df, stream_id)
+        totals_artifact = None
         if totals_payload is not None:
             totals_path.write_text(json.dumps(totals_payload, indent=2) + "\n", encoding="utf-8")
+            totals_artifact = totals_path
 
         frames.append(minute_df)
-        stream_results.append({"source": source_path, "minute": minute_path, "totals": totals_path})
+        stream_results.append({"source": source_path, "minute": minute_path, "totals": totals_artifact})
         output_dir = source_path.parent if output_dir is None else output_dir
         if output_dir != source_path.parent:
             raise ValueError("memtier source streams must share one artifact directory")
@@ -205,6 +207,33 @@ def generate_memtier_artifacts(run_dir: Path) -> dict:
         combined_df.to_csv(combined_path, index=False)
 
     return {"streams": stream_results, "combined": combined_path, "combined_df": combined_df}
+
+
+def generate_memtier_dataframes(log_entries: list[tuple[str, str]]) -> tuple[pd.DataFrame, list[dict]]:
+    """Generate combined minute DataFrame and totals payload list from in-memory log content.
+
+    Args:
+        log_entries: List of (stream_id, content) pairs.
+
+    Returns:
+        (combined_df, totals_list) where combined_df has COMBINED_COLUMNS
+        and totals_list contains _totals_payload dicts.
+    """
+    frames = []
+    totals_list = []
+    for fallback_stream_id, content in log_entries:
+        logs_df = parse_memtier_logs(content, fallback_stream_id)
+        if not logs_df.empty:
+            for stream_id, stream_logs_df in logs_df.groupby("Stream", sort=True):
+                frames.append(_per_stream_minutes(stream_logs_df, stream_id))
+
+        totals_df = parse_memtier_final_totals(content, fallback_stream_id)
+        if not totals_df.empty:
+            for stream_id, stream_totals_df in totals_df.groupby("Stream", sort=True):
+                payload = _totals_payload(stream_totals_df, stream_id)
+                if payload is not None:
+                    totals_list.append(payload)
+    return _combined_minutes(frames), totals_list
 
 
 def main() -> None:

@@ -207,14 +207,14 @@ def export_metric_sources_to_s3(sources, bucket: str, key: str, start_time: date
     for source in sources:
         namespace = source["namespace"]
         filter_dimensions = source.get("dimensions") or []
-        metric_filter = set(source.get("metric_names", [])) if source.get("metric_names") else None
+        metric_name_filter = set(source.get("metric_names", [])) if source.get("metric_names") else None
 
-        for metric_name in sorted(metric_filter or []):
+        for metric_name in sorted(metric_name_filter or []):
             dims_key = tuple(sorted((d["Name"], d["Value"]) for d in filter_dimensions))
             metric_map[(namespace, metric_name, dims_key)] = filter_dimensions
 
         try:
-            metrics = _list_metrics(namespace, filter_dimensions)
+            metrics = _list_metrics(namespace, filter_dimensions, metric_name_filter)
         except Exception as exc:
             print(f"Error listing metrics for {namespace} {filter_dimensions}: {exc}")
             metrics = []
@@ -565,6 +565,77 @@ def export_loadgen_logs_to_s3(log_group, bucket, key_prefix) -> dict:
     return status
 
 
+def _generate_and_upload_memtier_etl(bucket: str, loadgen_logs_prefix: str, stream_files: list[dict]) -> None:
+    """Run memtier ETL on exported per-stream files and upload sidecar artifacts to S3.
+
+    Uploads per-stream ``{stream}.totals.json`` and a combined
+    ``_memtier.minute.csv`` alongside the raw stream ``.txt`` files so that
+    ``run_uploaded_report()`` can read them via
+    ``_read_uploaded_memtier_artifact_contents()``.
+    """
+    try:
+        from memtier_etl import generate_memtier_dataframes
+    except ImportError as exc:
+        print(f"Warning: memtier_etl not available; skipping ETL artifact generation: {exc}")
+        return
+
+    loadgen_logs_prefix = loadgen_logs_prefix.rstrip("/")
+    memtier_files = [
+        f for f in stream_files
+        if _is_memtier_stream(f.get("stream", "")) and f.get("artifact")
+    ]
+    if not memtier_files:
+        print("No memtier stream files found; skipping ETL artifact generation.")
+        return
+
+    log_pairs: list[tuple[str, str]] = []
+    artifact_base_keys: dict[str, str] = {}
+    for file_info in memtier_files:
+        stream_name = file_info["stream"]
+        artifact_uri = file_info["artifact"]
+        _, key = artifact_uri[5:].split("/", 1)
+        try:
+            content = _read_s3_text(bucket, key)
+        except Exception as exc:
+            print(f"Warning: failed to read stream for ETL '{stream_name}': {exc}")
+            continue
+        log_pairs.append((stream_name, content))
+        artifact_base_keys[stream_name] = key.removesuffix(".txt")
+
+    if not log_pairs:
+        print("Warning: no memtier stream content readable; skipping ETL artifact generation.")
+        return
+
+    print(f"Running memtier ETL on {len(log_pairs)} stream(s).")
+    combined_df, totals_list = generate_memtier_dataframes(log_pairs)
+
+    for payload in totals_list:
+        stream_id = payload["stream_id"]
+        base_key = artifact_base_keys.get(
+            stream_id,
+            f"{loadgen_logs_prefix}/memtier/memtier/{stream_id}",
+        )
+        totals_key = f"{base_key}.totals.json"
+        body = json.dumps(payload, indent=2, default=str).encode("utf-8")
+        s3.put_object(Bucket=bucket, Key=totals_key, Body=body, ContentType="application/json")
+        print(f"ETL totals uploaded: s3://{bucket}/{totals_key}")
+
+    if combined_df.empty:
+        print("Warning: ETL produced empty combined DataFrame; not uploading _memtier.minute.csv.")
+        return
+
+    combined_key = f"{loadgen_logs_prefix}/memtier/memtier/_memtier.minute.csv"
+    csv_buf = io.StringIO()
+    combined_df.to_csv(csv_buf, index=False)
+    s3.put_object(
+        Bucket=bucket,
+        Key=combined_key,
+        Body=csv_buf.getvalue().encode("utf-8"),
+        ContentType="text/csv",
+    )
+    print(f"ETL combined CSV uploaded: s3://{bucket}/{combined_key}")
+
+
 def _csv_metric_rows(bucket: str, key: str) -> list[dict]:
     content = _read_s3_text(bucket, key)
     return list(csv.DictReader(io.StringIO(content)))
@@ -709,6 +780,7 @@ def main() -> None:
         loadgen_logs_prefix,
     )
     status["checks"]["loadgen_logs"] = loadgen_status
+    _generate_and_upload_memtier_etl(bucket, loadgen_logs_prefix, loadgen_status.get("files", []))
     start_time = loadgen_status.get("first_message_ts")
     end_time = loadgen_status.get("last_message_ts")
     if start_time is None or end_time is None:
@@ -771,6 +843,28 @@ def main() -> None:
     os.environ["OUTPUT_PREFIX"] = prefix
     os.environ["SUFFIX"] = timestamp
     os.environ["REPORT_TIMESTAMP"] = timestamp
+
+    cluster_details = {
+        "run": {"cluster_id": cluster_id, "timestamp": timestamp},
+        "elasticache": {
+            "engine": os.environ.get("ENGINE_TYPE", ""),
+            "engine_version_configured": os.environ.get("ENGINE_VERSION", ""),
+            "node_type": os.environ.get("NODE_TYPE", ""),
+            "num_cache_nodes": os.environ.get("NODE_COUNT", ""),
+            "cluster_mode_enabled": os.environ.get("CLUSTER_MODE", "false"),
+        },
+        "memtier": {
+            "task_count": os.environ.get("TASK_COUNT", ""),
+        },
+        "ecs": {
+            "cluster": ecs_cluster,
+            "service": ecs_service,
+        },
+    }
+    cluster_details_key = f"{prefix}{timestamp}/cluster_details.json"
+    _put_json(bucket, cluster_details_key, cluster_details)
+    print(f"Cluster details uploaded: s3://{bucket}/{cluster_details_key}")
+
     run_uploaded_report()
 
     report_uri = f"s3://{bucket}/{prefix}{timestamp}/results_{timestamp}.html"
