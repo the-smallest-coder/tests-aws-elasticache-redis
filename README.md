@@ -2,7 +2,7 @@
 
 Terraform infrastructure for **automated** ElastiCache (Redis/Valkey) performance testing.
 
-> `terraform apply` → auto-run load tests → auto-export metrics → auto-stop → `terraform destroy`
+> `terraform apply` → auto-run load tests → auto-export metrics → auto-cleanup → `terraform destroy`
 
 ---
 
@@ -42,7 +42,7 @@ terraform destroy
 1. **Provisions** ElastiCache (Redis/Valkey) + ECS load generators
 2. **Runs** memtier_benchmark for configurable duration (default: 1 hour)
 3. **Exports** metrics (CSV) + logs (text) to S3
-4. **Stops** ECS and ElastiCache automatically
+4. **Cleans up** by stopping ECS and deleting the ElastiCache replication group
 
 ---
 
@@ -102,7 +102,7 @@ flowchart LR
         T2 -->|export logs| T3[S3]
         T2 -->|export metrics| T3
         T2 -->|stop| T4[ECS Service]
-        T2 -->|stop| T5[ElastiCache]
+        T2 -->|delete| T5[ElastiCache]
     end
     
     Start --> Run --> Stop
@@ -116,7 +116,7 @@ flowchart LR
 |------|--------|------|
 | ElastiCache Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster}.csv` |
 | ECS Task Metrics | CSV | `s3://{bucket}/exports/{timestamp}/metrics/{cluster}-ecs.csv` |
-| Logs | Text | `s3://{bucket}/exports/{timestamp}/logs/{cluster}.txt` |
+| Loadgen logs | Text | `s3://{bucket}/exports/{timestamp}/logs/loadgen/{stream}.txt` |
 
 ---
 
@@ -132,6 +132,8 @@ Key variables in `terraform.tfvars`:
 | `engine_type` | redis | redis or valkey |
 
 See `terraform.tfvars.example` for all options.
+
+Load generator tasks use per-task key prefixes to avoid overlapping writes. If `loadgen_memtier_key_maximum` is set, that key maximum applies per task.
 
 ---
 
@@ -180,3 +182,29 @@ notification_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/aws
 - **Test Complete**: After shutdown and export operations finish
 - **Verification Warning**: If resources are still running 15 minutes after scheduled shutdown
 - **Verification OK**: If all resources successfully shut down
+
+---
+
+## Local Comparison
+
+The same `reporter/report_generator.py` entrypoint is used in ECS and for local comparison.
+
+### Report Window
+
+Reports and plots use one absolute memtier log message window across all memtier streams:
+
+- **Start time**: timestamp of the very first memtier log message.
+- **End time**: timestamp of the very last memtier log message.
+
+Every plotted value is placed at the absolute timestamp from its source log or metric row.
+
+For local comparison:
+
+```bash
+reporter/.venv/Scripts/python.exe reporter/report_generator.py compare \
+  results/20260227-140039 \
+  results/20260307-093716
+```
+
+You can also omit `compare`; two positional paths are treated as comparison input.
+The output defaults to `results/comparisons/<baseline>_vs_<candidate>.html`.

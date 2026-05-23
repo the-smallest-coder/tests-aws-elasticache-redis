@@ -41,16 +41,6 @@ resource "aws_lambda_function" "shutdown" {
       ECS_CLUSTER    = local.loadgen_cluster_name
       ECS_SERVICE    = local.loadgen_service_name
       ELASTICACHE_ID = aws_elasticache_replication_group.main.id
-      S3_BUCKET      = var.metrics_export_s3_bucket
-      S3_PREFIX      = var.metrics_export_s3_prefix
-      LOG_GROUP      = aws_cloudwatch_log_group.loadgen.name
-      CONTAINER_INSIGHTS_LOG_GROUP = aws_cloudwatch_log_group.container_insights.name
-      ELASTICACHE_LOG_GROUP        = aws_cloudwatch_log_group.elasticache.name
-      LAMBDA_SHUTDOWN_LOG_GROUP    = aws_cloudwatch_log_group.lambda_shutdown.name
-      LAMBDA_SCHEDULER_LOG_GROUP   = aws_cloudwatch_log_group.lambda_shutdown_scheduler.name
-      TEST_DURATION_MINUTES        = var.test_duration_minutes
-      NOTIFICATION_EMAIL           = var.notification_email
-      SES_IDENTITY_ARN             = var.notification_ses_identity_arn
     }
   }
 
@@ -81,6 +71,13 @@ resource "aws_lambda_function" "shutdown_scheduler" {
       SHUTDOWN_RULE_PLACEHOLDER = "cron(0 0 1 1 ? 2099)"
       NOTIFICATION_EMAIL    = var.notification_email
       SES_IDENTITY_ARN      = var.notification_ses_identity_arn
+      ENGINE_TYPE           = var.engine_type
+      ENGINE_VERSION        = var.engine_version
+      NODE_TYPE             = var.node_type
+      NODE_COUNT            = tostring(var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes)
+      CLUSTER_MODE          = tostring(var.cluster_mode_enabled)
+      LOADGEN_TASK_COUNT    = tostring(var.loadgen_task_count)
+      AWS_REGION_NAME       = var.aws_region
     }
   }
 
@@ -105,8 +102,28 @@ resource "aws_lambda_function" "shutdown_verify" {
       ECS_CLUSTER        = local.loadgen_cluster_name
       ECS_SERVICE        = local.loadgen_service_name
       ELASTICACHE_ID     = aws_elasticache_replication_group.main.id
+      S3_BUCKET          = var.metrics_export_s3_bucket
+      S3_PREFIX          = var.metrics_export_s3_prefix
+      RUN_FOLDER         = local.run_folder
+      REPORT_TIMESTAMP   = local.run_folder
+      LOG_GROUP          = aws_cloudwatch_log_group.loadgen.name
+      LOADGEN_LOG_GROUP  = aws_cloudwatch_log_group.loadgen.name
+      CONTAINER_INSIGHTS_LOG_GROUP = aws_cloudwatch_log_group.container_insights.name
+      ELASTICACHE_LOG_GROUP        = aws_cloudwatch_log_group.elasticache.name
+      LAMBDA_SCHEDULER_LOG_GROUP   = aws_cloudwatch_log_group.lambda_shutdown_scheduler.name
+      TEST_DURATION_MINUTES        = var.test_duration_minutes
+      CLUSTER_MODE                 = tostring(var.cluster_mode_enabled)
+      NUM_CACHE_NODES              = tostring(var.num_cache_nodes)
+      NUM_NODE_GROUPS              = tostring(var.num_node_groups)
+      REPLICAS_PER_NODE_GROUP      = tostring(var.replicas_per_node_group)
       NOTIFICATION_EMAIL = var.notification_email
       SES_IDENTITY_ARN   = var.notification_ses_identity_arn
+      ENGINE_TYPE        = var.engine_type
+      ENGINE_VERSION     = var.engine_version
+      NODE_TYPE          = var.node_type
+      NODE_COUNT         = tostring(var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes)
+      AWS_REGION_NAME    = var.aws_region
+      REPORTER_TASK_DEFINITION = aws_ecs_task_definition.reporter.arn
     }
   }
 
@@ -230,33 +247,6 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
       {
         Effect = "Allow"
         Action = [
-          "cloudwatch:GetMetricStatistics",
-          "cloudwatch:ListMetrics"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:PutObject",
-          "s3:CreateMultipartUpload",
-          "s3:UploadPart",
-          "s3:CompleteMultipartUpload",
-          "s3:AbortMultipartUpload",
-          "s3:ListMultipartUploadParts"
-        ]
-        Resource = "arn:aws:s3:::${var.metrics_export_s3_bucket}/*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:ListBucketMultipartUploads"
-        ]
-        Resource = "arn:aws:s3:::${var.metrics_export_s3_bucket}"
-      },
-      {
-        Effect = "Allow"
-        Action = [
           "ecs:UpdateService"
         ]
         Resource = aws_ecs_service.loadgen.id
@@ -264,44 +254,9 @@ resource "aws_iam_role_policy" "lambda_shutdown_policy" {
       {
         Effect = "Allow"
         Action = [
-          "ecs:RunTask"
-        ]
-        Resource = aws_ecs_task_definition.report.arn
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "iam:PassRole"
-        ]
-        Resource = [aws_iam_role.report_task_execution_role.arn, aws_iam_role.report_task_role.arn]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "ecs:ListTasks",
-          "ecs:DescribeTasks",
-          "ecs:DescribeServices"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
           "elasticache:DeleteReplicationGroup"
         ]
         Resource = aws_elasticache_replication_group.main.arn
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "elasticache:DescribeReplicationGroups"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect   = var.notification_ses_identity_arn != "" ? "Allow" : "Deny"
-        Action   = ["ses:SendEmail"]
-        Resource = var.notification_ses_identity_arn != "" ? var.notification_ses_identity_arn : "*"
       }
     ]
   })
@@ -384,6 +339,28 @@ resource "aws_iam_role_policy" "lambda_shutdown_verify_policy" {
           "ecs:DescribeServices"
         ]
         Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecs:RunTask"
+        ]
+        Resource = "arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task-definition/${aws_ecs_task_definition.reporter.family}:*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "iam:PassRole"
+        ]
+        Resource = [
+          aws_iam_role.ecs_task_execution_role.arn,
+          aws_iam_role.ecs_task_role.arn
+        ]
+        Condition = {
+          StringEquals = {
+            "iam:PassedToService" = "ecs-tasks.amazonaws.com"
+          }
+        }
       },
       {
         Effect = "Allow"

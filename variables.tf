@@ -265,6 +265,17 @@ variable "loadgen_memtier_key_pattern" {
   default     = "R:R"
 }
 
+variable "loadgen_memtier_key_maximum" {
+  description = "Maximum key count per load generator task. 0 (default) auto-computes total target keys from writable cache memory (~85% of primary/shard capacity), then divides by loadgen_task_count. Set >0 to use a specific per-task value. Each task still gets a unique key prefix so keyspaces do not overlap."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.loadgen_memtier_key_maximum >= 0 && floor(var.loadgen_memtier_key_maximum) == var.loadgen_memtier_key_maximum
+    error_message = "loadgen_memtier_key_maximum must be a non-negative integer (0 or greater)."
+  }
+}
+
 # Metrics Export Configuration
 variable "metrics_export_s3_bucket" {
   description = "S3 bucket for exporting metrics and logs (REQUIRED)"

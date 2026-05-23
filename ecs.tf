@@ -53,26 +53,51 @@ resource "aws_ecs_task_definition" "loadgen" {
 
   container_definitions = jsonencode([
     {
-      name      = "memtier"
-      image     = "redislabs/memtier_benchmark:latest"
-      essential = true
+      name        = "memtier"
+      image       = "redislabs/memtier_benchmark:latest"
+      essential   = true
+      stopTimeout = 120
 
-      command = concat(
-        [
-          "--server=${local.elasticache_endpoint}",
-          "--port=${var.port}",
-          "--threads=${var.loadgen_memtier_threads}",
-          "--clients=${var.loadgen_memtier_clients}",
-          "--pipeline=${var.loadgen_memtier_pipeline}",
-          "--data-size=${var.loadgen_memtier_data_size}",
-          "--ratio=${var.loadgen_memtier_ratio}",
-          "--test-time=${local.memtier_test_time_seconds}",
-          "--key-pattern=${var.loadgen_memtier_key_pattern}",
-          "--hide-histogram"
-        ],
-        var.cluster_mode_enabled ? ["--cluster-mode"] : [],
-        var.transit_encryption_enabled ? ["--tls", "--tls-skip-verify"] : []
-      )
+      entryPoint = ["sh", "-c"]
+      command = [
+        join(" ", concat(
+          [
+            "set -u;",
+            "FIFO=/tmp/memtier-output.$$;",
+            "mkfifo \"$FIFO\";",
+            "UUID=$(cat /proc/sys/kernel/random/uuid);",
+            "MEMTIER_PID=;",
+            "term() { if [ -n \"$MEMTIER_PID\" ]; then kill -INT \"$MEMTIER_PID\" 2>/dev/null || true; fi; };",
+            "trap term TERM INT;",
+            "awk 'BEGIN { RS = \"[\\r\\n]+\" } NF { print; fflush() }' < \"$FIFO\" &",
+            "FILTER_PID=$!;",
+            "if command -v stdbuf >/dev/null 2>&1; then STDBUF=\"stdbuf -o0\"; else STDBUF=\"\"; fi;",
+            "$STDBUF memtier_benchmark",
+            "--server=${local.elasticache_endpoint}",
+            "--port=${var.port}",
+            "--threads=${var.loadgen_memtier_threads}",
+            "--clients=${var.loadgen_memtier_clients}",
+            "--pipeline=${var.loadgen_memtier_pipeline}",
+            "--data-size=${var.loadgen_memtier_data_size}",
+            "--ratio=${var.loadgen_memtier_ratio}",
+            "--test-time=${local.memtier_test_time_seconds}",
+            "--key-pattern=${var.loadgen_memtier_key_pattern}",
+            "--key-prefix=$UUID-",
+            "--key-maximum=${local.memtier_key_maximum}",
+            "--hide-histogram"
+          ],
+          var.cluster_mode_enabled ? ["--cluster-mode"] : [],
+          var.transit_encryption_enabled ? ["--tls", "--tls-skip-verify"] : [],
+          [
+            "> \"$FIFO\" 2>&1 &",
+            "MEMTIER_PID=$!;",
+            "while true; do wait \"$MEMTIER_PID\"; STATUS=$?; if [ \"$STATUS\" -ge 128 ] && kill -0 \"$MEMTIER_PID\" 2>/dev/null; then continue; fi; break; done;",
+            "wait \"$FILTER_PID\" 2>/dev/null || true;",
+            "rm -f \"$FIFO\";",
+            "exit \"$STATUS\""
+          ]
+        ))
+      ]
 
       logConfiguration = {
         logDriver = "awslogs"
@@ -99,8 +124,8 @@ resource "aws_ecs_service" "loadgen" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = var.subnet_ids
-    security_groups  = [aws_security_group.loadgen.id]
+    subnets         = var.subnet_ids
+    security_groups = [aws_security_group.loadgen.id]
     # Workaround only: enable when subnets have no NAT/egress for Docker Hub pulls.
     # Not recommended for normal use; prefer private subnets with NAT or ECR.
     assign_public_ip = var.loadgen_assign_public_ip
@@ -133,65 +158,69 @@ locals {
   # Run effectively indefinitely when test time is 0.
   memtier_test_time_seconds = var.loadgen_memtier_test_time > 0 ? var.loadgen_memtier_test_time : 2147483647
   memtier_duration_label    = var.loadgen_memtier_test_time > 0 ? "${var.loadgen_memtier_test_time}s" : "until stopped"
-}
 
-# CloudWatch Log Group for report generator
-resource "aws_cloudwatch_log_group" "report" {
-  name              = "/aws/ecs/${local.cluster_id}/report"
-  retention_in_days = var.cloudwatch_log_retention_days
-
-  tags = {
-    Name = "${local.cluster_id}-report-logs"
+  # ---------------------------------------------------------------------------
+  # Advertised memory (bytes) per ElastiCache node type. The 85% target is
+  # applied separately by _fill_factor below so the map stays easy to audit
+  # against AWS instance specs.
+  # Source: https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/CacheNodes.SupportedTypes.html
+  # ---------------------------------------------------------------------------
+  _node_memory_bytes = {
+    # T4g family
+    "cache.t4g.micro"  = 536870912  # 512 MB advertised
+    "cache.t4g.small"  = 1610612736 # 1.5 GB advertised
+    "cache.t4g.medium" = 3435973836 # 3.2 GB advertised
+    # T3 family
+    "cache.t3.micro"  = 536870912
+    "cache.t3.small"  = 1610612736
+    "cache.t3.medium" = 3435973836
+    # M7g family
+    "cache.m7g.large"   = 7516192768   # 7 GB
+    "cache.m7g.xlarge"  = 15032385536  # 14 GB
+    "cache.m7g.2xlarge" = 30064771072  # 28 GB
+    "cache.m7g.4xlarge" = 60129542144  # 56 GB
+    "cache.m7g.8xlarge" = 120259084288 # 112 GB
+    # M6g family
+    "cache.m6g.large"   = 7516192768
+    "cache.m6g.xlarge"  = 15032385536
+    "cache.m6g.2xlarge" = 30064771072
+    "cache.m6g.4xlarge" = 60129542144
+    "cache.m6g.8xlarge" = 120259084288
+    # R7g family
+    "cache.r7g.large"   = 16106127360  # 15 GB
+    "cache.r7g.xlarge"  = 32212254720  # 30 GB
+    "cache.r7g.2xlarge" = 64424509440  # 60 GB
+    "cache.r7g.4xlarge" = 128849018880 # 120 GB
+    "cache.r7g.8xlarge" = 257698037760 # 240 GB
+    # R6g family
+    "cache.r6g.large"   = 16106127360
+    "cache.r6g.xlarge"  = 32212254720
+    "cache.r6g.2xlarge" = 64424509440
+    "cache.r6g.4xlarge" = 128849018880
+    "cache.r6g.8xlarge" = 257698037760
   }
-}
 
-# ECS Task Definition for report generator
-resource "aws_ecs_task_definition" "report" {
-  family                   = "${local.cluster_id}-report"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  # Resource allocation: Starting with minimal resources (256 CPU, 512 MB memory).
-  # These will be increased only if core dumps or task exits occur during execution.
-  cpu                      = 256
-  memory                   = 512
-  execution_role_arn       = aws_iam_role.report_task_execution_role.arn
-  task_role_arn            = aws_iam_role.report_task_role.arn
+  # 85% fill factor — cache stays warm without hitting eviction pressure
+  _fill_factor = 0.85
 
-  container_definitions = jsonencode([
-    {
-      name      = "report-generator"
-      image     = "python:3.11-slim"
-      essential = true
+  # Advertised bytes for this run; fall back to t4g.micro if type is unknown.
+  _advertised_bytes = lookup(local._node_memory_bytes, var.node_type,
+  local._node_memory_bytes["cache.t4g.micro"])
 
-      # Custom Execution Control:
-      # This command explicitly overrides the container default to inject the report generation logic.
-      # We install dependencies, fetch the script from S3, and execute it, maintaining full control
-      # over the runtime environment without requiring a custom Docker image build.
-      command = [
-        "/bin/sh",
-        "-c",
-        "set -e; pip install boto3 pandas plotly && python - << 'PY'\nimport boto3\nimport sys\n\ns3 = boto3.client('s3')\n\ntry:\n    s3.download_file('${var.metrics_export_s3_bucket}', 'scripts/report_generator.py', 'report_generator.py')\nexcept Exception as e:\n    print(f'Failed to download report_generator.py from S3 bucket ${var.metrics_export_s3_bucket} with key scripts/report_generator.py: {e}', file=sys.stderr)\n    sys.exit(1)\nPY\npython report_generator.py"
-      ]
+  # key-maximum: how many data_size-byte values fit at the target fill factor.
+  # Each Redis key has ~70 bytes of overhead on top of the value.
+  _key_overhead_bytes = 70
+  _bytes_per_key      = var.loadgen_memtier_data_size + local._key_overhead_bytes
 
-      environment = [
-        { name = "S3_BUCKET", value = var.metrics_export_s3_bucket },
-        { name = "S3_PREFIX", value = var.metrics_export_s3_prefix },
-        { name = "CLUSTER_ID", value = local.cluster_id }
-        # REPORT_TIMESTAMP will be injected by Lambda overrides
-      ]
+  # Capacity scales with primary shards in cluster mode. Non-cluster replicas
+  # mirror the primary, so they do not increase writable keyspace.
+  _writable_shard_count = var.cluster_mode_enabled ? var.num_node_groups : 1
+  _target_fill_bytes    = local._advertised_bytes * local._writable_shard_count * local._fill_factor
+  _target_total_keys    = floor(local._target_fill_bytes / local._bytes_per_key)
+  _target_keys_per_task = max(1, floor(local._target_total_keys / var.loadgen_task_count))
 
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.report.name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "report"
-        }
-      }
-    }
-  ])
-
-  tags = {
-    Name = "${local.cluster_id}-report"
-  }
+  # If the user explicitly set key-maximum, honour it; otherwise auto-compute.
+  memtier_key_maximum = var.loadgen_memtier_key_maximum > 0 ? var.loadgen_memtier_key_maximum : (
+    local._target_keys_per_task
+  )
 }

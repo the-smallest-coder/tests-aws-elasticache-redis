@@ -10,6 +10,11 @@ locals {
   run_id_full   = formatdate("YYYYMMDDhhmmss", time_static.run_id.rfc3339)
   run_id_suffix = substr(local.run_id_full, length(local.run_id_full) - 8, 8)
 
+  # Human-readable folder name shared by all artefacts for this run:
+  # Terraform writes cluster_details.json here at apply time; the Lambda
+  # uses the same name for metrics/logs so everything lands in one folder.
+  run_folder = formatdate("YYYYMMDD-HHmmss", time_static.run_id.rfc3339)
+
   # Cluster identifier (run-scoped)
   cluster_id = "${var.project_name}-${var.engine_type}-${local.run_id_suffix}"
 
@@ -127,11 +132,4 @@ resource "aws_elasticache_replication_group" "main" {
   lifecycle {
     ignore_changes = [engine_version]
   }
-}
-
-resource "aws_s3_object" "report_script" {
-  bucket = var.metrics_export_s3_bucket
-  key    = "scripts/report_generator.py"
-  source = "${path.module}/report_generator.py"
-  etag   = filemd5("${path.module}/report_generator.py")
 }

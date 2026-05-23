@@ -63,3 +63,10 @@ __pycache__/
 *.lib
 *.obj
 *.pdb
+
+results/*
+reporter/.venv
+reporter/*.txt
+reporter/*.log
+tmp
+.codex-tmp
