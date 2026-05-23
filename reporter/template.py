@@ -144,9 +144,13 @@ def render_html(
     chart_deep_dive_html: str,
 ) -> str:
     """Assemble the full standalone single-run HTML report page."""
-    meta_parts = [f"{id_label}: {cluster_id}", f"Run: {suffix}"]
+    escaped_cluster_id = escape(str(cluster_id), quote=True)
+    meta_parts = [
+        f"{escape(str(id_label), quote=True)}: {escaped_cluster_id}",
+        f"Run: {escape(str(suffix), quote=True)}",
+    ]
     if time_range:
-        meta_parts.append(time_range)
+        meta_parts.append(escape(str(time_range), quote=True))
     meta_line = "&nbsp;&nbsp;·&nbsp;&nbsp;".join(meta_parts)
 
     return f"""<!DOCTYPE html>
@@ -154,7 +158,7 @@ def render_html(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ElastiCache Report — {cluster_id}</title>
+  <title>ElastiCache Report — {escaped_cluster_id}</title>
   <style>
 {_SINGLE_CSS}  </style>
 </head>

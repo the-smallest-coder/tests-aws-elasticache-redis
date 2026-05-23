@@ -74,8 +74,13 @@ CLUSTER_ID=$(echo "$TF_OUTPUT" | jq -r '.elasticache_cluster_id.value')
 CLUSTER_NAME=$(echo "$TF_OUTPUT" | jq -r '.loadgen_cluster_name.value')
 SERVICE_NAME=$(echo "$TF_OUTPUT" | jq -r '.loadgen_service_name.value')
 LOG_GROUP=$(echo "$TF_OUTPUT" | jq -r '.loadgen_log_group_name.value')
-RUN_TIMESTAMP=$(echo "$TF_OUTPUT" | jq -r '.run_timestamp.value')
-CURRENT_RUN="${RUN_TIMESTAMP:0:8}-${RUN_TIMESTAMP:8:6}"
+CURRENT_RUN=$(_current_run_from_tf_output "$TF_OUTPUT") || {
+    echo "ERROR: Terraform outputs do not include run_folder or a parseable run_timestamp." >&2
+    exit 1
+}
+if ! echo "$TF_OUTPUT" | jq -e '.run_folder.value? // empty' >/dev/null; then
+    echo "WARNING: Terraform output 'run_folder' is missing; falling back to legacy run_timestamp parsing." >&2
+fi
 
 S3_BUCKET=$(echo "$S3_LOCATION" | sed 's|^s3://||' | cut -d/ -f1)
 S3_PREFIX=$(echo "$S3_LOCATION" | sed "s|^s3://${S3_BUCKET}/||")

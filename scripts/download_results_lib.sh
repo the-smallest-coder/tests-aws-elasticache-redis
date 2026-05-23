@@ -24,6 +24,26 @@ _s3_uri_key() {
     printf '%s\n' "${1#s3://*/}"
 }
 
+_current_run_from_tf_output() {
+    local tf_output="$1"
+    local run_folder
+    local run_timestamp
+
+    run_folder=$(jq -r '.run_folder.value // empty' <<<"$tf_output")
+    if [[ -n "$run_folder" && "$run_folder" != "null" ]]; then
+        printf '%s\n' "$run_folder"
+        return 0
+    fi
+
+    run_timestamp=$(jq -r '.run_timestamp.value // empty' <<<"$tf_output")
+    if [[ "$run_timestamp" =~ ^[0-9]{14}$ ]]; then
+        printf '%s-%s\n' "${run_timestamp:0:8}" "${run_timestamp:8:6}"
+        return 0
+    fi
+
+    return 1
+}
+
 _keys_contain() {
     local keys="$1"
     local wanted="$2"
