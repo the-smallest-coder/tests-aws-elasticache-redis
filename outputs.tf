@@ -72,8 +72,13 @@ output "configuration_summary" {
 }
 
 output "run_timestamp" {
-  description = "Run timestamp used for naming"
+  description = "Compact 24-hour run timestamp used for IDs"
   value       = local.run_id_full
+}
+
+output "run_folder" {
+  description = "S3 result folder for this run"
+  value       = local.run_folder
 }
 
 # Load Generator Outputs

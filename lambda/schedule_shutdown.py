@@ -1,3 +1,4 @@
+import html
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -6,6 +7,10 @@ import boto3
 
 ecs = boto3.client("ecs")
 events = boto3.client("events")
+
+
+def _html(value):
+    return html.escape(str(value), quote=True)
 
 
 def _ses_config():
@@ -159,6 +164,17 @@ def handler(event, context):
     remaining_h = remaining_min // 60
     remaining_m = remaining_min % 60
     eta_str = f"{remaining_h}h {remaining_m}m" if remaining_h > 0 else f"{remaining_m}m"
+    cluster_label_html = _html(cluster_id or service)
+    engine_label_html = _html(f"{engine_type} {engine_version}")
+    node_type_html = _html(node_type)
+    node_count_html = _html(node_count)
+    loadgen_tasks_html = _html(loadgen_tasks)
+    duration_minutes_html = _html(duration_minutes)
+    aws_region_html = _html(aws_region)
+    eta_html = _html(eta_str)
+    shutdown_time_short_html = _html(shutdown_time.strftime('%Y-%m-%d %H:%M UTC'))
+    shutdown_time_full_html = _html(shutdown_time.strftime('%Y-%m-%d %H:%M:%S'))
+    verify_time_full_html = _html(verify_time.strftime('%Y-%m-%d %H:%M:%S'))
 
     body_html = f"""\
 <!DOCTYPE html>
@@ -180,7 +196,7 @@ def handler(event, context):
                 </td>
                 <td align="right" valign="top">
                   <span style="display:inline-block;background:rgba(255,255,255,0.2);color:#fff;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:500;">
-                    {engine_type} {engine_version}
+                    {engine_label_html}
                   </span>
                 </td>
               </tr>
@@ -192,7 +208,7 @@ def handler(event, context):
         <tr>
           <td style="background-color:#e8f0fe;padding:14px 40px;border-bottom:1px solid #d2e3fc;">
             <span style="font-size:13px;color:#5f6368;">Cluster</span><br>
-            <span style="font-size:16px;color:#1a73e8;font-weight:600;font-family:monospace;">{cluster_id or service}</span>
+            <span style="font-size:16px;color:#1a73e8;font-weight:600;font-family:monospace;">{cluster_label_html}</span>
           </td>
         </tr>
 
@@ -204,31 +220,31 @@ def handler(event, context):
               <tr>
                 <td width="50%" style="padding:8px 0;">
                   <span style="font-size:12px;color:#80868b;">Engine</span><br>
-                  <span style="font-size:15px;color:#202124;font-weight:500;">{engine_type} {engine_version}</span>
+                  <span style="font-size:15px;color:#202124;font-weight:500;">{engine_label_html}</span>
                 </td>
                 <td width="50%" style="padding:8px 0;">
                   <span style="font-size:12px;color:#80868b;">Node Type</span><br>
-                  <span style="font-size:15px;color:#202124;font-weight:500;">{node_type}</span>
+                  <span style="font-size:15px;color:#202124;font-weight:500;">{node_type_html}</span>
                 </td>
               </tr>
               <tr>
                 <td width="50%" style="padding:8px 0;">
                   <span style="font-size:12px;color:#80868b;">Cache Nodes</span><br>
-                  <span style="font-size:15px;color:#202124;font-weight:500;">{node_count}</span>
+                  <span style="font-size:15px;color:#202124;font-weight:500;">{node_count_html}</span>
                 </td>
                 <td width="50%" style="padding:8px 0;">
                   <span style="font-size:12px;color:#80868b;">Load Generator Tasks</span><br>
-                  <span style="font-size:15px;color:#202124;font-weight:500;">{loadgen_tasks}</span>
+                  <span style="font-size:15px;color:#202124;font-weight:500;">{loadgen_tasks_html}</span>
                 </td>
               </tr>
               <tr>
                 <td width="50%" style="padding:8px 0;">
                   <span style="font-size:12px;color:#80868b;">Test Duration</span><br>
-                  <span style="font-size:15px;color:#202124;font-weight:500;">{duration_minutes} min</span>
+                  <span style="font-size:15px;color:#202124;font-weight:500;">{duration_minutes_html} min</span>
                 </td>
                 <td width="50%" style="padding:8px 0;">
                   <span style="font-size:12px;color:#80868b;">Region</span><br>
-                  <span style="font-size:15px;color:#202124;font-weight:500;">{aws_region}</span>
+                  <span style="font-size:15px;color:#202124;font-weight:500;">{aws_region_html}</span>
                 </td>
               </tr>
             </table>
@@ -242,8 +258,8 @@ def handler(event, context):
               <tr>
                 <td style="padding:16px 20px;">
                   <span style="font-size:13px;color:#e37400;font-weight:600;">&#9200; ESTIMATED TIME REMAINING</span><br>
-                  <span style="font-size:22px;color:#202124;font-weight:700;">{eta_str}</span>
-                  <span style="font-size:13px;color:#5f6368;margin-left:10px;">&#8594; Shutdown at {shutdown_time.strftime('%Y-%m-%d %H:%M UTC')}</span>
+                  <span style="font-size:22px;color:#202124;font-weight:700;">{eta_html}</span>
+                  <span style="font-size:13px;color:#5f6368;margin-left:10px;">&#8594; Shutdown at {shutdown_time_short_html}</span>
                 </td>
               </tr>
             </table>
@@ -261,11 +277,11 @@ def handler(event, context):
               </tr>
               <tr>
                 <td style="padding:10px 16px;font-size:14px;color:#202124;border-bottom:1px solid #e8eaed;">&#128308; Shutdown</td>
-                <td style="padding:10px 16px;font-size:14px;color:#202124;font-family:monospace;border-bottom:1px solid #e8eaed;">{shutdown_time.strftime('%Y-%m-%d %H:%M:%S')}</td>
+                <td style="padding:10px 16px;font-size:14px;color:#202124;font-family:monospace;border-bottom:1px solid #e8eaed;">{shutdown_time_full_html}</td>
               </tr>
               <tr>
                 <td style="padding:10px 16px;font-size:14px;color:#202124;">&#9989; Verification</td>
-                <td style="padding:10px 16px;font-size:14px;color:#202124;font-family:monospace;">{verify_time.strftime('%Y-%m-%d %H:%M:%S')}</td>
+                <td style="padding:10px 16px;font-size:14px;color:#202124;font-family:monospace;">{verify_time_full_html}</td>
               </tr>
             </table>
           </td>
@@ -275,7 +291,7 @@ def handler(event, context):
         <tr>
           <td style="background-color:#f8f9fa;padding:20px 40px;border-top:1px solid #e8eaed;">
             <p style="margin:0;font-size:12px;color:#80868b;text-align:center;">
-              Automated notification from ElastiCache Performance Lab&nbsp;&nbsp;&#8226;&nbsp;&nbsp;{aws_region}
+              Automated notification from ElastiCache Performance Lab&nbsp;&nbsp;&#8226;&nbsp;&nbsp;{aws_region_html}
             </p>
           </td>
         </tr>

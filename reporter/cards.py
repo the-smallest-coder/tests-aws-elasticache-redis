@@ -1,5 +1,7 @@
 """Stat-cards and header-pills HTML builders."""
 
+from html import escape
+
 import pandas as pd
 
 from helpers import (
@@ -9,6 +11,10 @@ from helpers import (
     cloudwatch_eviction_series,
     first_positive_timestamp,
 )
+
+
+def _html(value):
+    return escape(str(value), quote=True)
 
 
 def _format_elapsed(delta):
@@ -34,7 +40,8 @@ def header_pills(config):
         ('Mode', mode_label),
     ]
     pills = ''.join(
-        f"<div class='pill'>{label}: <span>{val}</span></div>"
+        f"<div class='pill'>{_html(label)}: "
+        f"<span>{_html(val)}</span></div>"
         for label, val in items if val
     )
     return f"<div class='pills'>{pills}</div>" if pills else ''
@@ -211,10 +218,10 @@ def stat_cards_html(
         return ''
 
     html = ''.join(
-        f"<div class='card' title='{tip}'>"
-        f"<div class='card-label'>{label}</div>"
-        f"<div class='card-value' style='color:{color}'>{val}"
-        f"<span class='card-unit'>{unit}</span></div>"
+        f"<div class='card' title='{_html(tip)}'>"
+        f"<div class='card-label'>{_html(label)}</div>"
+        f"<div class='card-value' style='color:{_html(color)}'>{_html(val)}"
+        f"<span class='card-unit'>{_html(unit)}</span></div>"
         f"</div>"
         for label, val, unit, color, tip in cards
     )

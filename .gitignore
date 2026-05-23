@@ -70,3 +70,4 @@ reporter/*.txt
 reporter/*.log
 tmp
 .codex-tmp
+.vscode/settings.json

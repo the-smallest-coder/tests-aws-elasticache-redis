@@ -190,11 +190,13 @@ def generate_memtier_artifacts(run_dir: Path) -> dict:
 
         minute_df.to_csv(minute_path, index=False)
         totals_payload = _totals_payload(totals_df, stream_id)
+        totals_artifact = None
         if totals_payload is not None:
             totals_path.write_text(json.dumps(totals_payload, indent=2) + "\n", encoding="utf-8")
+            totals_artifact = totals_path
 
         frames.append(minute_df)
-        stream_results.append({"source": source_path, "minute": minute_path, "totals": totals_path})
+        stream_results.append({"source": source_path, "minute": minute_path, "totals": totals_artifact})
         output_dir = source_path.parent if output_dir is None else output_dir
         if output_dir != source_path.parent:
             raise ValueError("memtier source streams must share one artifact directory")

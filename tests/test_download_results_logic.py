@@ -21,6 +21,27 @@ def bash(command: str, stdin: str = "") -> str:
 
 
 class DownloadResultsLogicTests(unittest.TestCase):
+    def test_current_run_uses_run_folder_output_directly(self):
+        tf_output = json.dumps(
+            {
+                "run_folder": {"value": "20260518-213000"},
+                "run_timestamp": {"value": "20260518093000"},
+            }
+        )
+
+        self.assertEqual(
+            bash(f"_current_run_from_tf_output {shlex.quote(tf_output)}"),
+            "20260518-213000",
+        )
+
+    def test_current_run_falls_back_to_legacy_run_timestamp(self):
+        tf_output = json.dumps({"run_timestamp": {"value": "20260518093000"}})
+
+        self.assertEqual(
+            bash(f"_current_run_from_tf_output {shlex.quote(tf_output)}"),
+            "20260518-093000",
+        )
+
     def test_runs_are_ordered_by_latest_object_upload(self):
         listing = "\n".join(
             [

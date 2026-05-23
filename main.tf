@@ -6,8 +6,8 @@ locals {
     var.engine_type == "redis" ? "redis${split(".", var.engine_version)[0]}" : "valkey${split(".", var.engine_version)[0]}"
   )
 
-  # Run suffix (last 8 digits) keeps IDs within ElastiCache length limits.
-  run_id_full   = formatdate("YYYYMMDDhhmmss", time_static.run_id.rfc3339)
+  # Compact run timestamp and suffix keep IDs within ElastiCache length limits.
+  run_id_full   = formatdate("YYYYMMDDHHmmss", time_static.run_id.rfc3339)
   run_id_suffix = substr(local.run_id_full, length(local.run_id_full) - 8, 8)
 
   # Human-readable folder name shared by all artefacts for this run:

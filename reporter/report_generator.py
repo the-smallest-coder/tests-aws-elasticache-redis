@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-from report_common import ECS_ENV_VARS
+from report_common import ECS_ENV_VARS, inspect_run_directory
 from report_compare import run_compare_report
 from helpers import read_file_content
 from parsers import (
@@ -41,13 +41,40 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--node-type", default="", help="e.g. cache.t4g.micro")
     generate.add_argument("--node-count", default="", help="e.g. 1")
     generate.add_argument("--cluster-mode", default="false", help="true or false")
+    inspect = subparsers.add_parser("inspect", help="Inspect local run readiness and legacy warnings.")
+    inspect.add_argument("run_dir", help="Path to a run results directory to inspect.")
     return parser
 
 
 def normalize_argv(argv: list[str]) -> list[str]:
-    if argv and argv[0] not in {"compare", "generate"} and not argv[0].startswith("-"):
+    if argv and argv[0] not in {"compare", "generate", "inspect"} and not argv[0].startswith("-"):
         return ["compare", *argv]
     return argv
+
+
+def run_inspect_report(run_dir: str) -> None:
+    run_path = Path(run_dir)
+    inspection = inspect_run_directory(run_path)
+
+    print(f"Run: {inspection['run_folder']}")
+    print(f"Path: {run_path}")
+    print("\nFiles:")
+    for key, present in inspection["files"].items():
+        print(f"  - {key}: {'present' if present else 'missing'}")
+
+    canonical = inspection.get("canonical_json_path")
+    print("\nSelection:")
+    print(f"  - canonical_json_path: {canonical if canonical else 'none'}")
+    print(f"  - uploaded_ready: {inspection['uploaded_ready']}")
+    print(f"  - local_ready: {inspection['local_ready']}")
+
+    warnings = inspection.get("warnings", [])
+    print("\nWarnings:")
+    if warnings:
+        for warning in warnings:
+            print(f"  - {warning}")
+    else:
+        print("  - none")
 
 
 def missing_ecs_env_vars() -> list[str]:
@@ -69,10 +96,33 @@ def _format_time_range(start, end) -> str:
         return ""
 
     def format_ts(value):
-        pattern = "%Y-%m-%d %H:%M:%S.%f" if value.microsecond else "%Y-%m-%d %H:%M:%S"
-        return f"{value.strftime(pattern)} UTC"
+        base = value.strftime("%Y-%m-%d %H:%M:%S")
+        if value.microsecond:
+            if value.microsecond % 1000 == 0:
+                frac = f"{value.microsecond // 1000:03d}"
+            else:
+                frac = f"{value.microsecond:06d}".rstrip("0")
+            return f"{base}.{frac} UTC"
+        return f"{base} UTC"
 
     return f"{format_ts(start)} - {format_ts(end)}"
+
+
+def _validate_report_window(extra_stats: dict, context: str) -> tuple:
+    start = _normalize_ts(extra_stats.get("first_message_ts"))
+    end = _normalize_ts(extra_stats.get("last_message_ts"))
+
+    if start is None or end is None:
+        raise ValueError(
+            f"{context}: missing memtier log message window; first_message_ts and "
+            "last_message_ts are required."
+        )
+    if start > end:
+        raise ValueError(
+            f"{context}: invalid memtier log message window; "
+            f"first_message_ts ({start}) is after last_message_ts ({end})."
+        )
+    return start, end
 
 
 def _clip_to_time_window(df, start, end):
@@ -319,15 +369,19 @@ def _load_memtier_artifacts(entries: list[tuple[str, str]]):
     return minute_df, totals_df
 
 
-def _read_local_memtier_artifact_contents(logs_dir: Path) -> list[tuple[str, str]]:
-    loadgen_dir = logs_dir / "loadgen"
-    if not loadgen_dir.exists():
+def _read_generated_memtier_artifact_contents(generated: dict) -> list[tuple[str, str]]:
+    """Read only sidecars produced by the current local ETL invocation."""
+    combined_path = generated.get("combined")
+    if combined_path is None or not Path(combined_path).is_file():
         return []
-    files = sorted(
-        path
-        for path in loadgen_dir.rglob("*")
-        if path.is_file() and (path.name.endswith(".minute.csv") or path.name.endswith(".totals.json"))
+
+    files = [Path(combined_path)]
+    files.extend(
+        Path(totals_path)
+        for stream in generated.get("streams", [])
+        if (totals_path := stream.get("totals")) is not None and Path(totals_path).is_file()
     )
+    files = sorted(files)
     return [(str(path), path.read_text(encoding="utf-8")) for path in files]
 
 
@@ -405,8 +459,7 @@ def create_report(
     config = config or {}
     extra_stats = extra_stats or {}
 
-    x_min = _normalize_ts(extra_stats.get("first_message_ts"))
-    x_max = _normalize_ts(extra_stats.get("last_message_ts"))
+    x_min, x_max = _validate_report_window(extra_stats, "report generation")
 
     oom_df = extra_stats.get("oom_df", pd.DataFrame())
 
@@ -470,19 +523,26 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     ecs_df = parse_metrics_csv(ecs_csvs[0].read_text(encoding="utf-8")) if ecs_csvs else pd.DataFrame()
 
     log_entries = _read_local_log_contents(logs_dir, cluster_id)
+    artifact_entries = []
     try:
         from memtier_etl import generate_memtier_artifacts as _gen_etl
-        _gen_etl(run_path)
+        artifact_entries = _read_generated_memtier_artifact_contents(_gen_etl(run_path))
     except Exception as exc:
         print(f"Warning: memtier ETL generation failed: {exc}")
-    artifact_entries = _read_local_memtier_artifact_contents(logs_dir)
     if not log_entries:
-        print(f"No log file found in {logs_dir}")
-        logs_df = pd.DataFrame()
-        extra_stats = {}
-    else:
-        print(f"Reading {len(log_entries)} loadgen log file(s)")
-        logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
+        print(f"No loadgen log files found in {logs_dir}; memtier log message window is required.")
+        sys.exit(2)
+
+    print(f"Reading {len(log_entries)} loadgen log file(s)")
+    logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
+    extra_stats["source_mode"] = "local"
+    extra_stats["memtier_window_source"] = "memtier_log_messages"
+    extra_stats["artifact_source"] = "generated" if artifact_entries else "missing"
+    try:
+        _validate_report_window(extra_stats, f"local run {run_path}")
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(2)
     if artifact_entries:
         memtier_minute_df, memtier_totals_df = _load_memtier_artifacts(artifact_entries)
     else:
@@ -501,6 +561,17 @@ def run_generate_report(run_dir: str, config: dict) -> None:
         config=config,
         extra_stats=extra_stats,
     )
+
+    cluster_details_path = run_path / "cluster_details.json"
+    if cluster_details_path.exists():
+        try:
+            from report_common import enrich_summary_meta
+            cluster_details = json.loads(cluster_details_path.read_text(encoding="utf-8"))
+            summary_obj = json.loads(summary_json)
+            enrich_summary_meta(summary_obj, cluster_details)
+            summary_json = json.dumps(summary_obj, indent=2, default=str)
+        except Exception as exc:
+            print(f"Warning: failed to enrich summary with cluster_details.json: {exc}")
 
     out_path = run_path / "results_local.json"
     out_path.write_text(summary_json, encoding="utf-8")
@@ -565,11 +636,24 @@ def run_uploaded_report() -> None:
         sys.exit(2)
     print(f"Reading {len(log_entries)} loadgen log file(s)")
     logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
+    extra_stats["source_mode"] = "uploaded"
+    extra_stats["memtier_window_source"] = "memtier_log_messages"
+    extra_stats["artifact_source"] = "uploaded"
+    try:
+        _validate_report_window(extra_stats, f"uploaded run {logs_prefix}")
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(2)
+
     artifact_entries = _read_uploaded_memtier_artifact_contents(logs_prefix)
-    if artifact_entries:
-        memtier_minute_df, memtier_totals_df = _load_memtier_artifacts(artifact_entries)
-    else:
-        memtier_minute_df, memtier_totals_df = _memtier_dfs_from_log_entries(log_entries)
+    if not artifact_entries:
+        print(
+            f"Error: no memtier ETL sidecar artifacts found under {logs_prefix}\n"
+            "Expected _memtier.minute.csv and *.totals.json to be present.\n"
+            "Run the exporter to generate them before calling the report generator."
+        )
+        sys.exit(2)
+    memtier_minute_df, memtier_totals_df = _load_memtier_artifacts(artifact_entries)
 
     ecs_df = pd.DataFrame()
     if ecs_metrics_csv:
@@ -590,6 +674,17 @@ def run_uploaded_report() -> None:
         config=_config_from_env(),
         extra_stats=extra_stats,
     )
+
+    cluster_details_uri = f"s3://{output_bucket}/{output_prefix}{timestamp}/cluster_details.json"
+    try:
+        from report_common import enrich_summary_meta
+        cluster_details = json.loads(read_file_content(cluster_details_uri))
+        summary_obj = json.loads(summary_json)
+        enrich_summary_meta(summary_obj, cluster_details)
+        summary_json = json.dumps(summary_obj, indent=2, default=str)
+        print(f"Summary enriched from {cluster_details_uri}")
+    except Exception:
+        pass  # cluster_details.json is optional
 
     output_key = f"{output_prefix}{timestamp}/results_{suffix}.html"
     output_json_key = re.sub(r"\.html$", ".json", output_key)
@@ -624,6 +719,10 @@ def main() -> None:
             "cluster_mode": args.cluster_mode,
         }
         run_generate_report(args.run_dir, config)
+        return
+
+    if args.command == "inspect":
+        run_inspect_report(args.run_dir)
         return
 
     parser.print_help()

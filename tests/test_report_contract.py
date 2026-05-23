@@ -303,6 +303,28 @@ class CardRenderingTests(unittest.TestCase):
 
 
 class LocalGenerateLegacyLogTests(unittest.TestCase):
+    @staticmethod
+    def _write_empty_metrics(run_dir: Path) -> None:
+        metrics_dir = run_dir / "metrics"
+        metrics_dir.mkdir()
+        (metrics_dir / "cluster-a.csv").write_text(
+            "Timestamp,Namespace,MetricName,Stat,Value,Unit,Dimensions\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _write_stale_totals(path: Path) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "ops_per_sec": 900,
+                    "avg_latency_ms": 9,
+                    "bandwidth_kbs": 90,
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def test_reader_falls_back_to_legacy_root_loadgen_log(self):
         try:
             from report_generator import _read_local_log_contents
@@ -354,6 +376,128 @@ class LocalGenerateLegacyLogTests(unittest.TestCase):
             "memtier/memtier/stream-b",
         ])
         self.assertEqual(float(memtier_totals_df["throughput_avg"].sum()), 300.0)
+
+    def test_local_generate_ignores_stale_artifacts_without_source_logs(self):
+        try:
+            from report_generator import run_generate_report
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self._write_empty_metrics(run_dir)
+            stale_dir = run_dir / "logs" / "loadgen" / "memtier" / "memtier"
+            stale_dir.mkdir(parents=True)
+            (stale_dir / "_memtier.minute.csv").write_text(
+                "minute_utc,throughput_sum,latency_weighted_avg,throughput_median,"
+                "throughput_avg,throughput_p10,throughput_p90,throughput_min,"
+                "throughput_max,latency_median,latency_avg,latency_p10,latency_p90,"
+                "latency_min,latency_max\n"
+                "2026-05-01T00:00:00Z,900,9,900,900,900,900,900,900,9,9,9,9,9,9\n",
+                encoding="utf-8",
+            )
+            self._write_stale_totals(stale_dir / "stale.totals.json")
+
+            with self.assertRaises(SystemExit) as raised:
+                run_generate_report(str(run_dir), {})
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_local_generate_ignores_stale_totals_for_incomplete_current_log(self):
+        try:
+            from report_generator import run_generate_report
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self._write_empty_metrics(run_dir)
+            stream_dir = run_dir / "logs" / "loadgen" / "memtier" / "memtier"
+            stream_dir.mkdir(parents=True)
+            (stream_dir / "stream-a.txt").write_text(
+                "[2026-05-01T00:00:00] [memtier/stream-a] "
+                "[RUN #1 1%, 1 secs] 100 (avg: 100) ops/sec, "
+                "1KB/sec (avg: 1KB/sec), 1 (avg: 1) msec latency\n",
+                encoding="utf-8",
+            )
+            self._write_stale_totals(stream_dir / "stream-a.totals.json")
+
+            run_generate_report(str(run_dir), {})
+
+            report_summary = json.loads((run_dir / "results_local.json").read_text(encoding="utf-8"))
+            self.assertFalse(report_summary["benchmark"])
+
+
+class ReportWindowValidationTests(unittest.TestCase):
+    def test_create_report_requires_memtier_message_window(self):
+        try:
+            import pandas as pd
+            from report_generator import create_report
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        empty = pd.DataFrame()
+        with self.assertRaisesRegex(ValueError, "missing memtier log message window"):
+            create_report(
+                metrics_df=empty,
+                logs_df=empty,
+                memtier_minute_df=empty,
+                memtier_totals_df=empty,
+                cluster_id="cluster-a",
+                suffix="run-1",
+                ecs_metrics_df=empty,
+                config={},
+                extra_stats={},
+            )
+
+    def test_create_report_rejects_inverted_memtier_window(self):
+        try:
+            import pandas as pd
+            from report_generator import create_report
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        empty = pd.DataFrame()
+        with self.assertRaisesRegex(ValueError, "invalid memtier log message window"):
+            create_report(
+                metrics_df=empty,
+                logs_df=empty,
+                memtier_minute_df=empty,
+                memtier_totals_df=empty,
+                cluster_id="cluster-a",
+                suffix="run-1",
+                ecs_metrics_df=empty,
+                config={},
+                extra_stats={
+                    "first_message_ts": pd.Timestamp("2026-05-01T00:01:00"),
+                    "last_message_ts": pd.Timestamp("2026-05-01T00:00:59"),
+                },
+            )
+
+    def test_time_range_formats_fractional_seconds_without_padding(self):
+        try:
+            import pandas as pd
+            from report_generator import _format_time_range
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        text = _format_time_range(
+            pd.Timestamp("2026-02-27T13:00:12.390000"),
+            pd.Timestamp("2026-02-27T14:00:39.089000"),
+        )
+        self.assertEqual(
+            text,
+            "2026-02-27 13:00:12.390 UTC - 2026-02-27 14:00:39.089 UTC",
+        )
 
 
 if __name__ == "__main__":
