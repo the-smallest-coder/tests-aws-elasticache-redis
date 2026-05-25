@@ -239,9 +239,12 @@ if [[ -n "$VERIFY_JSON" ]]; then
     VERIFY_SCHEDULE=$(echo "$VERIFY_JSON" | jq -r '.ScheduleExpression')
 
     if [[ "$VERIFY_SCHEDULE" =~ cron\(([0-9]+)\ ([0-9]+)\ ([0-9]+)\ ([0-9]+)\ \?\ ([0-9]+)\) ]]; then
-        VERIFY_EPOCH=$(date -u -d "${BASH_REMATCH[5]}-${BASH_REMATCH[4]}-${BASH_REMATCH[3]} ${BASH_REMATCH[2]}:${BASH_REMATCH[1]}:00" +%s 2>/dev/null || echo 0)
-        if [[ "$VERIFY_EPOCH" -gt "$(date -u +%s)" ]]; then
-            VERIFY_PENDING=true
+        VERIFY_YEAR="${BASH_REMATCH[5]}"
+        if [[ "$VERIFY_YEAR" -ne 2099 ]]; then
+            VERIFY_EPOCH=$(date -u -d "${VERIFY_YEAR}-${BASH_REMATCH[4]}-${BASH_REMATCH[3]} ${BASH_REMATCH[2]}:${BASH_REMATCH[1]}:00" +%s 2>/dev/null || echo 0)
+            if [[ "$VERIFY_EPOCH" -gt "$(date -u +%s)" ]]; then
+                VERIFY_PENDING=true
+            fi
         fi
     fi
 fi
