@@ -184,6 +184,7 @@ fi
 echo ""
 echo "=== Shutdown Schedule ==="
 SHUTDOWN_PASSED=false
+VERIFY_PENDING=false
 SHUTDOWN_RULE="${CLUSTER_ID}-shutdown"
 RULE_JSON=$(aws events describe-rule \
     --name "$SHUTDOWN_RULE" \
@@ -226,6 +227,23 @@ if [[ -n "$RULE_JSON" ]]; then
     fi
 else
     echo "  Shutdown rule not found or already cleaned up."
+fi
+
+VERIFY_RULE="${CLUSTER_ID}-shutdown-verify"
+VERIFY_JSON=$(aws events describe-rule \
+    --name "$VERIFY_RULE" \
+    --region "$REGION" \
+    --output json 2>/dev/null) || VERIFY_JSON=""
+
+if [[ -n "$VERIFY_JSON" ]]; then
+    VERIFY_SCHEDULE=$(echo "$VERIFY_JSON" | jq -r '.ScheduleExpression')
+
+    if [[ "$VERIFY_SCHEDULE" =~ cron\(([0-9]+)\ ([0-9]+)\ ([0-9]+)\ ([0-9]+)\ \?\ ([0-9]+)\) ]]; then
+        VERIFY_EPOCH=$(date -u -d "${BASH_REMATCH[5]}-${BASH_REMATCH[4]}-${BASH_REMATCH[3]} ${BASH_REMATCH[2]}:${BASH_REMATCH[1]}:00" +%s 2>/dev/null || echo 0)
+        if [[ "$VERIFY_EPOCH" -gt "$(date -u +%s)" ]]; then
+            VERIFY_PENDING=true
+        fi
+    fi
 fi
 
 # -- 5. S3 Results --
@@ -335,14 +353,16 @@ elif [[ "$EC_ST" == "available" && "$SVC_RUN" -eq 0 && "$SVC_DES" -eq 0 ]]; then
     PHASE="SHUTTING DOWN - Tasks stopped, waiting for cleanup"
 elif [[ "$EC_ST" == "deleting" ]]; then
     PHASE="CLEANUP - ElastiCache cluster being deleted"
+elif [[ "${REPORTER_COUNT:-0}" -gt 0 && "$REPORTER_STATUS" != "STOPPED" ]]; then
+    PHASE="REPORTING - Current run report generator is running"
 elif [[ "$CURRENT_STATUS_PRESENT" == "true" && "$CURRENT_STATUS_COMPLETE" != "true" ]]; then
     PHASE="FAILED - Current run export/report status is incomplete"
 elif [[ "$CURRENT_STATUS_COMPLETE" == "true" && "$CURRENT_REPORT_READY" != "true" ]]; then
     PHASE="FAILED - Current run report status references missing outputs"
-elif [[ "${REPORTER_COUNT:-0}" -gt 0 && "$REPORTER_STATUS" != "STOPPED" ]]; then
-    PHASE="REPORTING - Current run report generator is running"
 elif [[ "${REPORTER_COUNT:-0}" -gt 0 && "$REPORTER_STATUS" == "STOPPED" ]]; then
     PHASE="FAILED - Reporter stopped before current report became ready"
+elif [[ "$VERIFY_PENDING" == "true" ]]; then
+    PHASE="VERIFYING - Waiting for shutdown verification/report handoff"
 elif [[ -z "$EC_ST" && "$SVC_RUN" -eq 0 && "$SVC_DES" -eq 0 && "$SVC_PENDING" -eq 0 && "$SHUTDOWN_PASSED" == "true" ]]; then
     PHASE="INCOMPLETE - Current run report not found"
 elif [[ -z "$EC_ST" ]]; then
