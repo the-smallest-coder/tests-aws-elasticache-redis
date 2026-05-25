@@ -210,42 +210,28 @@ _print_current_run_status() {
     echo "  Current Terraform run $CURRENT_RUN is not ready: $phase."
 }
 
-# If --latest, select the newest ready run rather than the newest run with any object.
-# Run folder timestamps can come from the test's own clock/timezone and are not
-# always ordered the same way as upload completion time.
+# If --latest, download the current Terraform run only after its canonical
+# report_status.json points at ready report artifacts. Do not silently fall back
+# to an older completed run while the current test is still reporting.
 if $LATEST; then
-    NEWEST_S3_RUN=$(printf '%s\n' "$S3_LISTING" | _run_timestamps_by_recency | head -n 1)
-    LATEST_READY_RUN=""
     CURRENT_STATUS_JSON=""
+    CURRENT_PREFIX="${S3_PREFIX}${CURRENT_RUN}/"
+    CURRENT_KEYS=$(awk -v prefix="$CURRENT_PREFIX" 'index($0, prefix) == 1 {print}' <<<"$ALL_KEYS")
 
-    while IFS= read -r run; do
-        [[ -z "$run" ]] && continue
-        status_json=$(_read_status_json "$run" || true)
-        if [[ "$run" == "$CURRENT_RUN" ]]; then
-            CURRENT_STATUS_JSON="$status_json"
-        fi
-        if [[ -n "$status_json" ]] && _report_status_ready "$status_json" "$ALL_KEYS"; then
-            LATEST_READY_RUN="$run"
-            break
-        fi
-    done < <(printf '%s\n' "$S3_LISTING" | _run_timestamps_by_recency)
-
-    if [[ "$NEWEST_S3_RUN" == "$CURRENT_RUN" && "$LATEST_READY_RUN" != "$CURRENT_RUN" ]]; then
-        _print_current_run_status "$CURRENT_STATUS_JSON"
+    if [[ -z "$CURRENT_KEYS" ]]; then
+        echo "  Current Terraform run $CURRENT_RUN has no S3 objects yet."
+        echo "  Run ./scripts/check_status.sh for full infrastructure details."
+        exit 0
     fi
 
-    if [[ -n "$LATEST_READY_RUN" ]]; then
-        if [[ "$NEWEST_S3_RUN" == "$CURRENT_RUN" && "$LATEST_READY_RUN" != "$CURRENT_RUN" ]]; then
-            echo "  Latest completed run is $LATEST_READY_RUN; downloading that result set instead."
-        else
-            echo "  Latest ready run by upload time: $LATEST_READY_RUN"
-        fi
-        ALL_KEYS=$(grep "$LATEST_READY_RUN" <<<"$ALL_KEYS")
+    CURRENT_STATUS_JSON=$(_read_status_json "$CURRENT_RUN" || true)
+    if [[ -n "$CURRENT_STATUS_JSON" ]] && _report_status_ready "$CURRENT_STATUS_JSON" "$ALL_KEYS"; then
+        echo "  Current Terraform run is ready: $CURRENT_RUN"
+        ALL_KEYS="$CURRENT_KEYS"
     else
-        echo "  No ready result sets found yet."
-        if [[ "$NEWEST_S3_RUN" == "$CURRENT_RUN" ]]; then
-            echo "  Run ./scripts/check_status.sh for full infrastructure details."
-        fi
+        _print_current_run_status "$CURRENT_STATUS_JSON"
+        echo "  Refusing to download older results while current Terraform run $CURRENT_RUN is not ready."
+        echo "  Run ./scripts/check_status.sh for full infrastructure details."
         exit 0
     fi
 fi
