@@ -364,7 +364,8 @@ elif [[ "$CURRENT_STATUS_COMPLETE" == "true" && "$CURRENT_REPORT_READY" != "true
     PHASE="FAILED - Current run report status references missing outputs"
 elif [[ "${REPORTER_COUNT:-0}" -gt 0 && "$REPORTER_STATUS" == "STOPPED" ]]; then
     PHASE="FAILED - Reporter stopped before current report became ready"
-elif [[ "$VERIFY_PENDING" == "true" ]]; then
+elif [[ "$VERIFY_PENDING" == "true" && "$SHUTDOWN_PASSED" == "true" \
+    && "$SVC_RUN" -eq 0 && "$SVC_DES" -eq 0 && "$SVC_PENDING" -eq 0 ]]; then
     PHASE="VERIFYING - Waiting for shutdown verification/report handoff"
 elif [[ -z "$EC_ST" && "$SVC_RUN" -eq 0 && "$SVC_DES" -eq 0 && "$SVC_PENDING" -eq 0 && "$SHUTDOWN_PASSED" == "true" ]]; then
     PHASE="INCOMPLETE - Current run report not found"
