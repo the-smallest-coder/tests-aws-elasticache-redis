@@ -28,6 +28,7 @@ source "$SCRIPT_DIR/download_results_lib.sh"
 OUTPUT_DIR=""
 REPORTS_ONLY=false
 LATEST=false
+FORCE=false
 PARALLEL=8
 
 while [[ $# -gt 0 ]]; do
@@ -42,6 +43,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --reports-only) REPORTS_ONLY=true; shift ;;
         --latest)       LATEST=true; shift ;;
+        --force)        FORCE=true; shift ;;
         --parallel)
             if [[ $# -lt 2 || "$2" == --* ]]; then
                 echo "ERROR: --parallel requires a positive integer argument." >&2
@@ -262,6 +264,22 @@ fi
 FILE_COUNT=$(echo "$ALL_KEYS" | wc -l | tr -d ' ')
 echo "  Found $FILE_COUNT file(s) to download."
 
+DOWNLOAD_TASKS=$(echo "$S3_LISTING" | awk '
+    NR==FNR {a[$0]=1; next}
+    NF>=4 {
+        # get size
+        size = $3
+        # key is everything from the 4th field onwards, preserving internal spaces
+        match($0, / [0-9]+ /)
+        if (RSTART > 0) {
+            key_start = RSTART + RLENGTH
+            key = substr($0, key_start)
+            if (key in a) {
+                printf "%s|%s\n", size, key
+            }
+        }
+    }' <(echo "$ALL_KEYS") -)
+
 # -- Download files (parallel) --
 echo ""
 echo "=== Downloading ==="
@@ -269,14 +287,18 @@ echo "=== Downloading ==="
 mkdir -p "$OUTPUT_DIR"
 
 RESULTS_DIR=$(mktemp -d)
-mkdir -p "${RESULTS_DIR}/ok" "${RESULTS_DIR}/fail"
+mkdir -p "${RESULTS_DIR}/ok" "${RESULTS_DIR}/fail" "${RESULTS_DIR}/skip"
 _download_one() {
-    local key="$1"
+    local task="$1"
     local s3_bucket="$2"
     local s3_prefix="$3"
     local output_dir="$4"
     local region="$5"
     local results_dir="$6"
+    local force="$7"
+
+    local expected_size="${task%%|*}"
+    local key="${task#*|}"
 
     local relative_path="${key#$s3_prefix}"
     local local_path="${output_dir}/${relative_path}"
@@ -289,6 +311,16 @@ _download_one() {
     local safe_name
     safe_name=$(echo "$relative_path" | tr '/' '_' | tr -d ' ')
 
+    if [[ "$force" == "false" && -f "$local_path" ]]; then
+        local local_size
+        local_size=$(wc -c < "$local_path" | tr -d ' ')
+        if [[ "$local_size" == "$expected_size" ]]; then
+            touch "${results_dir}/skip/${safe_name}"
+            echo "  SKIP  $relative_path"
+            return 0
+        fi
+    fi
+
     if aws s3 cp "s3://${s3_bucket}/${key}" "$local_path" --region "$region" --quiet 2>/dev/null; then
         touch "${results_dir}/ok/${safe_name}"
         echo "  OK    $relative_path"
@@ -299,12 +331,13 @@ _download_one() {
 }
 export -f _download_one
 
-echo "$ALL_KEYS" | grep -v '^$' | \
+echo "$DOWNLOAD_TASKS" | grep -v '^$' | \
     xargs -P "$PARALLEL" -I{} bash -c \
         '_download_one "$@"' _ {} \
-        "$S3_BUCKET" "$S3_PREFIX" "$OUTPUT_DIR" "$REGION" "$RESULTS_DIR"
+        "$S3_BUCKET" "$S3_PREFIX" "$OUTPUT_DIR" "$REGION" "$RESULTS_DIR" "$FORCE"
 
 DOWNLOADED=$(find "${RESULTS_DIR}/ok" -maxdepth 1 -type f | wc -l | tr -d ' ')
+SKIPPED=$(find "${RESULTS_DIR}/skip" -maxdepth 1 -type f | wc -l | tr -d ' ')
 FAILED=$(find "${RESULTS_DIR}/fail" -maxdepth 1 -type f | wc -l | tr -d ' ')
 rm -rf "$RESULTS_DIR"
 
@@ -312,6 +345,7 @@ rm -rf "$RESULTS_DIR"
 echo ""
 echo "=== Download Complete ==="
 echo "  Downloaded: $DOWNLOADED"
+[[ "$SKIPPED" -gt 0 ]] && echo "  Skipped:    $SKIPPED"
 [[ "$FAILED" -gt 0 ]] && echo "  Failed:     $FAILED"
 echo "  Location:   $(cd "$OUTPUT_DIR" && pwd)"
 
