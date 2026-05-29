@@ -7,6 +7,7 @@
 #   ./scripts/download_results.sh --reports-only         # just HTML reports
 #   ./scripts/download_results.sh --latest               # latest run only
 #   ./scripts/download_results.sh --output-dir ./my-dir  # custom destination
+#   ./scripts/download_results.sh --force                # force download (skip size check)
 #
 # Requires: AWS CLI configured, jq, terraform, Terraform state accessible from project root.
 
@@ -28,6 +29,7 @@ source "$SCRIPT_DIR/download_results_lib.sh"
 OUTPUT_DIR=""
 REPORTS_ONLY=false
 LATEST=false
+FORCE=false
 PARALLEL=8
 
 while [[ $# -gt 0 ]]; do
@@ -42,6 +44,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --reports-only) REPORTS_ONLY=true; shift ;;
         --latest)       LATEST=true; shift ;;
+        --force)        FORCE=true; shift ;;
         --parallel)
             if [[ $# -lt 2 || "$2" == --* ]]; then
                 echo "ERROR: --parallel requires a positive integer argument." >&2
@@ -105,8 +108,9 @@ if [[ -z "$S3_LISTING" ]]; then
     exit 0
 fi
 
-# Extract S3 keys (4th column from aws s3 ls output)
-ALL_KEYS=$(echo "$S3_LISTING" | awk '{print $4}')
+# Extract S3 keys (4th column from aws s3 ls output) and sizes (3rd column)
+DOWNLOAD_ITEMS=$(echo "$S3_LISTING" | awk '{print $3 "\t" $4}')
+ALL_KEYS=$(echo "$DOWNLOAD_ITEMS" | awk '{print $2}')
 
 _read_status_json() {
     local run="$1"
@@ -240,7 +244,8 @@ if $LATEST; then
         else
             echo "  Latest ready run by upload time: $LATEST_READY_RUN"
         fi
-        ALL_KEYS=$(grep "$LATEST_READY_RUN" <<<"$ALL_KEYS")
+        DOWNLOAD_ITEMS=$(grep "$LATEST_READY_RUN" <<<"$DOWNLOAD_ITEMS")
+        ALL_KEYS=$(echo "$DOWNLOAD_ITEMS" | awk '{print $2}')
     else
         echo "  No ready result sets found yet."
         if [[ "$NEWEST_S3_RUN" == "$CURRENT_RUN" ]]; then
@@ -252,15 +257,16 @@ fi
 
 # If --reports-only, filter to HTML files
 if $REPORTS_ONLY; then
-    ALL_KEYS=$(echo "$ALL_KEYS" | grep '\.html$' || true)
-    if [[ -z "$ALL_KEYS" ]]; then
+    DOWNLOAD_ITEMS=$(echo "$DOWNLOAD_ITEMS" | grep '\.html$' || true)
+    ALL_KEYS=$(echo "$DOWNLOAD_ITEMS" | awk '{print $2}')
+    if [[ -z "$DOWNLOAD_ITEMS" ]]; then
         echo "  No HTML reports found yet. The report generator may not have run."
         exit 0
     fi
 fi
 
-FILE_COUNT=$(echo "$ALL_KEYS" | wc -l | tr -d ' ')
-echo "  Found $FILE_COUNT file(s) to download."
+FILE_COUNT=$(echo "$DOWNLOAD_ITEMS" | wc -l | tr -d ' ')
+echo "  Found $FILE_COUNT file(s) to check/download."
 
 # -- Download files (parallel) --
 echo ""
@@ -269,14 +275,16 @@ echo "=== Downloading ==="
 mkdir -p "$OUTPUT_DIR"
 
 RESULTS_DIR=$(mktemp -d)
-mkdir -p "${RESULTS_DIR}/ok" "${RESULTS_DIR}/fail"
+mkdir -p "${RESULTS_DIR}/ok" "${RESULTS_DIR}/fail" "${RESULTS_DIR}/skip"
 _download_one() {
-    local key="$1"
-    local s3_bucket="$2"
-    local s3_prefix="$3"
-    local output_dir="$4"
-    local region="$5"
-    local results_dir="$6"
+    local s3_size="$1"
+    local key="$2"
+    local s3_bucket="$3"
+    local s3_prefix="$4"
+    local output_dir="$5"
+    local region="$6"
+    local results_dir="$7"
+    local force="$8"
 
     local relative_path="${key#$s3_prefix}"
     local local_path="${output_dir}/${relative_path}"
@@ -289,6 +297,16 @@ _download_one() {
     local safe_name
     safe_name=$(echo "$relative_path" | tr '/' '_' | tr -d ' ')
 
+    if [[ -f "$local_path" ]] && [[ "$force" != "true" ]]; then
+        local local_size
+        local_size=$(wc -c < "$local_path" 2>/dev/null | tr -d ' ' || echo -1)
+        if [[ "$local_size" == "$s3_size" ]]; then
+            touch "${results_dir}/skip/${safe_name}"
+            echo "  SKIP  $relative_path"
+            return 0
+        fi
+    fi
+
     if aws s3 cp "s3://${s3_bucket}/${key}" "$local_path" --region "$region" --quiet 2>/dev/null; then
         touch "${results_dir}/ok/${safe_name}"
         echo "  OK    $relative_path"
@@ -299,19 +317,23 @@ _download_one() {
 }
 export -f _download_one
 
-echo "$ALL_KEYS" | grep -v '^$' | \
-    xargs -P "$PARALLEL" -I{} bash -c \
-        '_download_one "$@"' _ {} \
-        "$S3_BUCKET" "$S3_PREFIX" "$OUTPUT_DIR" "$REGION" "$RESULTS_DIR"
+export S3_BUCKET S3_PREFIX OUTPUT_DIR REGION RESULTS_DIR FORCE
+echo "$DOWNLOAD_ITEMS" | grep -v '^$' | while read -r size key; do
+    # Null-terminate each set of arguments to correctly handle spaces in filenames
+    printf "%s\0%s\0" "$size" "$key"
+done | xargs -0 -P "$PARALLEL" -n 2 bash -c \
+    '_download_one "$1" "$2" "$S3_BUCKET" "$S3_PREFIX" "$OUTPUT_DIR" "$REGION" "$RESULTS_DIR" "$FORCE"' _
 
 DOWNLOADED=$(find "${RESULTS_DIR}/ok" -maxdepth 1 -type f | wc -l | tr -d ' ')
 FAILED=$(find "${RESULTS_DIR}/fail" -maxdepth 1 -type f | wc -l | tr -d ' ')
+SKIPPED=$(find "${RESULTS_DIR}/skip" -maxdepth 1 -type f | wc -l | tr -d ' ')
 rm -rf "$RESULTS_DIR"
 
 # -- Summary --
 echo ""
 echo "=== Download Complete ==="
 echo "  Downloaded: $DOWNLOADED"
+[[ "$SKIPPED" -gt 0 ]] && echo "  Skipped:    $SKIPPED"
 [[ "$FAILED" -gt 0 ]] && echo "  Failed:     $FAILED"
 echo "  Location:   $(cd "$OUTPUT_DIR" && pwd)"
 
