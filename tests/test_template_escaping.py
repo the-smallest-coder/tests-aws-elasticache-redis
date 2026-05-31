@@ -43,6 +43,11 @@ class SingleReportEscapingTests(unittest.TestCase):
         self.assertNotIn(time_range, page)
 
     def test_header_pills_escape_config_values(self):
+        try:
+            import pandas as pd
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"{exc.name} is not installed in this environment")
+
         from cards import header_pills
 
         html = header_pills(
