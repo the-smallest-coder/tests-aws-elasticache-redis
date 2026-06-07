@@ -48,6 +48,15 @@ C_THROTTLE_OUT = '#b71c1c'
 C_THROTTLE_PPS = '#ff9800'
 C_CURR_CONN    = '#00838f'
 C_MEM_FRAG     = '#795548'
+C_LAT_P50      = '#1f77b4'
+C_LAT_P99      = '#d62728'
+C_LAT_P999     = '#7b1fa2'
+C_LAT_WORST99  = '#ff7f0e'
+C_LAT_WORST999 = '#111827'
+
+CLIENT_LATENCY_NAMESPACE = 'ElastiCache/LoadGenerator'
+CLIENT_LATENCY_METRIC = 'ClientLatency'
+CLIENT_LATENCY_STATS = ('p50', 'p99', 'p99.9')
 
 
 # ------------------------------------------------------------------ #
@@ -81,6 +90,53 @@ def metric_filter(df, name, stat, dim_prefix=None):
     if dim_prefix:
         mask = mask & df['Dimensions'].str.startswith(dim_prefix)
     return df[mask]
+
+
+def client_latency_series(df):
+    """Return ECS load-generator client latency percentile series from EMF CloudWatch rows."""
+    columns = [
+        'Timestamp',
+        'p50_ms',
+        'p99_ms',
+        'p999_ms',
+        'worst_stream_p99_ms',
+        'worst_stream_p999_ms',
+    ]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    required = {'Timestamp', 'Namespace', 'MetricName', 'Stat', 'Value', 'Dimensions'}
+    if not required.issubset(df.columns):
+        return pd.DataFrame(columns=columns)
+
+    source = df[
+        (df['Namespace'] == CLIENT_LATENCY_NAMESPACE)
+        & (df['MetricName'] == CLIENT_LATENCY_METRIC)
+        & (df['Stat'].isin(CLIENT_LATENCY_STATS))
+    ].copy()
+    if source.empty:
+        return pd.DataFrame(columns=columns)
+
+    aggregate = (
+        source.groupby(['Timestamp', 'Stat'], as_index=False)['Value']
+        .mean()
+        .pivot(index='Timestamp', columns='Stat', values='Value')
+        .reset_index()
+        .rename(columns={'p50': 'p50_ms', 'p99': 'p99_ms', 'p99.9': 'p999_ms'})
+    )
+    worst = (
+        source[source['Stat'].isin(('p99', 'p99.9'))]
+        .groupby(['Timestamp', 'Stat'], as_index=False)['Value']
+        .max()
+        .pivot(index='Timestamp', columns='Stat', values='Value')
+        .reset_index()
+        .rename(columns={'p99': 'worst_stream_p99_ms', 'p99.9': 'worst_stream_p999_ms'})
+    )
+    merged = aggregate.merge(worst, on='Timestamp', how='outer').sort_values('Timestamp')
+    for column in columns:
+        if column not in merged.columns:
+            merged[column] = pd.NA
+    return merged[columns].reset_index(drop=True)
 
 
 def cache_hit_rate_df(df):

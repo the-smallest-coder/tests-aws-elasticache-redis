@@ -28,6 +28,7 @@ class SingleReportEscapingTests(unittest.TestCase):
             cards_html="",
             chart_memtier_html="",
             chart_infra_html="",
+            chart_client_latency_html="",
             chart_deep_dive_html="",
         )
 

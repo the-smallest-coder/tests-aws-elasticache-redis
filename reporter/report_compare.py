@@ -24,6 +24,7 @@ SECTION_META: dict[str, dict[str, str]] = {
     "benchmark": {"title": "Benchmark Summary", "badge": "memtier"},
     "engine_memory": {"title": "Engine and Memory", "badge": "infra"},
     "cache_latency": {"title": "Cache, Latency, Connections", "badge": "behavior"},
+    "client_latency": {"title": "Client Latency", "badge": "ecs-emf"},
     "network_ecs": {"title": "Network and ECS", "badge": "loadgen"},
 }
 
@@ -58,6 +59,11 @@ METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("cache_latency", "String Latency", ("latency_server_us", "string_avg"), "us", 3, "lower", "Average server-side string command latency."),
     MetricSpec("cache_latency", "Avg Connections", ("connections", "avg"), "", 1, "neutral", "Average concurrent connections on the cache node."),
     MetricSpec("cache_latency", "Peak Connections", ("connections", "max"), "", 1, "neutral", "Highest concurrent connection count."),
+    MetricSpec("client_latency", "Client p50", ("client_latency", "p50_ms"), "ms", 3, "lower", "Mean ECS EMF p50 client latency over the report window."),
+    MetricSpec("client_latency", "Client p99", ("client_latency", "p99_ms"), "ms", 3, "lower", "Mean ECS EMF p99 client latency over the report window."),
+    MetricSpec("client_latency", "Client p99.9", ("client_latency", "p999_ms"), "ms", 3, "lower", "Mean ECS EMF p99.9 client latency over the report window."),
+    MetricSpec("client_latency", "Worst Stream p99", ("client_latency", "worst_stream_p99_ms"), "ms", 3, "lower", "Maximum per-task ECS EMF p99 client latency."),
+    MetricSpec("client_latency", "Worst Stream p99.9", ("client_latency", "worst_stream_p999_ms"), "ms", 3, "lower", "Maximum per-task ECS EMF p99.9 client latency."),
     MetricSpec("network_ecs", "Avg Cache In", ("network", "cache", "avg_in_kbs"), "KB/s", 2, "neutral", "Average inbound network throughput on the cache node."),
     MetricSpec("network_ecs", "Avg Cache Out", ("network", "cache", "avg_out_kbs"), "KB/s", 2, "neutral", "Average outbound network throughput on the cache node."),
     MetricSpec("network_ecs", "BW In Throttle Events", ("network", "throttling", "bw_in_exceeded_total"), "", 0, "lower", "Total bandwidth-in throttle events."),

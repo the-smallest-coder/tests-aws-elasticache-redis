@@ -16,14 +16,13 @@ from report_generator import run_uploaded_report
 
 
 STATISTICS = ["Average", "Sum", "Maximum", "Minimum"]
+CLIENT_LATENCY_PERCENTILES = ["p50", "p99", "p99.9"]
 LOG_EXPORT_PART_SIZE = 6 * 1024 * 1024
 
 REQUIRED_ELASTICACHE_METRICS = [
     "CacheHitRate",
     "CacheHits",
     "CacheMisses",
-    "CPUCreditBalance",
-    "CPUCreditUsage",
     "CPUUtilization",
     "CurrConnections",
     "CurrItems",
@@ -51,6 +50,11 @@ REQUIRED_ELASTICACHE_METRICS = [
     "SwapUsage",
 ]
 
+OPTIONAL_ELASTICACHE_METRICS = [
+    "CPUCreditBalance",
+    "CPUCreditUsage",
+]
+
 REQUIRED_ECS_METRICS = [
     "CPUUtilization",
     "MemoryUtilization",
@@ -67,6 +71,14 @@ REQUIRED_ECS_METRICS = [
     "ContainerNetworkRxBytes",
     "ContainerNetworkTxBytes",
 ]
+
+ECS_CLIENT_LATENCY_METRIC = {
+    "namespace": "ElastiCache/LoadGenerator",
+    "metric_name": "ClientLatency",
+    "dimensions": ("ClusterName", "ServiceName", "TaskId"),
+    "stats": CLIENT_LATENCY_PERCENTILES,
+    "unit": "Milliseconds",
+}
 
 REPORT_CONTRACT_METRICS = [
     "CacheHits",
@@ -198,6 +210,26 @@ def _list_metrics(namespace: str, filter_dimensions=None, metric_name_filter=Non
     return metrics
 
 
+def _metric_source_stats(source: dict) -> tuple[list[str], list[str]]:
+    return (
+        list(source.get("statistics") or STATISTICS),
+        list(source.get("extended_statistics") or []),
+    )
+
+
+def _describe_metric_source(source: dict, discovered_dimensions: list[list[dict[str, str]]]) -> None:
+    label = source.get("label")
+    if not label:
+        return
+    discovered = [_dimensions_to_str(dimensions) for dimensions in discovered_dimensions]
+    print(
+        f"{label}: Namespace={source['namespace']} "
+        f"MetricName={','.join(source.get('metric_names', []))} "
+        f"RequestedDimensions={_dimensions_to_str(source.get('dimensions') or [])} "
+        f"DiscoveredDimensions={discovered or 'none'}"
+    )
+
+
 def export_metric_sources_to_s3(sources, bucket: str, key: str, start_time: datetime, end_time: datetime) -> str:
     csv_buffer = io.StringIO()
     writer = csv.writer(csv_buffer)
@@ -208,10 +240,15 @@ def export_metric_sources_to_s3(sources, bucket: str, key: str, start_time: date
         namespace = source["namespace"]
         filter_dimensions = source.get("dimensions") or []
         metric_name_filter = set(source.get("metric_names", [])) if source.get("metric_names") else None
+        optional_metric_names = set(source.get("optional_metric_names", []))
+        statistics, extended_statistics = _metric_source_stats(source)
+        discovered_dimensions = []
 
         for metric_name in sorted(metric_name_filter or []):
+            if metric_name in optional_metric_names:
+                continue
             dims_key = tuple(sorted((d["Name"], d["Value"]) for d in filter_dimensions))
-            metric_map[(namespace, metric_name, dims_key)] = filter_dimensions
+            metric_map[(namespace, metric_name, dims_key)] = (filter_dimensions, statistics, extended_statistics)
 
         try:
             metrics = _list_metrics(namespace, filter_dimensions, metric_name_filter)
@@ -221,20 +258,29 @@ def export_metric_sources_to_s3(sources, bucket: str, key: str, start_time: date
 
         for metric in metrics:
             dimensions = metric.get("Dimensions", [])
+            discovered_dimensions.append(dimensions)
             dims_key = tuple(sorted((d["Name"], d["Value"]) for d in dimensions))
-            metric_map[(namespace, metric["MetricName"], dims_key)] = dimensions
+            metric_map[(namespace, metric["MetricName"], dims_key)] = (dimensions, statistics, extended_statistics)
 
-    for (namespace, metric_name, _dims_key), dimensions in metric_map.items():
+        _describe_metric_source(source, discovered_dimensions)
+
+    for (namespace, metric_name, _dims_key), (dimensions, statistics, extended_statistics) in metric_map.items():
         dimensions_str = _dimensions_to_str(dimensions)
         try:
+            params = {
+                "Namespace": namespace,
+                "MetricName": metric_name,
+                "Dimensions": dimensions,
+                "StartTime": start_time,
+                "EndTime": end_time,
+                "Period": 60,
+            }
+            if statistics:
+                params["Statistics"] = statistics
+            if extended_statistics:
+                params["ExtendedStatistics"] = extended_statistics
             response = cloudwatch.get_metric_statistics(
-                Namespace=namespace,
-                MetricName=metric_name,
-                Dimensions=dimensions,
-                StartTime=start_time,
-                EndTime=end_time,
-                Period=60,
-                Statistics=STATISTICS,
+                **params,
             )
         except Exception as exc:
             print(f"Error fetching metric {namespace}/{metric_name} for {dimensions_str}: {exc}")
@@ -243,9 +289,13 @@ def export_metric_sources_to_s3(sources, bucket: str, key: str, start_time: date
         for datapoint in sorted(response.get("Datapoints", []), key=lambda d: d["Timestamp"]):
             ts = datapoint["Timestamp"].isoformat()
             unit = datapoint.get("Unit", "None")
-            for stat in STATISTICS:
+            for stat in statistics:
                 if stat in datapoint:
                     writer.writerow([ts, namespace, metric_name, stat, datapoint[stat], unit, dimensions_str])
+            for stat in extended_statistics:
+                values = datapoint.get("ExtendedStatistics", {})
+                if stat in values:
+                    writer.writerow([ts, namespace, metric_name, stat, values[stat], unit, dimensions_str])
 
     s3.put_object(Bucket=bucket, Key=key, Body=csv_buffer.getvalue(), ContentType="text/csv")
     print(f"Metrics exported to s3://{bucket}/{key}")
@@ -257,7 +307,8 @@ def export_elasticache_metrics_to_s3(replication_group_id, bucket, key, start_ti
         {
             "namespace": "AWS/ElastiCache",
             "dimensions": [{"Name": "ReplicationGroupId", "Value": replication_group_id}],
-            "metric_names": REQUIRED_ELASTICACHE_METRICS,
+            "metric_names": REQUIRED_ELASTICACHE_METRICS + OPTIONAL_ELASTICACHE_METRICS,
+            "optional_metric_names": OPTIONAL_ELASTICACHE_METRICS,
         }
     ]
 
@@ -279,7 +330,8 @@ def export_elasticache_metrics_to_s3(replication_group_id, bucket, key, start_ti
             {
                 "namespace": "AWS/ElastiCache",
                 "dimensions": [{"Name": "CacheClusterId", "Value": cluster_id}],
-                "metric_names": REQUIRED_ELASTICACHE_METRICS,
+                "metric_names": REQUIRED_ELASTICACHE_METRICS + OPTIONAL_ELASTICACHE_METRICS,
+                "optional_metric_names": OPTIONAL_ELASTICACHE_METRICS,
             }
         )
 
@@ -303,6 +355,15 @@ def export_ecs_metrics_to_s3(cluster, service, bucket, key, start_time, end_time
             "namespace": "ECS/ContainerInsights",
             "dimensions": [{"Name": "ClusterName", "Value": cluster}, {"Name": "ServiceName", "Value": service}],
             "metric_names": REQUIRED_ECS_METRICS,
+        },
+        {
+            "namespace": ECS_CLIENT_LATENCY_METRIC["namespace"],
+            "dimensions": [{"Name": "ClusterName", "Value": cluster}, {"Name": "ServiceName", "Value": service}],
+            "metric_names": [ECS_CLIENT_LATENCY_METRIC["metric_name"]],
+            "optional_metric_names": [ECS_CLIENT_LATENCY_METRIC["metric_name"]],
+            "statistics": [],
+            "extended_statistics": ECS_CLIENT_LATENCY_METRIC["stats"],
+            "label": "ECS client latency metric discovery",
         },
     ]
     return export_metric_sources_to_s3(sources, bucket, key, start_time, end_time)

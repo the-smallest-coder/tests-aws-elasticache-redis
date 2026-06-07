@@ -3,6 +3,7 @@
 from helpers import (
     metric_filter,
     cache_hit_rate_df,
+    client_latency_series,
     select_mem_dims,
     cloudwatch_eviction_series,
     first_positive_timestamp,
@@ -64,6 +65,7 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
           "throttling": { bw_in_exceeded_total, bw_out_exceeded_total, pps_exceeded_total }
       },
       "latency_server_us": { get_avg, set_avg, string_avg },
+      "client_latency": { p50_ms, p99_ms, p999_ms, worst_stream_p99_ms, worst_stream_p999_ms },
       "connections": { avg, max },
       "ecs": { avg_cpu_pct, max_cpu_pct, peak_mem_mb }
     }
@@ -238,6 +240,21 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
                 latency_server_us[key] = agg['avg']
 
     # ------------------------------------------------------------------ #
+    #  client_latency (ECS load-generator EMF percentiles)                #
+    # ------------------------------------------------------------------ #
+    client_latency = {}
+    latency_df = client_latency_series(ecs_df)
+    if not latency_df.empty:
+        for key in ('p50_ms', 'p99_ms', 'p999_ms'):
+            vals = latency_df[key].dropna()
+            if not vals.empty:
+                client_latency[key] = _safe(float(vals.mean()), 3)
+        for key in ('worst_stream_p99_ms', 'worst_stream_p999_ms'):
+            vals = latency_df[key].dropna()
+            if not vals.empty:
+                client_latency[key] = _safe(float(vals.max()), 3)
+
+    # ------------------------------------------------------------------ #
     #  connections                                                         #
     # ------------------------------------------------------------------ #
     connections = {}
@@ -271,6 +288,7 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         'memory':             memory,
         'network':            network,
         'latency_server_us':  latency_server_us,
+        'client_latency':     client_latency,
         'connections':        connections,
         'ecs':                ecs,
     }

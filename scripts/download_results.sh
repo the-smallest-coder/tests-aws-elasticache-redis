@@ -6,6 +6,7 @@
 #   ./scripts/download_results.sh                        # download everything
 #   ./scripts/download_results.sh --reports-only         # just HTML reports
 #   ./scripts/download_results.sh --latest               # latest run only
+#   ./scripts/download_results.sh --latest-runs 5        # latest 5 missing run folders
 #   ./scripts/download_results.sh --output-dir ./my-dir  # custom destination
 #
 # Requires: AWS CLI configured, jq, terraform, Terraform state accessible from project root.
@@ -28,6 +29,7 @@ source "$SCRIPT_DIR/download_results_lib.sh"
 OUTPUT_DIR=""
 REPORTS_ONLY=false
 LATEST=false
+LATEST_RUN_COUNT=0
 PARALLEL=8
 
 while [[ $# -gt 0 ]]; do
@@ -42,6 +44,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --reports-only) REPORTS_ONLY=true; shift ;;
         --latest)       LATEST=true; shift ;;
+        --latest-runs)
+            if [[ $# -lt 2 || "$2" == --* ]]; then
+                echo "ERROR: --latest-runs requires a positive integer argument." >&2
+                exit 1
+            fi
+            if ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
+                echo "ERROR: --latest-runs must be a positive integer, got '$2'." >&2
+                exit 1
+            fi
+            LATEST_RUN_COUNT="$2"
+            shift 2
+            ;;
         --parallel)
             if [[ $# -lt 2 || "$2" == --* ]]; then
                 echo "ERROR: --parallel requires a positive integer argument." >&2
@@ -57,6 +71,11 @@ while [[ $# -gt 0 ]]; do
         *)              echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+if $LATEST && [[ "$LATEST_RUN_COUNT" -gt 0 ]]; then
+    echo "ERROR: --latest and --latest-runs cannot be used together." >&2
+    exit 1
+fi
 
 # -- Resolve Terraform outputs --
 echo ""
@@ -210,42 +229,63 @@ _print_current_run_status() {
     echo "  Current Terraform run $CURRENT_RUN is not ready: $phase."
 }
 
-# If --latest, select the newest ready run rather than the newest run with any object.
-# Run folder timestamps can come from the test's own clock/timezone and are not
-# always ordered the same way as upload completion time.
+# If --latest, download the current Terraform run only after its canonical
+# report_status.json points at ready report artifacts. Do not silently fall back
+# to an older completed run while the current test is still reporting.
 if $LATEST; then
-    NEWEST_S3_RUN=$(printf '%s\n' "$S3_LISTING" | _run_timestamps_by_recency | head -n 1)
-    LATEST_READY_RUN=""
     CURRENT_STATUS_JSON=""
+    CURRENT_PREFIX="${S3_PREFIX}${CURRENT_RUN}/"
+    CURRENT_KEYS=$(awk -v prefix="$CURRENT_PREFIX" 'index($0, prefix) == 1 {print}' <<<"$ALL_KEYS")
 
-    while IFS= read -r run; do
-        [[ -z "$run" ]] && continue
-        status_json=$(_read_status_json "$run" || true)
-        if [[ "$run" == "$CURRENT_RUN" ]]; then
-            CURRENT_STATUS_JSON="$status_json"
-        fi
-        if [[ -n "$status_json" ]] && _report_status_ready "$status_json" "$ALL_KEYS"; then
-            LATEST_READY_RUN="$run"
-            break
-        fi
-    done < <(printf '%s\n' "$S3_LISTING" | _run_timestamps_by_recency)
-
-    if [[ "$NEWEST_S3_RUN" == "$CURRENT_RUN" && "$LATEST_READY_RUN" != "$CURRENT_RUN" ]]; then
-        _print_current_run_status "$CURRENT_STATUS_JSON"
+    if [[ -z "$CURRENT_KEYS" ]]; then
+        echo "  Current Terraform run $CURRENT_RUN has no S3 objects yet."
+        echo "  Run ./scripts/check_status.sh for full infrastructure details."
+        exit 0
     fi
 
-    if [[ -n "$LATEST_READY_RUN" ]]; then
-        if [[ "$NEWEST_S3_RUN" == "$CURRENT_RUN" && "$LATEST_READY_RUN" != "$CURRENT_RUN" ]]; then
-            echo "  Latest completed run is $LATEST_READY_RUN; downloading that result set instead."
-        else
-            echo "  Latest ready run by upload time: $LATEST_READY_RUN"
-        fi
-        ALL_KEYS=$(grep "$LATEST_READY_RUN" <<<"$ALL_KEYS")
+    CURRENT_STATUS_JSON=$(_read_status_json "$CURRENT_RUN" || true)
+    if [[ -n "$CURRENT_STATUS_JSON" ]] && _report_status_ready "$CURRENT_STATUS_JSON" "$ALL_KEYS"; then
+        echo "  Current Terraform run is ready: $CURRENT_RUN"
+        ALL_KEYS="$CURRENT_KEYS"
     else
-        echo "  No ready result sets found yet."
-        if [[ "$NEWEST_S3_RUN" == "$CURRENT_RUN" ]]; then
-            echo "  Run ./scripts/check_status.sh for full infrastructure details."
+        _print_current_run_status "$CURRENT_STATUS_JSON"
+        echo "  Refusing to download older results while current Terraform run $CURRENT_RUN is not ready."
+        echo "  Run ./scripts/check_status.sh for full infrastructure details."
+        exit 0
+    fi
+fi
+
+if [[ "$LATEST_RUN_COUNT" -gt 0 ]]; then
+    echo "  Selecting latest $LATEST_RUN_COUNT run(s) by S3 object LastModified time."
+    mkdir -p "$OUTPUT_DIR"
+
+    SELECTED_RUNS=$(_run_timestamps_by_recency <<<"$S3_LISTING" | head -n "$LATEST_RUN_COUNT")
+    if [[ -z "$SELECTED_RUNS" ]]; then
+        echo "  No timestamped run folders found in S3."
+        exit 0
+    fi
+
+    SELECTED_KEYS=""
+    while IFS= read -r run; do
+        [[ -z "$run" ]] && continue
+
+        if [[ -d "${OUTPUT_DIR}/${run}" ]]; then
+            echo "  SKIP  $run already exists locally."
+            continue
         fi
+
+        echo "  ADD   $run"
+        RUN_PREFIX="${S3_PREFIX}${run}/"
+        RUN_KEYS=$(awk -v prefix="$RUN_PREFIX" 'index($0, prefix) == 1 {print}' <<<"$ALL_KEYS")
+        if [[ -n "$RUN_KEYS" ]]; then
+            SELECTED_KEYS="${SELECTED_KEYS}${RUN_KEYS}"$'\n'
+        fi
+    done <<<"$SELECTED_RUNS"
+
+    ALL_KEYS=$(printf '%s' "$SELECTED_KEYS" | grep -v '^$' || true)
+    if [[ -z "$ALL_KEYS" ]]; then
+        echo "  No missing selected run folders to download."
+        echo "  Location: $OUTPUT_DIR"
         exit 0
     fi
 fi

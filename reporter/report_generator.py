@@ -17,7 +17,7 @@ from parsers import (
 )
 from summary import build_summary
 from cards import header_pills, stat_cards_html
-from charts import build_memtier_figure, build_infra_figure, build_elasticache_deep_dive_figure
+from charts import build_memtier_figure, build_infra_figure, build_client_latency_figure, build_elasticache_deep_dive_figure
 from template import render_html
 
 
@@ -304,6 +304,9 @@ _MINUTE_COLUMN_ALIASES = {
 _TOTAL_FIELD_ALIASES = {
     "throughput_avg": ("throughput_avg", "avg_throughput", "ops_per_sec", "ops_sec", "Ops/sec"),
     "latency_avg_ms": ("latency_avg_ms", "avg_latency_ms", "latency_weighted_avg", "Latency (ms)"),
+    "p50_latency_ms": ("p50_latency_ms", "p50 Latency (ms)", "p50_latency", "p50_ms"),
+    "p99_latency_ms": ("p99_latency_ms", "p99 Latency (ms)", "p99_latency", "p99_ms"),
+    "p999_latency_ms": ("p999_latency_ms", "p999 Latency (ms)", "p99.9_latency_ms", "p999_ms"),
     "total_bandwidth_kbs": ("total_bandwidth_kbs", "bandwidth_kbs", "Bandwidth_KBs"),
 }
 
@@ -468,6 +471,7 @@ def create_report(
 
     fig_m = build_memtier_figure(memtier_minute_df, oom_df, metrics_window_df, x_min, x_max)
     fig_i = build_infra_figure(ecs_window_df, metrics_window_df, cluster_id, config, x_min, x_max)
+    fig_l = build_client_latency_figure(ecs_window_df, x_min, x_max)
     fig_d = build_elasticache_deep_dive_figure(metrics_window_df, cluster_id, config, x_min, x_max)
 
     time_range = _format_time_range(x_min, x_max)
@@ -496,6 +500,7 @@ def create_report(
         ),
         chart_memtier_html=fig_m.to_html(include_plotlyjs="cdn", full_html=False),
         chart_infra_html=fig_i.to_html(include_plotlyjs=False, full_html=False),
+        chart_client_latency_html=fig_l.to_html(include_plotlyjs=False, full_html=False),
         chart_deep_dive_html=fig_d.to_html(include_plotlyjs=False, full_html=False),
     )
     return html_content, summary_json
