@@ -13,7 +13,9 @@ from helpers import (
     C_LAT_GET, C_LAT_SET, C_LAT_STR,
     C_THROTTLE_IN, C_THROTTLE_OUT, C_THROTTLE_PPS,
     C_CURR_CONN, C_MEM_FRAG,
+    C_LAT_P50, C_LAT_P99, C_LAT_P999, C_LAT_WORST99, C_LAT_WORST999,
     metric_filter, cache_hit_rate_df, shorten_dim, select_mem_dims, cloudwatch_eviction_series,
+    client_latency_series,
 )
 
 ABS_TIME_HOVER = "%{customdata}"
@@ -438,6 +440,52 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
 # ------------------------------------------------------------------ #
 #  GROUP 3 — ElastiCache Deep-Dive figure                              #
 # ------------------------------------------------------------------ #
+
+def build_client_latency_figure(ecs_df, x_min=None, x_max=None):
+    """Build the ECS load-generator EMF client latency percentile figure."""
+    fig = make_subplots(
+        rows=1, cols=1,
+        subplot_titles=("Client Latency",),
+    )
+
+    series = client_latency_series(ecs_df)
+    traces = [
+        ("p50_ms", "p50", C_LAT_P50, "solid"),
+        ("p99_ms", "p99", C_LAT_P99, "solid"),
+        ("p999_ms", "p99.9", C_LAT_P999, "solid"),
+        ("worst_stream_p99_ms", "worst_stream_p99", C_LAT_WORST99, "dash"),
+        ("worst_stream_p999_ms", "worst_stream_p999", C_LAT_WORST999, "dash"),
+    ]
+    shown = False
+    if not series.empty:
+        for column, label, color, dash in traces:
+            points = series[["Timestamp", column]].dropna()
+            if points.empty:
+                continue
+            fig.add_trace(go.Scatter(
+                x=_plot_x(points["Timestamp"]), y=points[column],
+                customdata=_plot_times(points["Timestamp"]),
+                name=label, mode="lines",
+                line=dict(**LINE_OPTS, color=color, dash=dash),
+                legend="legend",
+                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.3f}} ms</b><extra></extra>",
+            ), row=1, col=1)
+            shown = True
+
+    if not shown:
+        fig.add_annotation(
+            text="No ECS client latency datapoints",
+            xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
+        )
+
+    fig.update_yaxes(title_text="ms", showgrid=True, gridcolor="#f0f0f0", zeroline=False)
+    _set_absolute_xaxes(fig, [1], x_min, x_max)
+    fig.update_layout(
+        **LAYOUT_BASE, height=420,
+        legend=dict(**LEGEND_H, x=0.5, y=-0.18),
+    )
+    return fig
+
 
 def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None, x_min=None, x_max=None):
     """Build a 4-row deep-dive figure for configuration comparison.

@@ -61,6 +61,7 @@ body {
 .group-header .group-badge { font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 12px; white-space: nowrap; }
 .group-badge.memtier  { background: #e8f0fe; color: #1a56db; }
 .group-badge.infra    { background: #e6f4ea; color: #188038; }
+.group-badge.latency  { background: #fce8e6; color: #b3261e; }
 .group-badge.deepdive { background: #f3e5f5; color: #6a1b9a; }
 .group-header::after { content: ''; flex: 1; height: 1px; background: #e0e4ea; }
 #copy-btn {
@@ -141,6 +142,7 @@ def render_html(
     cards_html: str,
     chart_memtier_html: str,
     chart_infra_html: str,
+    chart_client_latency_html: str,
     chart_deep_dive_html: str,
 ) -> str:
     """Assemble the full standalone single-run HTML report page."""
@@ -188,6 +190,14 @@ def render_html(
       <span class="group-badge infra">report window</span>
     </div>
     <div class="chart-wrap">{chart_infra_html}</div>
+  </div>
+
+  <div class="chart-group">
+    <div class="group-header">
+      <h2>Client Latency</h2>
+      <span class="group-badge latency">ECS EMF</span>
+    </div>
+    <div class="chart-wrap">{chart_client_latency_html}</div>
   </div>
 
   <div class="chart-group">
