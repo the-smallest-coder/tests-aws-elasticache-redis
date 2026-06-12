@@ -4,7 +4,7 @@ _run_timestamps_by_recency() {
     awk '
         NF >= 4 {
             key = $4
-            if (match(key, /[0-9]{8}-[0-9]{6}/)) {
+            if (match(key, /[0-9]{8}-[0-9]{6}(-[a-z0-9]{1,8})?/)) {
                 run = substr(key, RSTART, RLENGTH)
                 modified = $1 " " $2
                 if (!(run in latest_modified) || modified > latest_modified[run]) {
@@ -100,4 +100,139 @@ _classify_current_run() {
     else
         printf 'report not started\n'
     fi
+}
+
+_read_status_json() {
+    local run="$1"
+    local status_key="${S3_PREFIX}${run}/report_status.json"
+
+    if ! _keys_contain "$ALL_KEYS" "$status_key"; then
+        return 1
+    fi
+
+    aws s3 cp "s3://${S3_BUCKET}/${status_key}" - --region "$REGION" 2>/dev/null
+}
+
+_current_reporter_state() {
+    REPORTER_COUNT=0
+    REPORTER_STATUS=""
+    local reporter_arns
+    local reporter_family="${CLUSTER_ID}-reporter"
+
+    reporter_arns=$(aws ecs list-tasks \
+        --cluster "$CLUSTER_NAME" \
+        --family "$reporter_family" \
+        --region "$REGION" \
+        --query "taskArns" \
+        --output json 2>/dev/null) || reporter_arns="[]"
+    REPORTER_COUNT=$(jq 'length' <<<"$reporter_arns")
+
+    if [[ "$REPORTER_COUNT" -gt 0 ]]; then
+        REPORTER_STATUS=$(aws ecs describe-tasks \
+            --cluster "$CLUSTER_NAME" \
+            --tasks $(jq -r '.[]' <<<"$reporter_arns") \
+            --region "$REGION" \
+            --query 'tasks | sort_by(@, &createdAt)[-1].lastStatus' \
+            --output text 2>/dev/null) || REPORTER_STATUS=""
+    fi
+}
+
+_current_service_state() {
+    local service_json
+    EC_STATUS=$(aws elasticache describe-replication-groups \
+        --replication-group-id "$CLUSTER_ID" \
+        --region "$REGION" \
+        --query "ReplicationGroups[0].Status" \
+        --output text 2>/dev/null) || EC_STATUS=""
+
+    service_json=$(aws ecs describe-services \
+        --cluster "$CLUSTER_NAME" \
+        --services "$SERVICE_NAME" \
+        --region "$REGION" \
+        --query "services[0]" \
+        --output json 2>/dev/null) || service_json=""
+    DESIRED=$(jq -r '.desiredCount // 0' <<<"${service_json:-null}")
+    RUNNING=$(jq -r '.runningCount // 0' <<<"${service_json:-null}")
+    PENDING=$(jq -r '.pendingCount // 0' <<<"${service_json:-null}")
+}
+
+_reporter_fatal_error() {
+    local latest_stream
+    latest_stream=$(aws logs describe-log-streams \
+        --log-group-name "$LOG_GROUP" \
+        --log-stream-name-prefix "reporter/reporter/" \
+        --region "$REGION" \
+        --query 'sort_by(logStreams, &lastEventTimestamp)[-1].logStreamName' \
+        --output text 2>/dev/null) || latest_stream=""
+    [[ -z "$latest_stream" || "$latest_stream" == "None" ]] && return 0
+
+    aws logs get-log-events \
+        --log-group-name "$LOG_GROUP" \
+        --log-stream-name "$latest_stream" \
+        --limit 100 \
+        --region "$REGION" \
+        --query 'events[].message' \
+        --output text 2>/dev/null |
+        grep -E 'RuntimeError:|Traceback|ERROR:' |
+        tail -n 1 || true
+}
+
+_classify_current_run_from_state() {
+    local status_json="${1:-}"
+    local status_present=false
+    local status_complete=false
+    local status_has_outputs=false
+    local fatal_error=""
+
+    if [[ -n "$status_json" ]]; then
+        status_present=true
+        status_complete=$(jq -r '.complete == true' <<<"$status_json")
+        if jq -e '(.report | type == "string" and length > 0) and (.summary | type == "string" and length > 0)' \
+            >/dev/null 2>&1 <<<"$status_json"; then
+            status_has_outputs=true
+        fi
+    fi
+
+    _current_service_state
+    _current_reporter_state
+    if [[ "$REPORTER_COUNT" -gt 0 && "$REPORTER_STATUS" == "STOPPED" && "$status_has_outputs" != "true" ]]; then
+        fatal_error=$(_reporter_fatal_error)
+    fi
+
+    _classify_current_run "$EC_STATUS" "$DESIRED" "$RUNNING" "$PENDING" \
+        "$REPORTER_COUNT" "$REPORTER_STATUS" "$status_present" "$status_complete" "$status_has_outputs" "$fatal_error"
+}
+
+_canonical_status_token() {
+    local phrase="$1"
+    case "$phrase" in
+        "report not started")           printf 'not-started\n' ;;
+        "starting")                     printf 'starting\n' ;;
+        "running")                      printf 'running\n' ;;
+        "stopping/cleanup")             printf 'stopping/cleanup\n' ;;
+        "report running")               printf 'reporting\n' ;;
+        "export failed")                printf 'failed\n' ;;
+        "report failed")                printf 'failed\n' ;;
+        "known fatal reporter error:"*) printf 'failed\n' ;;
+        "complete")                     printf 'complete\n' ;;
+        "destroyed/not-found")          printf 'destroyed/not-found\n' ;;
+        "timeout")                      printf 'timeout\n' ;;
+        *)                              printf 'failed\n' ;;
+    esac
+}
+
+_status_exit_code() {
+    local token="$1"
+    case "$token" in
+        complete)            printf '0\n' ;;
+        running)             printf '10\n' ;;
+        starting)            printf '11\n' ;;
+        not-started)         printf '12\n' ;;
+        stopping/cleanup)    printf '13\n' ;;
+        reporting)           printf '14\n' ;;
+        failed)              printf '20\n' ;;
+        timeout)             printf '21\n' ;;
+        destroyed/not-found) printf '22\n' ;;
+        *)                   printf '20\n' ;;
+    esac
 }

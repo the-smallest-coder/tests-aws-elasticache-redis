@@ -13,6 +13,7 @@ locals {
     "exporter.py",
     "memtier_etl.py",
   ])
+  reporter_scripts_prefix = "scripts/${local.cluster_id}/"
 }
 
 # Moved blocks: handle state migration from previous resource addresses.
@@ -72,7 +73,7 @@ resource "aws_s3_object" "reporter_scripts" {
   for_each = local.reporter_modules
 
   bucket = var.metrics_export_s3_bucket
-  key    = "scripts/${each.value}"
+  key    = "${local.reporter_scripts_prefix}${each.value}"
   source = "${path.module}/reporter/${each.value}"
   etag   = filemd5("${path.module}/reporter/${each.value}")
 }
@@ -127,7 +128,7 @@ modules = [
 s3 = boto3.client("s3")
 for mod in modules:
     try:
-        s3.download_file(bucket, f"scripts/{mod}", mod)
+        s3.download_file(bucket, f"${local.reporter_scripts_prefix}{mod}", mod)
         print(f"Downloaded {mod}")
     except Exception as e:
         print(f"Failed to download {mod}: {e}", file=sys.stderr)

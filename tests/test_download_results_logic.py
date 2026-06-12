@@ -27,14 +27,14 @@ class DownloadResultsLogicTests(unittest.TestCase):
     def test_current_run_uses_run_folder_output_directly(self):
         tf_output = json.dumps(
             {
-                "run_folder": {"value": "20260518-213000"},
+                "run_folder": {"value": "20260518-213000-ab12"},
                 "run_timestamp": {"value": "20260518093000"},
             }
         )
 
         self.assertEqual(
             bash(f"_current_run_from_tf_output {shlex.quote(tf_output)}"),
-            "20260518-213000",
+            "20260518-213000-ab12",
         )
 
     def test_current_run_falls_back_to_legacy_run_timestamp(self):
@@ -49,14 +49,14 @@ class DownloadResultsLogicTests(unittest.TestCase):
         listing = "\n".join(
             [
                 "2026-05-18 10:00:00 1 exports/20260518-090000/cluster_details.json",
-                "2026-05-18 10:05:00 1 exports/20260517-090000/results.html",
+                "2026-05-18 10:05:00 1 exports/20260517-090000-ab12/results.html",
                 "2026-05-18 10:03:00 1 exports/20260518-090000/report_status.json",
             ]
         )
 
         self.assertEqual(
             bash("_run_timestamps_by_recency", listing).splitlines(),
-            ["20260517-090000", "20260518-090000"],
+            ["20260517-090000-ab12", "20260518-090000"],
         )
 
     def test_ready_requires_complete_status_outputs_and_existing_objects(self):
@@ -131,6 +131,26 @@ class DownloadResultsLogicTests(unittest.TestCase):
         for expected, command in cases:
             with self.subTest(expected=expected):
                 self.assertEqual(bash(command), expected)
+
+    def test_canonical_status_tokens_and_exit_codes_cover_classifier_phases(self):
+        cases = [
+            ("report not started", "not-started", "12"),
+            ("starting", "starting", "11"),
+            ("running", "running", "10"),
+            ("stopping/cleanup", "stopping/cleanup", "13"),
+            ("report running", "reporting", "14"),
+            ("export failed", "failed", "20"),
+            ("report failed", "failed", "20"),
+            ("known fatal reporter error: boom", "failed", "20"),
+            ("complete", "complete", "0"),
+            ("destroyed/not-found", "destroyed/not-found", "22"),
+        ]
+
+        for phrase, token, code in cases:
+            with self.subTest(phrase=phrase):
+                quoted = shlex.quote(phrase)
+                self.assertEqual(bash(f"_canonical_status_token {quoted}"), token)
+                self.assertEqual(bash(f"_status_exit_code {token}"), code)
 
     def test_latest_does_not_download_previous_ready_run_when_current_is_not_ready(self):
         with tempfile.TemporaryDirectory() as tmp:

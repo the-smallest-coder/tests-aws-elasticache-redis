@@ -10,13 +10,16 @@ locals {
   run_id_full   = formatdate("YYYYMMDDHHmmss", time_static.run_id.rfc3339)
   run_id_suffix = substr(local.run_id_full, length(local.run_id_full) - 8, 8)
 
+  # Optional per-run uniqueness token. Empty preserves legacy timestamp-only IDs.
+  run_disc_suffix = var.run_id_discriminator != "" ? "-${var.run_id_discriminator}" : ""
+
   # Human-readable folder name shared by all artefacts for this run:
   # Terraform writes cluster_details.json here at apply time; the Lambda
   # uses the same name for metrics/logs so everything lands in one folder.
-  run_folder = formatdate("YYYYMMDD-HHmmss", time_static.run_id.rfc3339)
+  run_folder = "${formatdate("YYYYMMDD-HHmmss", time_static.run_id.rfc3339)}${local.run_disc_suffix}"
 
   # Cluster identifier (run-scoped)
-  cluster_id = "${var.project_name}-${var.engine_type}-${local.run_id_suffix}"
+  cluster_id = "${var.project_name}-${var.engine_type}-${local.run_id_suffix}${local.run_disc_suffix}"
 
   # Common tags
   common_tags = {
@@ -131,5 +134,10 @@ resource "aws_elasticache_replication_group" "main" {
 
   lifecycle {
     ignore_changes = [engine_version]
+
+    precondition {
+      condition     = length(local.cluster_id) <= 40
+      error_message = "cluster_id '${local.cluster_id}' exceeds ElastiCache's 40-character replication-group-id limit. Shorten project_name or run_id_discriminator."
+    }
   }
 }
