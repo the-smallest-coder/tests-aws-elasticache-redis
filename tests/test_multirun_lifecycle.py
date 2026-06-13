@@ -130,13 +130,26 @@ def write_fake_aws(bin_dir: Path) -> None:
                 if [[ "${FAKE_AWS_EMPTY:-0}" == 1 ]]; then
                     exit 0
                 fi
-                printf '2026-06-01 12:00:01          1 exports/20260601-120000-aa/results.html\\n'
+                if [[ "${FAKE_AWS_BOOTSTRAP_ONLY:-0}" == 1 ]]; then
+                    printf '2026-06-01 12:00:01          1 exports/20260601-120000-aa/cluster_details.json\\n'
+                    exit 0
+                fi
+                if [[ "${FAKE_AWS_TWO_LISTED_ONE_COPIED:-0}" == 1 ]]; then
+                    printf '2026-06-01 12:00:01          1 exports/20260601-120000-aa/report_status.json\\n'
+                    printf '2026-06-01 12:00:02          1 exports/20260601-120000-aa/results_20260601-120000-aa.html\\n'
+                    exit 0
+                fi
+                printf '2026-06-01 12:00:01          1 exports/20260601-120000-aa/results_20260601-120000-aa.html\\n'
             elif [[ "$1" == "s3" && "$2" == "cp" ]]; then
                 if [[ "${FAKE_AWS_CP_FAIL:-0}" == 1 ]]; then
                     exit 13
                 fi
                 mkdir -p "$4"
-                printf ok > "$4/results.html"
+                if [[ "${FAKE_AWS_TWO_LISTED_ONE_COPIED:-0}" == 1 ]]; then
+                    printf ok > "$4/report_status.json"
+                    exit 0
+                fi
+                printf ok > "$4/results_20260601-120000-aa.html"
             else
                 exit 2
             fi
@@ -233,7 +246,9 @@ class MultirunLifecycleTests(unittest.TestCase):
                 aws_log,
             )
             self.assertNotIn("--region", aws_log)
-            self.assertTrue((repo / "results" / "20260601-120000-aa" / "results.html").exists())
+            self.assertTrue(
+                (repo / "results" / "20260601-120000-aa" / "results_20260601-120000-aa.html").exists()
+            )
 
             empty_repo = make_repo(tmp_path / "empty")
             result = run_multirun(
@@ -245,6 +260,50 @@ class MultirunLifecycleTests(unittest.TestCase):
             self.assertIn("no results yet", result.stdout)
             empty_log = (empty_repo / "aws.log").read_text(encoding="utf-8")
             self.assertNotIn("s3 cp", empty_log)
+
+    def test_download_skips_bootstrap_only_prefix_without_copying(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = make_repo(tmp_path)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_terraform(bin_dir)
+            write_fake_aws(bin_dir)
+
+            result = run_multirun(
+                repo,
+                bin_dir,
+                ["download", "a"],
+                extra={"FAKE_SELECT_EXISTS": "1", "FAKE_AWS_BOOTSTRAP_ONLY": "1"},
+            )
+
+            self.assertIn("results not ready", result.stdout)
+            aws_log = (repo / "aws.log").read_text(encoding="utf-8")
+            self.assertNotIn("s3 cp", aws_log)
+            self.assertFalse((repo / "results" / "20260601-120000-aa").exists())
+
+    def test_download_fails_if_copy_downloads_fewer_files_than_listed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = make_repo(tmp_path)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_terraform(bin_dir)
+            write_fake_aws(bin_dir)
+
+            result = run_multirun(
+                repo,
+                bin_dir,
+                ["download", "a"],
+                check=False,
+                extra={
+                    "FAKE_SELECT_EXISTS": "1",
+                    "FAKE_AWS_TWO_LISTED_ONE_COPIED": "1",
+                },
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("downloaded 1 of 2 listed object", result.stdout)
 
     def test_download_does_not_create_missing_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:

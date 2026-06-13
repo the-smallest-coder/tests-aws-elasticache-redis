@@ -92,8 +92,13 @@ and copies:
 ```
 
 No status check is performed. Empty S3 listings print `no results yet` and exit
-successfully. AWS region selection is left to the user's AWS CLI
-environment/profile; the helper does not pass `--region`.
+successfully. Prefixes that contain only bootstrap objects, such as
+`cluster_details.json`, are treated as not ready and are not copied. A download
+copies only after the listing contains result artifacts such as `metrics/`,
+`logs/`, `report_status.json`, or `results_<run_folder>.html/json`; after copy,
+the helper verifies that the local file count is at least the listed object
+count. AWS region selection is left to the user's AWS CLI environment/profile;
+the helper does not pass `--region`.
 
 ## Destroy
 

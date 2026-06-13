@@ -446,6 +446,35 @@ json_value() {
     jq -r --arg key "$key" '.[$key].value // empty'
 }
 
+listing_object_keys() {
+    awk 'NF >= 4 {print $4}'
+}
+
+listing_has_result_artifacts() {
+    grep -E '(^|/)(metrics|logs)/|(^|/)report_status\.json$|(^|/)results_[^/]+\.(html|json)$' >/dev/null
+}
+
+s3_source_key_prefix() {
+    local source="$1"
+    local without_scheme="${source#s3://}"
+    local key_prefix="${without_scheme#*/}"
+    printf '%s' "$key_prefix"
+}
+
+missing_local_files_count() {
+    local dest="$1"
+    local key_prefix="$2"
+    local key rel missing=0
+    while IFS= read -r key; do
+        [[ -n "$key" ]] || continue
+        rel="${key#"$key_prefix"}"
+        if [[ "$rel" == "$key" || ! -f "$dest/$rel" ]]; then
+            missing=$((missing + 1))
+        fi
+    done
+    printf '%s' "$missing"
+}
+
 cmd_download() {
     local name="${1:-}"
     [[ -n "$name" ]] || die "download requires a run name"
@@ -457,7 +486,7 @@ cmd_download() {
     local log="$LOGS_DIR/$name/download.log"
     set +e
     {
-        local tf_output location run_folder source dest listing_rc
+        local tf_output location run_folder source dest listing_rc object_keys object_count key_prefix missing_count
         tf_output=$(terraform -chdir="$REPO_ROOT" output -json) || exit $?
         location=$(json_value metrics_export_location <<<"$tf_output")
         run_folder=$(json_value run_folder <<<"$tf_output")
@@ -478,8 +507,21 @@ cmd_download() {
             exit 0
         fi
         printf '%s\n' "$listing"
+        object_keys=$(listing_object_keys <<<"$listing")
+        object_count=$(grep -c . <<<"$object_keys" || true)
+        if ! listing_has_result_artifacts <<<"$object_keys"; then
+            echo "results not ready for $name: only bootstrap objects are present; not copying partial artifacts"
+            exit 0
+        fi
         mkdir -p "$dest"
         aws s3 cp "$source" "$dest" --recursive
+        key_prefix=$(s3_source_key_prefix "$source")
+        missing_count=$(missing_local_files_count "$dest" "$key_prefix" <<<"$object_keys")
+        if [[ "$missing_count" -gt 0 ]]; then
+            echo "ERROR: downloaded $((object_count - missing_count)) of $object_count listed object(s) for $name" >&2
+            exit 1
+        fi
+        echo "downloaded $object_count listed file(s) for $name"
     } 2>&1 | tee "$log"
     local rc=${PIPESTATUS[0]}
     set -e
