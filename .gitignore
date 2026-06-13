@@ -71,3 +71,6 @@ reporter/*.log
 tmp
 .codex-tmp
 .vscode/settings.json
+multirun/batches/*.list
+multirun/logs/
+.tf-plugin-cache/
