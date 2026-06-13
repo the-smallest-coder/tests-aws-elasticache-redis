@@ -18,10 +18,11 @@ resource "aws_s3_object" "cluster_details" {
   content = jsonencode({
     # ----- Run metadata -----
     run = {
-      run_id     = local.run_id_full
-      run_folder = local.run_folder
-      cluster_id = local.cluster_id
-      aws_region = var.aws_region
+      run_id               = local.run_id_full
+      run_folder           = local.run_folder
+      cluster_id           = local.cluster_id
+      aws_region           = var.aws_region
+      run_id_discriminator = var.run_id_discriminator
     }
 
     # ----- ElastiCache configuration (as applied) -----

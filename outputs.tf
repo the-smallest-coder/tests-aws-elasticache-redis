@@ -136,3 +136,8 @@ output "shutdown_lambda_name" {
   description = "Lambda function name for shutdown orchestration"
   value       = aws_lambda_function.shutdown.function_name
 }
+
+output "run_id_discriminator" {
+  description = "Per-run uniqueness token used in cluster_id and run_folder (empty if legacy timestamp-only)."
+  value       = var.run_id_discriminator
+}

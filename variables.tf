@@ -321,3 +321,14 @@ variable "notification_ses_identity_arn" {
     error_message = "Both notification_email and notification_ses_identity_arn must be set together, or both left empty."
   }
 }
+
+variable "run_id_discriminator" {
+  description = "Short per-run uniqueness token appended to cluster_id and run_folder. Lowercase alphanumeric, max 8 chars. Empty string preserves legacy timestamp-only identity."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = can(regex("^[a-z0-9]{0,8}$", var.run_id_discriminator))
+    error_message = "run_id_discriminator must be 0-8 lowercase alphanumeric characters ([a-z0-9])."
+  }
+}

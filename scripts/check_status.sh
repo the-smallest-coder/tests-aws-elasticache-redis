@@ -5,8 +5,13 @@
 # Usage:
 #   ./scripts/check_status.sh            # quick status
 #   ./scripts/check_status.sh --detailed # verbose output
+#   ./scripts/check_status.sh --json     # print one canonical status token + exit code
 #
 # Requires: AWS CLI configured, jq, terraform, Terraform state accessible from project root.
+#
+# --json prints a single canonical token from:
+#   not-started starting running stopping/cleanup reporting complete failed
+#   timeout destroyed/not-found
 
 set -euo pipefail
 
@@ -23,15 +28,26 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=download_results_lib.sh
 source "$SCRIPT_DIR/download_results_lib.sh"
 DETAILED=false
+JSON_MODE=false
 
-[[ "${1:-}" == "--detailed" ]] && DETAILED=true
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --detailed) DETAILED=true; shift ;;
+        --json|--status-only) JSON_MODE=true; shift ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
 
 # -- Resolve Terraform outputs --
-echo ""
-echo "=== Resolving Terraform outputs ==="
+$JSON_MODE || { echo ""; echo "=== Resolving Terraform outputs ==="; }
 
 cd "$PROJECT_DIR"
 TF_OUTPUT=$(terraform output -json 2>/dev/null) || {
+    if $JSON_MODE; then
+        JSON_TOKEN="destroyed/not-found"
+        echo "$JSON_TOKEN"
+        exit "$(_status_exit_code "$JSON_TOKEN")"
+    fi
     echo "ERROR: Failed to read Terraform outputs. Has 'terraform apply' been run?" >&2
     exit 1
 }
@@ -49,6 +65,31 @@ CURRENT_RUN=$(_current_run_from_tf_output "$TF_OUTPUT") || CURRENT_RUN=""
 
 S3_BUCKET=$(echo "$S3_LOCATION" | sed 's|^s3://||' | cut -d/ -f1)
 S3_PREFIX=$(echo "$S3_LOCATION" | sed "s|^s3://${S3_BUCKET}/||")
+
+if $JSON_MODE; then
+    if [[ -z "$CLUSTER_ID" || "$CLUSTER_ID" == "null" ]]; then
+        JSON_TOKEN="destroyed/not-found"
+        echo "$JSON_TOKEN"
+        exit "$(_status_exit_code "$JSON_TOKEN")"
+    fi
+
+    S3_LISTING=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}" --recursive --region "$REGION" 2>/dev/null) || S3_LISTING=""
+    ALL_KEYS=$(echo "$S3_LISTING" | awk 'NF >= 4 {print $4}')
+    JSON_STATUS_JSON=""
+    if [[ -n "$CURRENT_RUN" ]]; then
+        JSON_STATUS_JSON=$(_read_status_json "$CURRENT_RUN" || true)
+    fi
+
+    if [[ -n "$JSON_STATUS_JSON" ]] && _report_status_ready "$JSON_STATUS_JSON" "$ALL_KEYS"; then
+        JSON_TOKEN="complete"
+    else
+        JSON_PHASE=$(_classify_current_run_from_state "$JSON_STATUS_JSON")
+        JSON_TOKEN=$(_canonical_status_token "$JSON_PHASE")
+    fi
+
+    echo "$JSON_TOKEN"
+    exit "$(_status_exit_code "$JSON_TOKEN")"
+fi
 
 echo "  Region:           $REGION"
 echo "  Cluster ID:       $CLUSTER_ID"

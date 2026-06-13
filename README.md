@@ -189,6 +189,13 @@ notification_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/aws
 
 The same `reporter/report_generator.py` entrypoint is used in ECS and for local comparison.
 
+## Multiple Disposable Runs
+
+For serial batches of disposable test runs, use the workspace-based helper in
+[`multirun/`](multirun/README.md). It keeps the root Terraform workflow
+unchanged while creating one Terraform workspace and one per-run tfvars file for
+each configured run.
+
 ### Report Window
 
 Reports and plots use one absolute memtier log message window across all memtier streams:
