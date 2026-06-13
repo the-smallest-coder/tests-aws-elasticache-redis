@@ -35,7 +35,8 @@ multirun/
       destroy.log
 ```
 
-Per-run `.tfvars` files and batch manifests are intentionally gitignored.
+Per-run `.tfvars` files and batch manifests are intentionally gitignored. They
+are removed by successful destroy commands.
 
 ## Configure
 
@@ -107,8 +108,12 @@ Destroy selects the run workspace and runs:
 terraform destroy -input=false -auto-approve -var-file=multirun/runs/a.tfvars
 ```
 
-On success, the helper selects `default` and deletes the run workspace. On
-failure, the workspace remains for diagnosis.
+On success, the helper selects `default`, deletes the run workspace, and removes
+`multirun/runs/<name>.tfvars`. On failure, the workspace and run config remain
+for diagnosis and retry.
+
+When `destroy-all <batch>` succeeds for every listed run, it also removes the
+batch manifest. Destroy logs remain under `multirun/logs/`.
 
 ## Summary
 

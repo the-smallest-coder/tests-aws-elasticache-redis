@@ -310,6 +310,7 @@ class MultirunLifecycleTests(unittest.TestCase):
             )
             self.assertIn("args=workspace select default", log)
             self.assertIn("args=workspace delete a", log)
+            self.assertFalse((repo / "multirun" / "runs" / "a.tfvars").exists())
 
             failed_repo = make_repo(tmp_path / "failed")
             failed = run_multirun(
@@ -322,6 +323,57 @@ class MultirunLifecycleTests(unittest.TestCase):
             self.assertNotEqual(failed.returncode, 0)
             failed_log = (failed_repo / "terraform.log").read_text(encoding="utf-8")
             self.assertNotIn("args=workspace delete a", failed_log)
+            self.assertTrue((failed_repo / "multirun" / "runs" / "a.tfvars").exists())
+
+    def test_destroy_all_batch_removes_run_configs_and_manifest_after_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = make_repo(tmp_path)
+            runs = repo / "multirun" / "runs"
+            batches = repo / "multirun" / "batches"
+            batches.mkdir()
+            (runs / "b.tfvars").write_text(
+                'run_id_discriminator = "ab"\n',
+                encoding="utf-8",
+            )
+            (batches / "smoke.list").write_text("a\nb\n", encoding="utf-8")
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_terraform(bin_dir)
+
+            run_multirun(
+                repo,
+                bin_dir,
+                ["destroy-all", "smoke"],
+                extra={"FAKE_SELECT_EXISTS": "1"},
+            )
+
+            self.assertFalse((runs / "a.tfvars").exists())
+            self.assertFalse((runs / "b.tfvars").exists())
+            self.assertFalse((batches / "smoke.list").exists())
+
+    def test_destroy_all_batch_keeps_configs_and_manifest_after_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = make_repo(tmp_path)
+            batches = repo / "multirun" / "batches"
+            batches.mkdir()
+            (batches / "smoke.list").write_text("a\n", encoding="utf-8")
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_terraform(bin_dir)
+
+            result = run_multirun(
+                repo,
+                bin_dir,
+                ["destroy-all", "smoke"],
+                check=False,
+                extra={"FAKE_SELECT_EXISTS": "1", "FAKE_TERRAFORM_FAIL": "1"},
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((repo / "multirun" / "runs" / "a.tfvars").exists())
+            self.assertTrue((batches / "smoke.list").exists())
 
     def test_summary_reports_not_initialized_without_failing(self):
         with tempfile.TemporaryDirectory() as tmp:

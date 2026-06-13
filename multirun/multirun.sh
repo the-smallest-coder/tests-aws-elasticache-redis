@@ -79,6 +79,20 @@ require_run_tfvars() {
     [[ -f "$path" ]] || die "run '$name' is not configured; expected $path"
 }
 
+remove_run_tfvars() {
+    local name="$1"
+    local path
+    path=$(run_tfvars_path "$name")
+    rm -f -- "$path"
+}
+
+remove_batch_manifest() {
+    local batch="$1"
+    local manifest
+    manifest=$(batch_manifest_path "$batch")
+    rm -f -- "$manifest"
+}
+
 declared_variables() {
     sed -nE 's/^[[:space:]]*variable[[:space:]]+"([^"]+)".*/\1/p' "$REPO_ROOT/variables.tf"
 }
@@ -483,6 +497,7 @@ cmd_destroy() {
     if run_with_log "$LOGS_DIR/$name/destroy.log" terraform -chdir="$REPO_ROOT" destroy -input=false -auto-approve "-var-file=$tfvars"; then
         terraform -chdir="$REPO_ROOT" workspace select default >/dev/null
         terraform -chdir="$REPO_ROOT" workspace delete "$name"
+        remove_run_tfvars "$name"
     else
         return $?
     fi
@@ -523,6 +538,9 @@ cmd_all() {
         fi
     done < <(runs_for_all "$batch")
     echo "$sub summary: ok=$ok failed=$failed"
+    if [[ "$sub" == "destroy" && -n "$batch" && "$failed" -eq 0 ]]; then
+        remove_batch_manifest "$batch"
+    fi
     return "$rc"
 }
 
