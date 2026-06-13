@@ -319,6 +319,9 @@ human-controlled.
 No AWS calls by default.
 
 - List configured runs from `multirun/runs/*.tfvars` or the selected batch.
+- If Terraform has not been initialized, do not fail the whole summary. Print
+  each configured run as `not-initialized` and tell the user to run apply for
+  state-backed details.
 - For each run, print whether the workspace exists.
 - If the workspace exists, print whether `terraform state list` is empty or
   non-empty.
@@ -420,6 +423,8 @@ Tests:
 - download does not pass AWS `--region`;
 - destroy selects default before workspace delete;
 - destroy failure keeps workspace;
+- summary on an uninitialized checkout reports `not-initialized` instead of
+  failing;
 - all commands print per-run summaries.
 
 ### WI-4 - Docs
