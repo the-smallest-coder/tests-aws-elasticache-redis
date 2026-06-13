@@ -120,6 +120,24 @@ for diagnosis and retry.
 When `destroy-all <batch>` succeeds for every listed run, it also removes the
 batch manifest. Destroy logs remain under `multirun/logs/`.
 
+## Two-batch cleanup example
+
+After two configured batches have been applied and their results have been
+downloaded, keep the cleanup inside the helper workflow:
+
+```bash
+./multirun/multirun.sh download-all valkey72-small
+./multirun/multirun.sh download-all valkey72-medium
+
+./multirun/multirun.sh destroy-all valkey72-small
+./multirun/multirun.sh destroy-all valkey72-medium
+```
+
+`destroy-all` is the cleanup step. It destroys the Terraform resources for each
+run, removes each successful run's `.tfvars`, and removes the batch manifest
+only when every run in that batch was destroyed successfully. Do not replace
+this with manual deletion of `multirun/runs/` or `multirun/batches/` files.
+
 ## Summary
 
 ```bash
