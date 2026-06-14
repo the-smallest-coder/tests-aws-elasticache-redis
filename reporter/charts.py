@@ -15,7 +15,7 @@ from helpers import (
     C_CURR_CONN, C_MEM_FRAG,
     C_LAT_P50, C_LAT_P99, C_LAT_P999, C_LAT_WORST99, C_LAT_WORST999,
     metric_filter, cache_hit_rate_df, shorten_dim, select_mem_dims, cloudwatch_eviction_series,
-    client_latency_series,
+    client_latency_series, ecs_task_metric_distribution,
 )
 
 ABS_TIME_HOVER = "%{customdata}"
@@ -45,6 +45,17 @@ def _plot_x(values):
 
 def _plot_times(values):
     return [_format_timestamp(value) for value in values]
+
+
+def _plot_times_with_counts(timestamps, counts):
+    return [[time, int(count)] for time, count in zip(_plot_times(timestamps), counts)]
+
+
+def _task_distribution_hover(unit, value_format=":.1f"):
+    return (
+        f"%{{customdata[0]}}<br><b>%{{y{value_format}}} {unit}</b>"
+        "<br>sources: %{customdata[1]:.0f}<extra></extra>"
+    )
 
 
 def _set_absolute_xaxes(fig, rows, x_min, x_max):
@@ -291,6 +302,12 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
         rows=4, cols=1,
         shared_xaxes=False,
         vertical_spacing=0.15,
+        specs=[
+            [{"secondary_y": True}],
+            [{"secondary_y": True}],
+            [{"secondary_y": False}],
+            [{"secondary_y": False}],
+        ],
         subplot_titles=(
             "ECS Load Generator — CPU (%)",
             "ECS Load Generator — Network TX (KB/min)",
@@ -302,22 +319,48 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
 
     # ---- Row 1: ECS CPU + EngineCPU overlay ----
     if not ecs_df.empty:
-        cpu_df = metric_filter(ecs_df, 'CPUUtilization', 'Average')
-        if cpu_df.empty:
-            cpu_df = metric_filter(ecs_df, 'TaskCpuUtilization', 'Average')
-        if not cpu_df.empty:
-            for dim, group in cpu_df.groupby('Dimensions'):
+        cpu_dist = ecs_task_metric_distribution(ecs_df, 'TaskCpuUtilization', 'Average')
+        if not cpu_dist.empty:
+            cpu_custom = _plot_times_with_counts(cpu_dist['Timestamp'], cpu_dist['source_count'])
+            for column, label, color, dash in (
+                ('avg', 'CPU avg/task', C_CPU_ECS, 'solid'),
+                ('median', 'CPU median/task', C_CPU_ECS, 'dash'),
+                ('min', 'CPU min task', '#7cb342', 'dot'),
+                ('max', 'CPU max task', '#0b8043', 'dashdot'),
+            ):
                 fig.add_trace(go.Scatter(
-                    x=_plot_x(group['Timestamp']), y=group['Value'],
-                    customdata=_plot_times(group['Timestamp']),
-                    name=f"CPU – {shorten_dim(dim, cluster_id)}", mode='lines',
-                    line=dict(**LINE_OPTS, color=C_CPU_ECS),
+                    x=_plot_x(cpu_dist['Timestamp']), y=cpu_dist[column],
+                    customdata=cpu_custom,
+                    name=label, mode='lines',
+                    line=dict(**LINE_OPTS, color=color, dash=dash),
                     legend="legend",
-                    hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}}%</b><extra></extra>"
-                ), row=1, col=1)
+                    hovertemplate=_task_distribution_hover('%'),
+                ), row=1, col=1, secondary_y=False)
+            fig.add_trace(go.Scatter(
+                x=_plot_x(cpu_dist['Timestamp']), y=cpu_dist['source_count'],
+                customdata=_plot_times(cpu_dist['Timestamp']),
+                name="CPU source count", mode='lines',
+                line=dict(**LINE_OPTS, color='#546e7a', dash='dot'),
+                legend="legend",
+                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.0f}} sources</b><extra></extra>"
+            ), row=1, col=1, secondary_y=True)
         else:
-            fig.add_annotation(text="No ECS CPU Metrics", xref="paper", yref="paper",
-                               x=0.5, y=0.75, showarrow=False)
+            cpu_df = metric_filter(ecs_df, 'CPUUtilization', 'Average')
+            if cpu_df.empty:
+                cpu_df = metric_filter(ecs_df, 'TaskCpuUtilization', 'Average')
+            if not cpu_df.empty:
+                for dim, group in cpu_df.groupby('Dimensions'):
+                    fig.add_trace(go.Scatter(
+                        x=_plot_x(group['Timestamp']), y=group['Value'],
+                        customdata=_plot_times(group['Timestamp']),
+                        name=f"CPU – {shorten_dim(dim, cluster_id)}", mode='lines',
+                        line=dict(**LINE_OPTS, color=C_CPU_ECS),
+                        legend="legend",
+                        hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}}%</b><extra></extra>"
+                    ), row=1, col=1, secondary_y=False)
+            else:
+                fig.add_annotation(text="No ECS CPU Metrics", xref="paper", yref="paper",
+                                   x=0.5, y=0.75, showarrow=False)
     else:
         fig.add_annotation(text="No CPU Data", xref="paper", yref="paper",
                            x=0.5, y=0.75, showarrow=False)
@@ -333,25 +376,52 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
                     line=dict(**LINE_OPTS, color=C_ENGINE_CPU, dash='dot'),
                     legend="legend",
                     hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}}%</b><extra></extra>"
-                ), row=1, col=1)
+                ), row=1, col=1, secondary_y=False)
 
     # ---- Row 2: ECS Network TX + ElastiCache NetworkBytesOut overlay ----
     if not ecs_df.empty:
-        tx_df = metric_filter(ecs_df, 'NetworkTxBytes', 'Sum')
-        if not tx_df.empty:
-            tx_agg = tx_df.groupby('Timestamp')['Value'].sum().reset_index()
-            tx_agg['Value'] = tx_agg['Value'] / 1024.0
+        tx_dist = ecs_task_metric_distribution(ecs_df, 'NetworkTxBytes', 'Sum', value_scale=1 / 1024.0)
+        if not tx_dist.empty:
+            tx_custom = _plot_times_with_counts(tx_dist['Timestamp'], tx_dist['source_count'])
+            for column, label, color, dash in (
+                ('sum', 'Network TX total – loadgen', C_NET_TX_ECS, 'solid'),
+                ('avg', 'Network TX avg/task', '#4db6ac', 'solid'),
+                ('median', 'Network TX median/task', '#4db6ac', 'dash'),
+                ('min', 'Network TX min task', '#80cbc4', 'dot'),
+                ('max', 'Network TX max task', '#00796b', 'dashdot'),
+            ):
+                fig.add_trace(go.Scatter(
+                    x=_plot_x(tx_dist['Timestamp']), y=tx_dist[column],
+                    customdata=tx_custom,
+                    name=label, mode='lines',
+                    line=dict(**LINE_OPTS, color=color, dash=dash),
+                    legend="legend2",
+                    hovertemplate=_task_distribution_hover('KB/min'),
+                ), row=2, col=1, secondary_y=False)
             fig.add_trace(go.Scatter(
-                x=_plot_x(tx_agg['Timestamp']), y=tx_agg['Value'],
-                customdata=_plot_times(tx_agg['Timestamp']),
-                name="Network TX – loadgen", mode='lines',
-                line=dict(**LINE_OPTS, color=C_NET_TX_ECS),
+                x=_plot_x(tx_dist['Timestamp']), y=tx_dist['source_count'],
+                customdata=_plot_times(tx_dist['Timestamp']),
+                name="Network TX source count", mode='lines',
+                line=dict(**LINE_OPTS, color='#546e7a', dash='dot'),
                 legend="legend2",
-                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} KB/min</b><extra></extra>"
-            ), row=2, col=1)
+                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.0f}} sources</b><extra></extra>"
+            ), row=2, col=1, secondary_y=True)
         else:
-            fig.add_annotation(text="No Network TX Metrics", xref="paper", yref="paper",
-                               x=0.5, y=0.5, showarrow=False)
+            tx_df = metric_filter(ecs_df, 'NetworkTxBytes', 'Sum')
+            if not tx_df.empty:
+                tx_agg = tx_df.groupby('Timestamp')['Value'].sum().reset_index()
+                tx_agg['Value'] = tx_agg['Value'] / 1024.0
+                fig.add_trace(go.Scatter(
+                    x=_plot_x(tx_agg['Timestamp']), y=tx_agg['Value'],
+                    customdata=_plot_times(tx_agg['Timestamp']),
+                    name="Network TX – loadgen", mode='lines',
+                    line=dict(**LINE_OPTS, color=C_NET_TX_ECS),
+                    legend="legend2",
+                    hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} KB/min</b><extra></extra>"
+                ), row=2, col=1, secondary_y=False)
+            else:
+                fig.add_annotation(text="No Network TX Metrics", xref="paper", yref="paper",
+                                   x=0.5, y=0.5, showarrow=False)
     else:
         fig.add_annotation(text="No ECS Network TX Data", xref="paper", yref="paper",
                            x=0.5, y=0.5, showarrow=False)
@@ -368,7 +438,7 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
                 line=dict(**LINE_OPTS, color=C_NET_TX_CACHE, dash='dot'),
                 legend="legend2",
                 hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} KB/min</b><extra></extra>"
-            ), row=2, col=1)
+            ), row=2, col=1, secondary_y=False)
 
     # ---- Row 3: ECS Memory (MB) ----
     if not ecs_df.empty:
@@ -419,9 +489,12 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
                            x=0.5, y=0.12, showarrow=False)
 
     # ---- Axes styling ----
-    fig.update_yaxes(title_text="%",      row=1, col=1)
+    fig.update_yaxes(title_text="%",      row=1, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="sources", row=1, col=1, secondary_y=True, showgrid=False)
     fig.update_yaxes(title_text="KB/min", row=2, col=1,
-                     title_font=dict(color=C_NET_TX_ECS), tickfont=dict(color=C_NET_TX_ECS))
+                     title_font=dict(color=C_NET_TX_ECS), tickfont=dict(color=C_NET_TX_ECS),
+                     secondary_y=False)
+    fig.update_yaxes(title_text="sources", row=2, col=1, secondary_y=True, showgrid=False)
     fig.update_yaxes(title_text="MB",     row=3, col=1,
                      title_font=dict(color=C_ECS_MEM), tickfont=dict(color=C_ECS_MEM))
     fig.update_yaxes(title_text="%",      row=4, col=1)

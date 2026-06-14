@@ -29,6 +29,25 @@ SECTION_META: dict[str, dict[str, str]] = {
 }
 
 
+def _format_gib(byte_value: Any) -> str | None:
+    try:
+        gib = float(byte_value) / (1024 ** 3)
+    except (TypeError, ValueError):
+        return None
+    decimals = 3 if gib < 1 else 2
+    text = f"{gib:,.{decimals}f}".rstrip("0").rstrip(".")
+    return f"{text} GiB" if text else None
+
+
+def _format_usd_hour(value: Any) -> str | None:
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    text = f"${price:,.3f}".rstrip("0").rstrip(".")
+    return f"{text}/h"
+
+
 METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("benchmark", "Avg Throughput", ("benchmark", "avg_ops"), "ops/sec", 1, "higher", "Average observed memtier throughput."),
     MetricSpec("benchmark", "Peak Throughput", ("benchmark", "peak_ops"), "ops/sec", 1, "higher", "Highest single observed throughput value."),
@@ -170,6 +189,8 @@ def build_run_context(run: RunData) -> dict[str, Any]:
     add("Engine", meta.get("engine_type") or elasticache.get("engine"))
     add("Engine version", meta.get("engine_version") or elasticache.get("engine_version_configured"))
     add("Node type", meta.get("node_type") or elasticache.get("node_type"))
+    add("Node memory", _format_gib(meta.get("node_memory_bytes") or elasticache.get("node_memory_bytes")))
+    add("Redis hourly", _format_usd_hour(meta.get("redis_hourly_usd") or elasticache.get("redis_hourly_usd")))
     add("Node count", meta.get("node_count") or elasticache.get("num_cache_nodes"))
     add("Cluster mode", normalize_cluster_mode(meta.get("cluster_mode")))
     add("Task count", memtier.get("task_count") or get_nested(run.summary, ("ecs", "task_count")))

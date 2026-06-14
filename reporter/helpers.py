@@ -139,6 +139,54 @@ def client_latency_series(df):
     return merged[columns].reset_index(drop=True)
 
 
+def ecs_task_metric_distribution(df, metric_name, stat, value_scale=1.0):
+    """Aggregate one ECS metric across task-level dimensions per timestamp.
+
+    CloudWatch exports the same Container Insights metric at several dimension
+    levels. For cross-load-generator distribution charts, keep exactly one
+    task-scoped source per TaskId and ignore service/cluster aggregates.
+    """
+    columns = ['Timestamp', 'avg', 'median', 'min', 'max', 'sum', 'source_count']
+    if df.empty or not {'Timestamp', 'MetricName', 'Stat', 'Value', 'Dimensions'}.issubset(df.columns):
+        return pd.DataFrame(columns=columns)
+
+    source = metric_filter(df, metric_name, stat)
+    if source.empty:
+        return pd.DataFrame(columns=columns)
+
+    task_rows = source[
+        source['Dimensions'].astype(str).str.contains(r'(?:^|;)TaskId=', regex=True, na=False)
+    ].copy()
+    if task_rows.empty:
+        return pd.DataFrame(columns=columns)
+
+    task_rows['TaskId'] = task_rows['Dimensions'].astype(str).str.extract(r'(?:^|;)TaskId=([^;]+)', expand=False)
+    task_rows['Value'] = pd.to_numeric(task_rows['Value'], errors='coerce') * value_scale
+    task_rows = task_rows.dropna(subset=['Timestamp', 'TaskId', 'Value'])
+    if task_rows.empty:
+        return pd.DataFrame(columns=columns)
+
+    dim_text = task_rows['Dimensions'].astype(str)
+    task_rows['DimPriority'] = 2
+    task_rows.loc[dim_text.str.contains(r'(?:^|;)TaskDefinitionFamily=', regex=True, na=False), 'DimPriority'] = 1
+    task_rows.loc[dim_text.str.contains(r'(?:^|;)ServiceName=', regex=True, na=False), 'DimPriority'] = 0
+    best_priority = task_rows.groupby(['Timestamp', 'TaskId'])['DimPriority'].transform('min')
+    task_rows = task_rows[task_rows['DimPriority'] == best_priority]
+
+    per_task = task_rows.groupby(['Timestamp', 'TaskId'], as_index=False)['Value'].mean()
+    grouped = per_task.groupby('Timestamp')['Value']
+    result = grouped.agg(
+        avg='mean',
+        median='median',
+        min='min',
+        max='max',
+        sum='sum',
+        source_count='count',
+    ).reset_index()
+    result['source_count'] = result['source_count'].astype(int)
+    return result.sort_values('Timestamp').reset_index(drop=True)[columns]
+
+
 def cache_hit_rate_df(df):
     """Return CacheHitRate/Average rows, deriving them from CacheHits/CacheMisses when needed."""
     direct = metric_filter(df, 'CacheHitRate', 'Average', 'CacheClusterId')

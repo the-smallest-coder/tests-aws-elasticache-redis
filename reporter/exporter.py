@@ -911,6 +911,8 @@ def main() -> None:
             "engine": os.environ.get("ENGINE_TYPE", ""),
             "engine_version_configured": os.environ.get("ENGINE_VERSION", ""),
             "node_type": os.environ.get("NODE_TYPE", ""),
+            "node_memory_bytes": os.environ.get("NODE_MEMORY_BYTES", ""),
+            "redis_hourly_usd": os.environ.get("NODE_REDIS_HOURLY_USD", ""),
             "num_cache_nodes": os.environ.get("NODE_COUNT", ""),
             "cluster_mode_enabled": os.environ.get("CLUSTER_MODE", "false"),
         },

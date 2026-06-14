@@ -137,9 +137,32 @@ def _config_from_env() -> dict[str, str]:
         "engine_type": os.environ.get("ENGINE_TYPE", ""),
         "engine_version": os.environ.get("ENGINE_VERSION", ""),
         "node_type": os.environ.get("NODE_TYPE", ""),
+        "node_memory_bytes": os.environ.get("NODE_MEMORY_BYTES", ""),
+        "redis_hourly_usd": os.environ.get("NODE_REDIS_HOURLY_USD", ""),
         "node_count": os.environ.get("NODE_COUNT", ""),
         "cluster_mode": os.environ.get("CLUSTER_MODE", "false"),
     }
+
+
+def _config_from_cluster_details(cluster_details: dict) -> dict[str, str]:
+    elasticache = cluster_details.get("elasticache", {}) if cluster_details else {}
+    return {
+        "engine_type": elasticache.get("engine", ""),
+        "engine_version": elasticache.get("engine_version_configured", ""),
+        "node_type": elasticache.get("node_type", ""),
+        "node_memory_bytes": elasticache.get("node_memory_bytes", ""),
+        "redis_hourly_usd": elasticache.get("redis_hourly_usd", ""),
+        "node_count": elasticache.get("num_cache_nodes", ""),
+        "cluster_mode": elasticache.get("cluster_mode_enabled", ""),
+    }
+
+
+def _merge_missing_config(config: dict | None, extra_config: dict | None) -> dict:
+    merged = dict(config or {})
+    for key, value in (extra_config or {}).items():
+        if value not in (None, "") and not merged.get(key):
+            merged[key] = str(value)
+    return merged
 
 
 def _warn_if_cache_hit_rate_missing(metrics_df, source: str) -> None:
@@ -555,6 +578,15 @@ def run_generate_report(run_dir: str, config: dict) -> None:
 
     _warn_if_cache_hit_rate_missing(metrics_df, str(ec_csvs[0]))
 
+    cluster_details_path = run_path / "cluster_details.json"
+    cluster_details = None
+    if cluster_details_path.exists():
+        try:
+            cluster_details = json.loads(cluster_details_path.read_text(encoding="utf-8"))
+            config = _merge_missing_config(config, _config_from_cluster_details(cluster_details))
+        except Exception as exc:
+            print(f"Warning: failed to read cluster_details.json before rendering: {exc}")
+
     html_content, summary_json = create_report(
         metrics_df=metrics_df,
         logs_df=logs_df,
@@ -567,11 +599,9 @@ def run_generate_report(run_dir: str, config: dict) -> None:
         extra_stats=extra_stats,
     )
 
-    cluster_details_path = run_path / "cluster_details.json"
-    if cluster_details_path.exists():
+    if cluster_details:
         try:
             from report_common import enrich_summary_meta
-            cluster_details = json.loads(cluster_details_path.read_text(encoding="utf-8"))
             summary_obj = json.loads(summary_json)
             enrich_summary_meta(summary_obj, cluster_details)
             summary_json = json.dumps(summary_obj, indent=2, default=str)

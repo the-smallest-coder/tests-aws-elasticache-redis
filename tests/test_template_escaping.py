@@ -51,6 +51,8 @@ class SingleReportEscapingTests(unittest.TestCase):
                 "engine_type": "redis<script>",
                 "engine_version": "7&\"'",
                 "node_type": "cache.m7g.large</span>",
+                "node_memory_bytes": "6850472837",
+                "redis_hourly_usd": "0.158",
                 "node_count": "3",
                 "cluster_mode": "true",
             }
@@ -59,6 +61,8 @@ class SingleReportEscapingTests(unittest.TestCase):
         self.assertIn("redis&lt;script&gt;", html)
         self.assertIn("7&amp;&quot;&#x27;", html)
         self.assertIn("cache.m7g.large&lt;/span&gt;", html)
+        self.assertIn("Node memory: <span>6.38 GiB</span>", html)
+        self.assertIn("Redis hourly: <span>$0.158</span>", html)
         self.assertNotIn("redis<script>", html)
         self.assertNotIn("cache.m7g.large</span>", html)
 
@@ -89,8 +93,16 @@ class SingleReportEscapingTests(unittest.TestCase):
             memtier_totals_df=pd.DataFrame(),
             metrics_df=metrics_df,
             ecs_df=pd.DataFrame(),
+            config={
+                "node_memory_bytes": "6850472837",
+                "redis_hourly_usd": "0.158",
+            },
         )
 
+        self.assertIn("<div class='card-label'>Node Memory</div>", html)
+        self.assertIn(">6.38<span class='card-unit'>GiB</span>", html)
+        self.assertIn("<div class='card-label'>Redis Cost</div>", html)
+        self.assertIn(">$0.158<span class='card-unit'>/h</span>", html)
         self.assertIn("&lt;70% = significant", html)
         self.assertNotIn("<70% = significant", html)
 

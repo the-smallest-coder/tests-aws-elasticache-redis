@@ -116,13 +116,15 @@ resource "aws_lambda_function" "shutdown_verify" {
       NUM_CACHE_NODES              = tostring(var.num_cache_nodes)
       NUM_NODE_GROUPS              = tostring(var.num_node_groups)
       REPLICAS_PER_NODE_GROUP      = tostring(var.replicas_per_node_group)
-      NOTIFICATION_EMAIL = var.notification_email
-      SES_IDENTITY_ARN   = var.notification_ses_identity_arn
-      ENGINE_TYPE        = var.engine_type
-      ENGINE_VERSION     = var.engine_version
-      NODE_TYPE          = var.node_type
-      NODE_COUNT         = tostring(var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes)
-      AWS_REGION_NAME    = var.aws_region
+      NOTIFICATION_EMAIL    = var.notification_email
+      SES_IDENTITY_ARN      = var.notification_ses_identity_arn
+      ENGINE_TYPE           = var.engine_type
+      ENGINE_VERSION        = var.engine_version
+      NODE_TYPE             = var.node_type
+      NODE_MEMORY_BYTES     = tostring(local._advertised_bytes)
+      NODE_REDIS_HOURLY_USD = tostring(local._node_redis_hourly_usd[var.node_type])
+      NODE_COUNT            = tostring(var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes)
+      AWS_REGION_NAME       = var.aws_region
       REPORTER_TASK_DEFINITION = aws_ecs_task_definition.reporter.arn
     }
   }

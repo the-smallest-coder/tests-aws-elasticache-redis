@@ -208,6 +208,8 @@ def _launch_exporter_task(cluster_id, ecs_cluster, ecs_service):
         "ENGINE_TYPE",
         "ENGINE_VERSION",
         "NODE_TYPE",
+        "NODE_MEMORY_BYTES",
+        "NODE_REDIS_HOURLY_USD",
         "NODE_COUNT",
         "NOTIFICATION_EMAIL",
         "SES_IDENTITY_ARN",

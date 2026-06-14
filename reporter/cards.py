@@ -17,6 +17,24 @@ def _html(value):
     return escape(str(value), quote=True)
 
 
+def _format_gib(byte_value):
+    try:
+        gib = float(byte_value) / (1024 ** 3)
+    except (TypeError, ValueError):
+        return None
+    decimals = 3 if gib < 1 else 2
+    text = f"{gib:,.{decimals}f}".rstrip('0').rstrip('.')
+    return text or "0"
+
+
+def _format_usd_hour(value):
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f"${price:,.3f}".rstrip('0').rstrip('.')
+
+
 def _format_elapsed(delta):
     """Return compact elapsed text suitable for a stat card."""
     total_seconds = max(0, int(delta.total_seconds()))
@@ -32,10 +50,14 @@ def header_pills(config):
     config = config or {}
     cluster_mode = str(config.get('cluster_mode', 'false')).lower() == 'true'
     mode_label = 'Cluster Mode' if cluster_mode else 'Non-Cluster'
+    node_memory = _format_gib(config.get('node_memory_bytes'))
+    redis_hourly = _format_usd_hour(config.get('redis_hourly_usd'))
     items = [
         ('Engine', config.get('engine_type')),
         ('Version', config.get('engine_version')),
         ('Node type', config.get('node_type')),
+        ('Node memory', f"{node_memory} GiB" if node_memory else None),
+        ('Redis hourly', redis_hourly),
         ('Nodes', config.get('node_count')),
         ('Mode', mode_label),
     ]
@@ -60,6 +82,16 @@ def stat_cards_html(
     extra_stats = extra_stats or {}
     config = config or {}
     cards = []  # tuples: (label, value_str, unit, color, tooltip)
+
+    node_memory = _format_gib(config.get('node_memory_bytes'))
+    if node_memory:
+        cards.append(('Node Memory', node_memory, 'GiB', '#546e7a',
+                      'Configured ElastiCache node memory used to compute memtier keyspace.'))
+
+    redis_hourly = _format_usd_hour(config.get('redis_hourly_usd'))
+    if redis_hourly:
+        cards.append(('Redis Cost', redis_hourly, '/h', '#546e7a',
+                      'Hourly Redis node price captured with the run metadata.'))
 
     # ---- Memtier throughput / latency / bandwidth ----
     if not memtier_minute_df.empty and not memtier_totals_df.empty:

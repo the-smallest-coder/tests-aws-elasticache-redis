@@ -226,6 +226,14 @@ PY
           value = var.node_type
         },
         {
+          name  = "NODE_MEMORY_BYTES"
+          value = tostring(local._advertised_bytes)
+        },
+        {
+          name  = "NODE_REDIS_HOURLY_USD"
+          value = tostring(local._node_redis_hourly_usd[var.node_type])
+        },
+        {
           name  = "NODE_COUNT"
           value = tostring(var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes)
         },
