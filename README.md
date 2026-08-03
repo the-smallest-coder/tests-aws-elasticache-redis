@@ -205,6 +205,41 @@ Reports and plots use one absolute memtier log message window across all memtier
 
 Every plotted value is placed at the absolute timestamp from its source log or metric row.
 
+### Load-generator validity
+
+The report validates one run at task and AZ granularity before its latency results are used:
+
+- `loadgen.generator_cpu_p95_pct` is the maximum of the per-task p95 values of
+  `CpuUtilized / CpuReserved * 100`. Only `Average` task records inside the report
+  window are used, and zero-utilization shutdown samples are excluded. A value
+  above 85% marks the run generator-limited and invalid for latency/tail conclusions.
+  `loadgen.generator_cpu_across_tasks` reports the min, median, and max across
+  those per-task p95 values; it does not use ramp-up minima from the time series.
+- `loadgen.throughput_task_skew_p90_to_p10` is computed across per-task medians of
+  the leading, current `ops/sec` value in memtier progress records. The cumulative
+  `(avg: ...)` value and final `Totals` rows are not used for this metric.
+- `loadgen.throughput_skew_within_az_max` is the worst per-AZ p90/p10 ratio. A
+  value above 1.3 marks a generator problem inside an AZ. The max/min ratio of AZ
+  median throughputs is reported separately without a validity threshold.
+
+Only full UTC minute buckets wholly contained in the absolute report window are
+eligible. Eligible minutes where fewer than the expected number of memtier tasks
+are present are also excluded. The discarded boundary and missing-task counters
+are mutually exclusive; `minutes_below_expected_task_count` remains a separate
+overlapping diagnostic. Expected task count is the mode of
+`RunningTaskCount`, with the number of memtier streams as fallback. The exporter
+adds `AvailabilityZone` to task-level
+ECS CSV dimensions; downloaded historical runs can recover the same mapping from
+`logs/container-insights/*.txt` through the literal `TaskId` match.
+
+If any task lacks an AZ mapping, within-AZ and between-AZ gates are not computed,
+the report records `availability_zone_missing`, and validation remains `unknown`
+unless another independent validity gate already makes the run invalid.
+
+With only 6 or 9 tasks, p90/p10 is close to max/min. It is retained as a compact
+skew indicator, while the per-task vector and per-AZ breakdown remain the primary
+evidence in the report.
+
 For local comparison:
 
 ```bash

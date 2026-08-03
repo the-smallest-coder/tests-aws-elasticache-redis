@@ -96,7 +96,8 @@ class ClientLatencyReportTests(unittest.TestCase):
             {trace.name for trace in figure.data},
             {"p50", "p99", "p99.9", "worst_stream_p99", "worst_stream_p999"},
         )
-        self.assertIn("No ECS client latency datapoints", empty_figure.layout.annotations[1].text)
+        self.assertIn("ECS Load-Generator Latency", figure.layout.annotations[0].text)
+        self.assertIn("No ECS load-generator latency datapoints", empty_figure.layout.annotations[1].text)
 
     def test_rendered_report_does_not_add_latency_cards(self):
         try:

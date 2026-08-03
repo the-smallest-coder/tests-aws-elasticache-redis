@@ -76,8 +76,15 @@ class EcsDistributionReportTests(unittest.TestCase):
         ecs_df = pd.DataFrame(rows)
         ecs_df["Timestamp"] = pd.to_datetime(ecs_df["Timestamp"], utc=True).dt.tz_localize(None)
 
-        figure = build_infra_figure(ecs_df, pd.DataFrame(), "cluster-a", {})
+        figure = build_infra_figure(
+            ecs_df,
+            pd.DataFrame(),
+            "cluster-a",
+            {},
+            task_az_map={"a": "us-east-1e", "b": "us-east-1f"},
+        )
         trace_names = {trace.name for trace in figure.data}
+        subplot_titles = {annotation.text for annotation in figure.layout.annotations}
 
         self.assertLessEqual(
             {
@@ -94,6 +101,41 @@ class EcsDistributionReportTests(unittest.TestCase):
             },
             trace_names,
         )
+        self.assertIn("us-east-1e — 1 tasks", subplot_titles)
+        self.assertIn("us-east-1f — 1 tasks", subplot_titles)
+        self.assertIn("us-east-1e — a", trace_names)
+        self.assertIn("us-east-1f — b", trace_names)
+        reference_levels = [shape.y0 for shape in figure.layout.shapes]
+        self.assertEqual(reference_levels.count(85), 3)
+        self.assertEqual(reference_levels.count(100), 3)
+
+    def test_infra_figure_omits_az_panels_when_task_az_is_unknown(self):
+        try:
+            import pandas as pd
+
+            from charts import build_infra_figure
+        except ModuleNotFoundError as exc:
+            if exc.name in {"pandas", "plotly"}:
+                self.skipTest(f"{exc.name} is not installed in this environment")
+            raise
+
+        ecs_df = pd.DataFrame([
+            self._metric_row(
+                "2026-05-01T00:00:00Z",
+                "TaskCpuUtilization",
+                "Average",
+                80.0,
+                "ClusterName=c;ServiceName=s;TaskId=a",
+            )
+        ])
+        ecs_df["Timestamp"] = pd.to_datetime(
+            ecs_df["Timestamp"], utc=True
+        ).dt.tz_localize(None)
+
+        figure = build_infra_figure(ecs_df, pd.DataFrame(), "cluster-a", {})
+        subplot_titles = [annotation.text for annotation in figure.layout.annotations]
+
+        self.assertEqual(len([title for title in subplot_titles if "tasks" in title]), 0)
 
 
 if __name__ == "__main__":

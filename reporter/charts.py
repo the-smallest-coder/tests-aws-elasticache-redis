@@ -15,7 +15,7 @@ from helpers import (
     C_CURR_CONN, C_MEM_FRAG,
     C_LAT_P50, C_LAT_P99, C_LAT_P999, C_LAT_WORST99, C_LAT_WORST999,
     metric_filter, cache_hit_rate_df, shorten_dim, select_mem_dims, cloudwatch_eviction_series,
-    client_latency_series, ecs_task_metric_distribution,
+    client_latency_series, ecs_task_metric_distribution, ecs_task_metric_rows,
 )
 
 ABS_TIME_HOVER = "%{customdata}"
@@ -291,30 +291,50 @@ def build_memtier_figure(memtier_df, oom_df, metrics_df, x_min, x_max):
 #  GROUP 2 — Infrastructure figure                                     #
 # ------------------------------------------------------------------ #
 
-def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max=None):
-    """Build a 4-row figure: CPU, Network TX, ECS Memory, ElastiCache Memory.
+def build_infra_figure(
+    ecs_df, metrics_df, cluster_id, config, x_min=None, x_max=None, task_az_map=None
+):
+    """Build infrastructure panels with dynamic per-AZ ECS CPU detail.
 
     Returns a Plotly Figure ready for ``to_html()``.
     """
     config = config or {}
+    task_cpu_rows = ecs_task_metric_rows(
+        ecs_df, 'TaskCpuUtilization', 'Average', task_az_map=task_az_map
+    )
+    known_cpu_rows = task_cpu_rows[
+        task_cpu_rows['AvailabilityZone'].astype(str) != 'unknown'
+    ].copy() if not task_cpu_rows.empty else task_cpu_rows
+    az_groups = [
+        (az, group.copy())
+        for az, group in known_cpu_rows.groupby('AvailabilityZone', sort=True)
+    ] if not known_cpu_rows.empty else []
+    az_count = len(az_groups)
+    network_row = 2 + az_count
+    ecs_memory_row = network_row + 1
+    cache_memory_row = network_row + 2
+    row_count = cache_memory_row
+    subplot_titles = ["ECS Load Generator — CPU Across Tasks (%)"]
+    subplot_titles.extend(
+        f"{az} — {group['TaskId'].nunique()} tasks" for az, group in az_groups
+    )
+    subplot_titles.extend((
+        "ECS Load Generator — Network TX (KB/min)",
+        "ECS Load Generator — Memory (MB)",
+        "ElastiCache Memory Usage (%)",
+    ))
 
     fig = make_subplots(
-        rows=4, cols=1,
+        rows=row_count, cols=1,
         shared_xaxes=False,
-        vertical_spacing=0.15,
-        specs=[
-            [{"secondary_y": True}],
-            [{"secondary_y": True}],
-            [{"secondary_y": False}],
-            [{"secondary_y": False}],
-        ],
-        subplot_titles=(
-            "ECS Load Generator — CPU (%)",
-            "ECS Load Generator — Network TX (KB/min)",
-            "ECS Load Generator — Memory (MB)",
-            "ElastiCache Memory Usage (%)",
+        vertical_spacing=min(0.10, 0.55 / max(1, row_count - 1)),
+        specs=(
+            [[{"secondary_y": True}]]
+            + [[{"secondary_y": False}] for _ in az_groups]
+            + [[{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]]
         ),
-        row_heights=[0.25, 0.25, 0.25, 0.25],
+        subplot_titles=tuple(subplot_titles),
+        row_heights=[0.22] + ([0.16] * az_count) + [0.22, 0.19, 0.21],
     )
 
     # ---- Row 1: ECS CPU + EngineCPU overlay ----
@@ -378,7 +398,50 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
                     hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}}%</b><extra></extra>"
                 ), row=1, col=1, secondary_y=False)
 
-    # ---- Row 2: ECS Network TX + ElastiCache NetworkBytesOut overlay ----
+    if not task_cpu_rows.empty:
+        fig.add_hline(
+            y=85, line_color='#f9ab00', line_dash='dash', line_width=2,
+            annotation_text='85% validity gate', annotation_position='top left',
+            row=1, col=1, secondary_y=False,
+        )
+        fig.add_hline(
+            y=100, line_color='#d93025', line_dash='dot', line_width=2,
+            annotation_text='100% task quota', annotation_position='top right',
+            row=1, col=1, secondary_y=False,
+        )
+
+    task_colors = (
+        '#1a73e8', '#d93025', '#188038', '#9334e6', '#f9ab00', '#00897b',
+        '#5f6368', '#e8710a', '#3949ab', '#c2185b', '#00796b', '#6d4c41',
+    )
+    for az_index, (az, az_rows) in enumerate(az_groups, start=2):
+        for task_index, (task_id, group) in enumerate(az_rows.groupby('TaskId', sort=True)):
+            group = group.sort_values('Timestamp')
+            task_label = str(task_id)[:8]
+            customdata = [
+                [timestamp, str(task_id)] for timestamp in _plot_times(group['Timestamp'])
+            ]
+            fig.add_trace(go.Scatter(
+                x=_plot_x(group['Timestamp']), y=group['Value'],
+                customdata=customdata,
+                name=f"{az} — {task_label}", mode='lines',
+                line=dict(**LINE_OPTS, color=task_colors[task_index % len(task_colors)]),
+                legend='legend',
+                hovertemplate=(
+                    "%{customdata[0]}<br>Task: %{customdata[1]}"
+                    "<br><b>%{y:.1f}%</b><extra></extra>"
+                ),
+            ), row=az_index, col=1)
+        fig.add_hline(
+            y=85, line_color='#f9ab00', line_dash='dash', line_width=1,
+            row=az_index, col=1,
+        )
+        fig.add_hline(
+            y=100, line_color='#d93025', line_dash='dot', line_width=1,
+            row=az_index, col=1,
+        )
+
+    # ---- ECS Network TX + ElastiCache NetworkBytesOut overlay ----
     if not ecs_df.empty:
         tx_dist = ecs_task_metric_distribution(ecs_df, 'NetworkTxBytes', 'Sum', value_scale=1 / 1024.0)
         if not tx_dist.empty:
@@ -397,7 +460,7 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
                     line=dict(**LINE_OPTS, color=color, dash=dash),
                     legend="legend2",
                     hovertemplate=_task_distribution_hover('KB/min'),
-                ), row=2, col=1, secondary_y=False)
+                ), row=network_row, col=1, secondary_y=False)
             fig.add_trace(go.Scatter(
                 x=_plot_x(tx_dist['Timestamp']), y=tx_dist['source_count'],
                 customdata=_plot_times(tx_dist['Timestamp']),
@@ -405,7 +468,7 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
                 line=dict(**LINE_OPTS, color='#546e7a', dash='dot'),
                 legend="legend2",
                 hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.0f}} sources</b><extra></extra>"
-            ), row=2, col=1, secondary_y=True)
+            ), row=network_row, col=1, secondary_y=True)
         else:
             tx_df = metric_filter(ecs_df, 'NetworkTxBytes', 'Sum')
             if not tx_df.empty:
@@ -418,7 +481,7 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
                     line=dict(**LINE_OPTS, color=C_NET_TX_ECS),
                     legend="legend2",
                     hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} KB/min</b><extra></extra>"
-                ), row=2, col=1, secondary_y=False)
+                ), row=network_row, col=1, secondary_y=False)
             else:
                 fig.add_annotation(text="No Network TX Metrics", xref="paper", yref="paper",
                                    x=0.5, y=0.5, showarrow=False)
@@ -438,7 +501,7 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
                 line=dict(**LINE_OPTS, color=C_NET_TX_CACHE, dash='dot'),
                 legend="legend2",
                 hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} KB/min</b><extra></extra>"
-            ), row=2, col=1, secondary_y=False)
+            ), row=network_row, col=1, secondary_y=False)
 
     # ---- Row 3: ECS Memory (MB) ----
     if not ecs_df.empty:
@@ -456,7 +519,7 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
                 line=dict(**LINE_OPTS, color=C_ECS_MEM),
                 legend="legend3",
                 hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} MB</b><extra></extra>"
-            ), row=3, col=1)
+            ), row=ecs_memory_row, col=1)
         else:
             fig.add_annotation(text="No ECS Memory Metrics", xref="paper", yref="paper",
                                x=0.5, y=0.38, showarrow=False)
@@ -480,7 +543,7 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
                     line=dict(**LINE_OPTS, color=MEM_COLORS[i % len(MEM_COLORS)]),
                     legend="legend4",
                     hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.2f}}%</b><extra></extra>"
-                ), row=4, col=1)
+                ), row=cache_memory_row, col=1)
         else:
             fig.add_annotation(text="No Memory Metrics", xref="paper", yref="paper",
                                x=0.5, y=0.12, showarrow=False)
@@ -491,17 +554,19 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
     # ---- Axes styling ----
     fig.update_yaxes(title_text="%",      row=1, col=1, secondary_y=False)
     fig.update_yaxes(title_text="sources", row=1, col=1, secondary_y=True, showgrid=False)
-    fig.update_yaxes(title_text="KB/min", row=2, col=1,
+    for az_index in range(2, 2 + az_count):
+        fig.update_yaxes(title_text="%", row=az_index, col=1)
+    fig.update_yaxes(title_text="KB/min", row=network_row, col=1,
                      title_font=dict(color=C_NET_TX_ECS), tickfont=dict(color=C_NET_TX_ECS),
                      secondary_y=False)
-    fig.update_yaxes(title_text="sources", row=2, col=1, secondary_y=True, showgrid=False)
-    fig.update_yaxes(title_text="MB",     row=3, col=1,
+    fig.update_yaxes(title_text="sources", row=network_row, col=1, secondary_y=True, showgrid=False)
+    fig.update_yaxes(title_text="MB",     row=ecs_memory_row, col=1,
                      title_font=dict(color=C_ECS_MEM), tickfont=dict(color=C_ECS_MEM))
-    fig.update_yaxes(title_text="%",      row=4, col=1)
-    _set_absolute_xaxes(fig, range(1, 5), x_min, x_max)
+    fig.update_yaxes(title_text="%",      row=cache_memory_row, col=1)
+    _set_absolute_xaxes(fig, range(1, row_count + 1), x_min, x_max)
     fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
     fig.update_layout(
-        **LAYOUT_BASE, height=1300,
+        **LAYOUT_BASE, height=1300 + (280 * az_count),
         legend =dict(**LEGEND_H, x=0.5, y=0.83),
         legend2=dict(**LEGEND_H, x=0.5, y=0.56),
         legend3=dict(**LEGEND_H, x=0.5, y=0.27),
@@ -518,7 +583,7 @@ def build_client_latency_figure(ecs_df, x_min=None, x_max=None):
     """Build the ECS load-generator EMF client latency percentile figure."""
     fig = make_subplots(
         rows=1, cols=1,
-        subplot_titles=("Client Latency",),
+        subplot_titles=("ECS Load-Generator Latency",),
     )
 
     series = client_latency_series(ecs_df)
@@ -547,7 +612,7 @@ def build_client_latency_figure(ecs_df, x_min=None, x_max=None):
 
     if not shown:
         fig.add_annotation(
-            text="No ECS client latency datapoints",
+            text="No ECS load-generator latency datapoints",
             xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
         )
 

@@ -66,6 +66,34 @@ class SingleReportEscapingTests(unittest.TestCase):
         self.assertNotIn("redis<script>", html)
         self.assertNotIn("cache.m7g.large</span>", html)
 
+    def test_ecs_latency_is_the_last_part_of_infrastructure(self):
+        from template import render_html
+
+        page = render_html(
+            cluster_id="cluster-a",
+            suffix="run-a",
+            id_label="Cluster",
+            time_range="2026-05-01 00:00:00 UTC - 2026-05-01 01:00:00 UTC",
+            pills_html="",
+            cards_html="",
+            chart_memtier_html="MEMTIER_CHART",
+            chart_infra_html="INFRA_CHART",
+            chart_client_latency_html="ECS_LATENCY_CHART",
+            chart_deep_dive_html="DEEP_DIVE_CHART",
+        )
+
+        infrastructure_start = page.index("<h2>Infrastructure</h2>")
+        ecs_latency = page.index("<h2>ECS Load-Generator Latency</h2>")
+        infrastructure_end = page.index("<h2>ElastiCache Deep-Dive</h2>")
+        infrastructure_group_start = page.rfind(
+            '<div class="chart-group">', 0, infrastructure_start
+        )
+        next_group_start = page.find('<div class="chart-group">', infrastructure_start)
+        infrastructure_group = page[infrastructure_group_start:next_group_start]
+        self.assertLess(infrastructure_start, ecs_latency)
+        self.assertLess(ecs_latency, infrastructure_end)
+        self.assertIn("<h2>ECS Load-Generator Latency</h2>", infrastructure_group)
+
     def test_stat_cards_escape_titles_and_text(self):
         try:
             import pandas as pd

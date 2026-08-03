@@ -12,11 +12,13 @@ from report_common import ECS_ENV_VARS, inspect_run_directory
 from report_compare import run_compare_report
 from helpers import read_file_content
 from parsers import (
+    parse_container_insights_logs,
     parse_metrics_csv,
     parse_memtier_extra_stats,
+    parse_memtier_logs,
 )
 from summary import build_summary
-from cards import header_pills, stat_cards_html
+from cards import header_pills, loadgen_quality_html, stat_cards_html
 from charts import build_memtier_figure, build_infra_figure, build_client_latency_figure, build_elasticache_deep_dive_figure
 from template import render_html
 
@@ -243,6 +245,63 @@ def _read_uploaded_log_contents(logs_prefix: str) -> list[tuple[str, str]]:
     return _read_s3_prefix_contents(logs_prefix, (".txt",)) if logs_prefix else []
 
 
+def _read_local_container_insights_contents(logs_dir: Path) -> list[tuple[str, str]]:
+    container_dir = logs_dir / "container-insights"
+    files = sorted(container_dir.rglob("*.txt")) if container_dir.exists() else []
+    return [(str(path), path.read_text(encoding="utf-8", errors="replace")) for path in files]
+
+
+def _container_insights_prefix_from_loadgen(logs_prefix: str) -> str:
+    marker = "/logs/loadgen/"
+    return logs_prefix.replace(marker, "/logs/container-insights/", 1) if marker in logs_prefix else ""
+
+
+def _read_uploaded_container_insights_contents(logs_prefix: str) -> list[tuple[str, str]]:
+    configured = os.environ.get("CONTAINER_INSIGHTS_LOGS_PREFIX", "")
+    prefix = configured or _container_insights_prefix_from_loadgen(logs_prefix)
+    return _read_s3_prefix_contents(prefix, (".txt",)) if prefix else []
+
+
+def _parse_container_insights_entries(entries: list[tuple[str, str]]):
+    import pandas as pd
+
+    task_frames = []
+    service_frames = []
+    for _source, content in entries:
+        task_df, service_df = parse_container_insights_logs(content)
+        if not task_df.empty:
+            task_frames.append(task_df)
+        if not service_df.empty:
+            service_frames.append(service_df)
+    tasks = pd.concat(task_frames, ignore_index=True) if task_frames else pd.DataFrame()
+    services = pd.concat(service_frames, ignore_index=True) if service_frames else pd.DataFrame()
+    if not tasks.empty:
+        tasks = tasks.drop_duplicates(["Timestamp", "TaskId"], keep="last")
+    if not services.empty:
+        services = services.drop_duplicates(["Timestamp"], keep="last")
+    return tasks, services
+
+
+def _task_az_map(container_insights_task_df) -> dict[str, str]:
+    if container_insights_task_df is None or container_insights_task_df.empty:
+        return {}
+    required = {"TaskId", "AvailabilityZone"}
+    if not required.issubset(container_insights_task_df.columns):
+        return {}
+    known = container_insights_task_df[
+        container_insights_task_df["AvailabilityZone"].notna()
+        & container_insights_task_df["AvailabilityZone"].astype(str).ne("unknown")
+    ]
+    if known.empty:
+        return {}
+    return {
+        str(task_id): str(availability_zone)
+        for task_id, availability_zone in (
+            known.groupby("TaskId")["AvailabilityZone"].last().items()
+        )
+    }
+
+
 def _read_uploaded_memtier_artifact_contents(logs_prefix: str) -> list[tuple[str, str]]:
     return _read_s3_prefix_contents(logs_prefix, (".minute.csv", ".totals.json")) if logs_prefix else []
 
@@ -273,9 +332,13 @@ def _parse_memtier_log_entries(entries: list[tuple[str, str]]):
     last_message_ts = None
     first_oom_rejection_ts = None
     oom_frames = []
+    memtier_frames = []
     for source, content in memtier_entries:
         stream = _memtier_stream_from_source(source)
         stats = parse_memtier_extra_stats(content, stream)
+        parsed = parse_memtier_logs(content, stream)
+        if not parsed.empty:
+            memtier_frames.append(parsed)
         for key, current in (
             ("first_message_ts", first_message_ts),
             ("last_message_ts", last_message_ts),
@@ -298,7 +361,11 @@ def _parse_memtier_log_entries(entries: list[tuple[str, str]]):
     if not oom_df.empty:
         oom_df = oom_df.groupby("Timestamp", as_index=False)["OOM_events"].sum()
 
-    return pd.DataFrame(), {
+    memtier_df = pd.concat(memtier_frames, ignore_index=True) if memtier_frames else pd.DataFrame()
+    if not memtier_df.empty:
+        memtier_df = memtier_df.sort_values(["Timestamp", "Stream"]).reset_index(drop=True)
+
+    return memtier_df, {
         "first_message_ts": first_message_ts,
         "last_message_ts": last_message_ts,
         "first_oom_rejection_ts": first_oom_rejection_ts,
@@ -308,6 +375,7 @@ def _parse_memtier_log_entries(entries: list[tuple[str, str]]):
 
 _MINUTE_COLUMN_ALIASES = {
     "Timestamp": ("Timestamp", "timestamp", "minute_utc", "minute_start_utc"),
+    "task_count_present": ("task_count_present",),
     "throughput_sum": ("throughput_sum",),
     "latency_weighted_avg": ("latency_weighted_avg",),
     "throughput_median": ("throughput_median",),
@@ -493,7 +561,15 @@ def create_report(
     ecs_window_df = _clip_to_time_window(ecs_df, x_min, x_max)
 
     fig_m = build_memtier_figure(memtier_minute_df, oom_df, metrics_window_df, x_min, x_max)
-    fig_i = build_infra_figure(ecs_window_df, metrics_window_df, cluster_id, config, x_min, x_max)
+    fig_i = build_infra_figure(
+        ecs_window_df,
+        metrics_window_df,
+        cluster_id,
+        config,
+        x_min,
+        x_max,
+        task_az_map=_task_az_map(extra_stats.get("container_insights_task_df")),
+    )
     fig_l = build_client_latency_figure(ecs_window_df, x_min, x_max)
     fig_d = build_elasticache_deep_dive_figure(metrics_window_df, cluster_id, config, x_min, x_max)
 
@@ -502,7 +578,14 @@ def create_report(
     id_label = "Cluster" if cluster_mode else "Replication Group"
 
     summary = build_summary(
-        metrics_window_df, memtier_minute_df, memtier_totals_df, ecs_window_df, extra_stats, config, cluster_id, time_range
+        metrics_window_df,
+        memtier_minute_df,
+        memtier_totals_df,
+        ecs_window_df,
+        {**extra_stats, "memtier_samples_df": logs_df},
+        config,
+        cluster_id,
+        time_range,
     )
     summary_json = json.dumps(summary, indent=2, default=str)
 
@@ -520,7 +603,9 @@ def create_report(
             extra_stats=extra_stats,
             config=config,
             cluster_id=cluster_id,
+            loadgen=summary.get("loadgen"),
         ),
+        loadgen_quality_html=loadgen_quality_html(summary.get("loadgen")),
         chart_memtier_html=fig_m.to_html(include_plotlyjs="cdn", full_html=False),
         chart_infra_html=fig_i.to_html(include_plotlyjs=False, full_html=False),
         chart_client_latency_html=fig_l.to_html(include_plotlyjs=False, full_html=False),
@@ -563,6 +648,10 @@ def run_generate_report(run_dir: str, config: dict) -> None:
 
     print(f"Reading {len(log_entries)} loadgen log file(s)")
     logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
+    ci_entries = _read_local_container_insights_contents(logs_dir)
+    ci_task_df, ci_service_df = _parse_container_insights_entries(ci_entries)
+    extra_stats["container_insights_task_df"] = ci_task_df
+    extra_stats["container_insights_service_df"] = ci_service_df
     extra_stats["source_mode"] = "local"
     extra_stats["memtier_window_source"] = "memtier_log_messages"
     extra_stats["artifact_source"] = "generated" if artifact_entries else "missing"
@@ -612,17 +701,9 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     out_path.write_text(summary_json, encoding="utf-8")
     print(f"Written: {out_path}")
 
-    canonical_json_path = run_path / f"results_{run_path.name}.json"
-    canonical_json_path.write_text(summary_json, encoding="utf-8")
-    print(f"Written: {canonical_json_path}")
-
     html_path = run_path / "results_local.html"
     html_path.write_text(html_content, encoding="utf-8")
     print(f"Written: {html_path}")
-
-    canonical_html_path = run_path / f"results_{run_path.name}.html"
-    canonical_html_path.write_text(html_content, encoding="utf-8")
-    print(f"Written: {canonical_html_path}")
 
 
 def run_uploaded_report() -> None:
@@ -671,6 +752,10 @@ def run_uploaded_report() -> None:
         sys.exit(2)
     print(f"Reading {len(log_entries)} loadgen log file(s)")
     logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
+    ci_entries = _read_uploaded_container_insights_contents(logs_prefix)
+    ci_task_df, ci_service_df = _parse_container_insights_entries(ci_entries)
+    extra_stats["container_insights_task_df"] = ci_task_df
+    extra_stats["container_insights_service_df"] = ci_service_df
     extra_stats["source_mode"] = "uploaded"
     extra_stats["memtier_window_source"] = "memtier_log_messages"
     extra_stats["artifact_source"] = "uploaded"

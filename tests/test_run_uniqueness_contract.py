@@ -7,6 +7,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RunUniquenessContractTests(unittest.TestCase):
+    def test_reporter_task_deploys_loadgen_analysis_module(self):
+        reporter_tf = (ROOT / "reporter.tf").read_text(encoding="utf-8")
+
+        self.assertGreaterEqual(reporter_tf.count('"loadgen_analysis.py"'), 2)
+
     def test_run_id_full_uses_24_hour_timestamp(self):
         main_tf = (ROOT / "main.tf").read_text(encoding="utf-8")
         match = re.search(r'run_id_full\s*=\s*formatdate\("([^"]+)"', main_tf)

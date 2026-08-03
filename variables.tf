@@ -260,7 +260,7 @@ variable "loadgen_memtier_test_time" {
 }
 
 variable "loadgen_memtier_key_pattern" {
-  description = "Key access pattern (R:R = random, S:S = sequential, G:G = gaussian)"
+  description = "memtier key access pattern, including mixed patterns such as S:R"
   type        = string
   default     = "R:R"
 }

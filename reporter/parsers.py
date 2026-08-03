@@ -73,12 +73,14 @@ def parse_memtier_logs(log_content, source_stream=None):
         if 'ops/sec' not in message.lower() or 'latency' not in message.lower():
             continue
 
-        ops_match = re.search(r'\(avg:\s*([\d\.]+)\)\s*ops/sec', message)
+        # The leading value is the current interval rate.  ``(avg: ...)`` is
+        # cumulative over the process lifetime and hides task-level skew.
+        ops_match = re.search(r'([\d\.]+)\s*\(avg:\s*[\d\.]+\)\s*ops/sec', message)
         if not ops_match:
             ops_match = re.search(r'([\d\.]+)\s*ops/sec', message)
         ops_sec = float(ops_match.group(1)) if ops_match else None
 
-        lat_match = re.search(r'\(avg:\s*([\d\.]+)\)\s*msec latency', message)
+        lat_match = re.search(r'([\d\.]+)\s*\(avg:\s*[\d\.]+\)\s*msec latency', message)
         if not lat_match:
             lat_match = re.search(r'([\d\.]+)\s*msec latency', message)
         latency = float(lat_match.group(1)) if lat_match else None
@@ -107,6 +109,75 @@ def parse_memtier_logs(log_content, source_stream=None):
         df['Timestamp'] = pd.to_datetime(df['Timestamp'])
         df = _sort_preserving_parse_order(df, ['Timestamp', 'Stream'])
     return df
+
+
+def parse_container_insights_logs(log_content):
+    """Parse minute-level Container Insights task CPU and service task counts.
+
+    The exported log contains an absolute CloudWatch timestamp followed by the
+    JSON performance record.  Task records carry the TaskId, AZ, CpuUtilized,
+    and CpuReserved needed for a quota-relative per-task CPU calculation.
+    """
+    task_records = []
+    service_records = []
+    legacy_header = re.compile(r'^\[([\d\-T:\.\+Z]+)\] \[[^\]]+\] (.*)$')
+
+    for raw_line in log_content.splitlines():
+        if not raw_line or raw_line.startswith("LogGroup:"):
+            continue
+
+        outer_timestamp = None
+        message = raw_line
+        header = legacy_header.match(raw_line)
+        if header:
+            outer_timestamp = pd.to_datetime(header.group(1), utc=True, errors="coerce")
+            message = header.group(2)
+
+        try:
+            record = json.loads(message)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+
+        timestamp = _event_timestamp_ms_to_datetime(record.get("Timestamp"))
+        if timestamp is None and outer_timestamp is not None and not pd.isna(outer_timestamp):
+            timestamp = outer_timestamp.tz_convert("UTC").tz_localize(None)
+        if timestamp is None:
+            continue
+
+        if record.get("Type") == "Task" and record.get("TaskId"):
+            task_records.append(
+                {
+                    "Timestamp": timestamp,
+                    "TaskId": str(record["TaskId"]),
+                    "AvailabilityZone": str(record.get("AvailabilityZone") or "unknown"),
+                    "CpuUtilized": pd.to_numeric(record.get("CpuUtilized"), errors="coerce"),
+                    "CpuReserved": pd.to_numeric(record.get("CpuReserved"), errors="coerce"),
+                    "Stat": "Average",
+                }
+            )
+        elif record.get("Type") == "Service" and record.get("RunningTaskCount") is not None:
+            service_records.append(
+                {
+                    "Timestamp": timestamp,
+                    "RunningTaskCount": pd.to_numeric(record.get("RunningTaskCount"), errors="coerce"),
+                }
+            )
+
+    task_columns = [
+        "Timestamp", "TaskId", "AvailabilityZone", "CpuUtilized", "CpuReserved", "Stat",
+    ]
+    service_columns = ["Timestamp", "RunningTaskCount"]
+    task_df = pd.DataFrame(task_records, columns=task_columns)
+    service_df = pd.DataFrame(service_records, columns=service_columns)
+    if not task_df.empty:
+        task_df = task_df.drop_duplicates(["Timestamp", "TaskId"], keep="last")
+        task_df = task_df.sort_values(["Timestamp", "TaskId"]).reset_index(drop=True)
+    if not service_df.empty:
+        service_df = service_df.drop_duplicates(["Timestamp"], keep="last")
+        service_df = service_df.sort_values("Timestamp").reset_index(drop=True)
+    return task_df, service_df
 
 def parse_memtier_final_totals(log_content, source_stream=None):
     """Extract the last per-stream memtier ``Totals`` row, if one exists."""

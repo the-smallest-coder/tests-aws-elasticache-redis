@@ -10,6 +10,7 @@ locals {
     "cards.py",
     "template.py",
     "summary.py",
+    "loadgen_analysis.py",
     "exporter.py",
     "memtier_etl.py",
   ])
@@ -121,6 +122,7 @@ modules = [
     "cards.py",
     "template.py",
     "summary.py",
+    "loadgen_analysis.py",
     "exporter.py",
     "memtier_etl.py",
 ]

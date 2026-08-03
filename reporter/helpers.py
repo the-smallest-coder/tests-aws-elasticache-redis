@@ -139,14 +139,9 @@ def client_latency_series(df):
     return merged[columns].reset_index(drop=True)
 
 
-def ecs_task_metric_distribution(df, metric_name, stat, value_scale=1.0):
-    """Aggregate one ECS metric across task-level dimensions per timestamp.
-
-    CloudWatch exports the same Container Insights metric at several dimension
-    levels. For cross-load-generator distribution charts, keep exactly one
-    task-scoped source per TaskId and ignore service/cluster aggregates.
-    """
-    columns = ['Timestamp', 'avg', 'median', 'min', 'max', 'sum', 'source_count']
+def ecs_task_metric_rows(df, metric_name, stat, value_scale=1.0, task_az_map=None):
+    """Return one deduplicated task-level ECS metric row per timestamp and task."""
+    columns = ['Timestamp', 'TaskId', 'AvailabilityZone', 'Value']
     if df.empty or not {'Timestamp', 'MetricName', 'Stat', 'Value', 'Dimensions'}.issubset(df.columns):
         return pd.DataFrame(columns=columns)
 
@@ -160,20 +155,46 @@ def ecs_task_metric_distribution(df, metric_name, stat, value_scale=1.0):
     if task_rows.empty:
         return pd.DataFrame(columns=columns)
 
-    task_rows['TaskId'] = task_rows['Dimensions'].astype(str).str.extract(r'(?:^|;)TaskId=([^;]+)', expand=False)
+    dim_text = task_rows['Dimensions'].astype(str)
+    task_rows['TaskId'] = dim_text.str.extract(r'(?:^|;)TaskId=([^;]+)', expand=False)
+    task_rows['AvailabilityZone'] = dim_text.str.extract(
+        r'(?:^|;)AvailabilityZone=([^;]+)', expand=False
+    )
+    if task_az_map:
+        task_rows['AvailabilityZone'] = task_rows['AvailabilityZone'].fillna(
+            task_rows['TaskId'].map(task_az_map)
+        )
+    task_rows['AvailabilityZone'] = task_rows['AvailabilityZone'].fillna('unknown')
     task_rows['Value'] = pd.to_numeric(task_rows['Value'], errors='coerce') * value_scale
     task_rows = task_rows.dropna(subset=['Timestamp', 'TaskId', 'Value'])
     if task_rows.empty:
         return pd.DataFrame(columns=columns)
 
-    dim_text = task_rows['Dimensions'].astype(str)
     task_rows['DimPriority'] = 2
     task_rows.loc[dim_text.str.contains(r'(?:^|;)TaskDefinitionFamily=', regex=True, na=False), 'DimPriority'] = 1
     task_rows.loc[dim_text.str.contains(r'(?:^|;)ServiceName=', regex=True, na=False), 'DimPriority'] = 0
     best_priority = task_rows.groupby(['Timestamp', 'TaskId'])['DimPriority'].transform('min')
     task_rows = task_rows[task_rows['DimPriority'] == best_priority]
 
-    per_task = task_rows.groupby(['Timestamp', 'TaskId'], as_index=False)['Value'].mean()
+    return (
+        task_rows.groupby(['Timestamp', 'TaskId', 'AvailabilityZone'], as_index=False)['Value']
+        .mean()
+        .sort_values(['Timestamp', 'TaskId'])
+        .reset_index(drop=True)[columns]
+    )
+
+
+def ecs_task_metric_distribution(df, metric_name, stat, value_scale=1.0):
+    """Aggregate one ECS metric across task-level dimensions per timestamp.
+
+    CloudWatch exports the same Container Insights metric at several dimension
+    levels. For cross-load-generator distribution charts, keep exactly one
+    task-scoped source per TaskId and ignore service/cluster aggregates.
+    """
+    columns = ['Timestamp', 'avg', 'median', 'min', 'max', 'sum', 'source_count']
+    per_task = ecs_task_metric_rows(df, metric_name, stat, value_scale=value_scale)
+    if per_task.empty:
+        return pd.DataFrame(columns=columns)
     grouped = per_task.groupby('Timestamp')['Value']
     result = grouped.agg(
         avg='mean',

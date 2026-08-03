@@ -63,6 +63,7 @@ REQUIRED_ECS_METRICS = [
     "TaskCpuUtilization",
     "TaskMemoryUtilization",
     "CpuUtilized",
+    "CpuReserved",
     "MemoryUtilized",
     "NetworkRxBytes",
     "NetworkTxBytes",
@@ -230,7 +231,14 @@ def _describe_metric_source(source: dict, discovered_dimensions: list[list[dict[
     )
 
 
-def export_metric_sources_to_s3(sources, bucket: str, key: str, start_time: datetime, end_time: datetime) -> str:
+def export_metric_sources_to_s3(
+    sources,
+    bucket: str,
+    key: str,
+    start_time: datetime,
+    end_time: datetime,
+    task_metadata: dict[str, dict[str, str]] | None = None,
+) -> str:
     csv_buffer = io.StringIO()
     writer = csv.writer(csv_buffer)
     writer.writerow(["Timestamp", "Namespace", "MetricName", "Stat", "Value", "Unit", "Dimensions"])
@@ -266,6 +274,12 @@ def export_metric_sources_to_s3(sources, bucket: str, key: str, start_time: date
 
     for (namespace, metric_name, _dims_key), (dimensions, statistics, extended_statistics) in metric_map.items():
         dimensions_str = _dimensions_to_str(dimensions)
+        output_dimensions = list(dimensions)
+        task_id = next((d["Value"] for d in dimensions if d.get("Name") == "TaskId"), None)
+        for name, value in (task_metadata or {}).get(task_id, {}).items():
+            if value and not any(d.get("Name") == name for d in output_dimensions):
+                output_dimensions.append({"Name": name, "Value": str(value)})
+        output_dimensions_str = _dimensions_to_str(output_dimensions)
         try:
             params = {
                 "Namespace": namespace,
@@ -291,11 +305,11 @@ def export_metric_sources_to_s3(sources, bucket: str, key: str, start_time: date
             unit = datapoint.get("Unit", "None")
             for stat in statistics:
                 if stat in datapoint:
-                    writer.writerow([ts, namespace, metric_name, stat, datapoint[stat], unit, dimensions_str])
+                    writer.writerow([ts, namespace, metric_name, stat, datapoint[stat], unit, output_dimensions_str])
             for stat in extended_statistics:
                 values = datapoint.get("ExtendedStatistics", {})
                 if stat in values:
-                    writer.writerow([ts, namespace, metric_name, stat, values[stat], unit, dimensions_str])
+                    writer.writerow([ts, namespace, metric_name, stat, values[stat], unit, output_dimensions_str])
 
     s3.put_object(Bucket=bucket, Key=key, Body=csv_buffer.getvalue(), ContentType="text/csv")
     print(f"Metrics exported to s3://{bucket}/{key}")
@@ -339,7 +353,9 @@ def export_elasticache_metrics_to_s3(replication_group_id, bucket, key, start_ti
     return export_metric_sources_to_s3(sources, bucket, key, start_time, end_time)
 
 
-def export_ecs_metrics_to_s3(cluster, service, bucket, key, start_time, end_time) -> str:
+def export_ecs_metrics_to_s3(
+    cluster, service, bucket, key, start_time, end_time, task_metadata=None
+) -> str:
     sources = [
         {
             "namespace": "AWS/ECS",
@@ -366,7 +382,9 @@ def export_ecs_metrics_to_s3(cluster, service, bucket, key, start_time, end_time
             "label": "ECS client latency metric discovery",
         },
     ]
-    return export_metric_sources_to_s3(sources, bucket, key, start_time, end_time)
+    return export_metric_sources_to_s3(
+        sources, bucket, key, start_time, end_time, task_metadata=task_metadata
+    )
 
 
 def export_logs_to_s3(log_group, bucket, key, start_time=None, end_time=None, log_stream_name_prefix: str = "") -> str | None:
@@ -446,6 +464,29 @@ def export_logs_to_s3(log_group, bucket, key, start_time=None, end_time=None, lo
 
     print(f"Logs exported to s3://{bucket}/{key}")
     return f"s3://{bucket}/{key}"
+
+
+def _task_metadata_from_container_insights_object(bucket: str, key: str) -> dict[str, dict[str, str]]:
+    """Return TaskId -> CSV dimension enrichment from an exported insights log."""
+    try:
+        content = s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8", "replace")
+    except Exception as exc:
+        print(f"Warning: unable to read Container Insights task metadata: {exc}")
+        return {}
+
+    metadata = {}
+    for line in content.splitlines():
+        message = line.split("] ", 2)[-1] if line.startswith("[") else line
+        try:
+            record = json.loads(message)
+        except json.JSONDecodeError:
+            continue
+        if record.get("Type") != "Task" or not record.get("TaskId"):
+            continue
+        availability_zone = record.get("AvailabilityZone")
+        if availability_zone:
+            metadata[str(record["TaskId"])] = {"AvailabilityZone": str(availability_zone)}
+    return metadata
 
 
 def iter_log_stream_events(log_group, log_stream_name):
@@ -822,6 +863,7 @@ def main() -> None:
     metrics_key = f"{prefix}{timestamp}/metrics/{cluster_id}.csv"
     ecs_metrics_key = f"{prefix}{timestamp}/metrics/{cluster_id}-ecs.csv"
     loadgen_logs_prefix = f"{prefix}{timestamp}/logs/loadgen"
+    container_insights_key = f"{prefix}{timestamp}/logs/container-insights/{cluster_id}.txt"
     status_key = f"{prefix}{timestamp}/report_status.json"
     status = {
         "cluster_id": cluster_id,
@@ -856,16 +898,25 @@ def main() -> None:
         )
 
     export_elasticache_metrics_to_s3(elasticache_id, bucket, metrics_key, start_time, end_time)
-    export_ecs_metrics_to_s3(ecs_cluster, ecs_service, bucket, ecs_metrics_key, start_time, end_time)
-    status["checks"]["metrics"] = _metric_contract_status(bucket, metrics_key)
-
     export_logs_to_s3(
         os.environ.get("CONTAINER_INSIGHTS_LOG_GROUP"),
         bucket,
-        f"{prefix}{timestamp}/logs/container-insights/{cluster_id}.txt",
+        container_insights_key,
         start_time,
         end_time,
     )
+    task_metadata = _task_metadata_from_container_insights_object(bucket, container_insights_key)
+    export_ecs_metrics_to_s3(
+        ecs_cluster,
+        ecs_service,
+        bucket,
+        ecs_metrics_key,
+        start_time,
+        end_time,
+        task_metadata=task_metadata,
+    )
+    status["checks"]["metrics"] = _metric_contract_status(bucket, metrics_key)
+
     export_logs_to_s3(
         os.environ.get("ELASTICACHE_LOG_GROUP"),
         bucket,
@@ -900,6 +951,9 @@ def main() -> None:
     os.environ["METRICS_CSV"] = f"s3://{bucket}/{metrics_key}"
     os.environ["ECS_METRICS_CSV"] = f"s3://{bucket}/{ecs_metrics_key}"
     os.environ["LOGS_PREFIX"] = f"s3://{bucket}/{loadgen_logs_prefix}/"
+    os.environ["CONTAINER_INSIGHTS_LOGS_PREFIX"] = (
+        f"s3://{bucket}/{prefix}{timestamp}/logs/container-insights/"
+    )
     os.environ["OUTPUT_BUCKET"] = bucket
     os.environ["OUTPUT_PREFIX"] = prefix
     os.environ["SUFFIX"] = timestamp

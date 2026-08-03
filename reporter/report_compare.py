@@ -24,7 +24,8 @@ SECTION_META: dict[str, dict[str, str]] = {
     "benchmark": {"title": "Benchmark Summary", "badge": "memtier"},
     "engine_memory": {"title": "Engine and Memory", "badge": "infra"},
     "cache_latency": {"title": "Cache, Latency, Connections", "badge": "behavior"},
-    "client_latency": {"title": "Client Latency", "badge": "ecs-emf"},
+    "client_latency": {"title": "ECS Load-Generator Latency", "badge": "ecs-emf"},
+    "loadgen": {"title": "Load Generator Validity", "badge": "per-task + AZ"},
     "network_ecs": {"title": "Network and ECS", "badge": "loadgen"},
 }
 
@@ -78,18 +79,50 @@ METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("cache_latency", "String Latency", ("latency_server_us", "string_avg"), "us", 3, "lower", "Average server-side string command latency."),
     MetricSpec("cache_latency", "Avg Connections", ("connections", "avg"), "", 1, "neutral", "Average concurrent connections on the cache node."),
     MetricSpec("cache_latency", "Peak Connections", ("connections", "max"), "", 1, "neutral", "Highest concurrent connection count."),
-    MetricSpec("client_latency", "Client p50", ("client_latency", "p50_ms"), "ms", 3, "lower", "Mean ECS EMF p50 client latency over the report window."),
-    MetricSpec("client_latency", "Client p99", ("client_latency", "p99_ms"), "ms", 3, "lower", "Mean ECS EMF p99 client latency over the report window."),
-    MetricSpec("client_latency", "Client p99.9", ("client_latency", "p999_ms"), "ms", 3, "lower", "Mean ECS EMF p99.9 client latency over the report window."),
-    MetricSpec("client_latency", "Worst Stream p99", ("client_latency", "worst_stream_p99_ms"), "ms", 3, "lower", "Maximum per-task ECS EMF p99 client latency."),
-    MetricSpec("client_latency", "Worst Stream p99.9", ("client_latency", "worst_stream_p999_ms"), "ms", 3, "lower", "Maximum per-task ECS EMF p99.9 client latency."),
+    MetricSpec("client_latency", "ECS p50", ("client_latency", "p50_ms"), "ms", 3, "lower", "Mean ECS load-generator EMF p50 latency over the report window."),
+    MetricSpec("client_latency", "ECS p99", ("client_latency", "p99_ms"), "ms", 3, "lower", "Mean ECS load-generator EMF p99 latency over the report window."),
+    MetricSpec("client_latency", "ECS p99.9", ("client_latency", "p999_ms"), "ms", 3, "lower", "Mean ECS load-generator EMF p99.9 latency over the report window."),
+    MetricSpec("client_latency", "Worst ECS Task p99", ("client_latency", "worst_stream_p99_ms"), "ms", 3, "lower", "Maximum per-task ECS load-generator EMF p99 latency."),
+    MetricSpec("client_latency", "Worst ECS Task p99.9", ("client_latency", "worst_stream_p999_ms"), "ms", 3, "lower", "Maximum per-task ECS load-generator EMF p99.9 latency."),
+    MetricSpec(
+        "loadgen", "ECS Service CPU — Time Average", ("ecs", "service_cpu_time_avg_pct"),
+        "%", 2, "neutral", "Time average of service-level CPUUtilization; this is not an average across tasks.", "points",
+    ),
+    MetricSpec(
+        "loadgen", "ECS Service CPU — Time Peak", ("ecs", "service_cpu_time_peak_pct"),
+        "%", 2, "lower", "Maximum over time of service-level CPUUtilization; this is not the worst task.", "points",
+    ),
+    MetricSpec(
+        "loadgen", "Task CPU p95 — Minimum Task", ("loadgen", "generator_cpu_across_tasks", "min"),
+        "%", 2, "lower", "Minimum across the per-task CPU p95 values; ramp-up minima are not used.", "points",
+    ),
+    MetricSpec(
+        "loadgen", "Task CPU p95 — Median Task", ("loadgen", "generator_cpu_across_tasks", "median"),
+        "%", 2, "lower", "Median across the per-task CPU p95 values.", "points",
+    ),
+    MetricSpec(
+        "loadgen", "Task CPU p95 — Maximum Task", ("loadgen", "generator_cpu_across_tasks", "max"),
+        "%", 2, "lower", "Maximum across per-task p95(CpuUtilized / CpuReserved * 100); above 85% invalidates latency/tail conclusions.",
+        "points", warning_above=85.0,
+    ),
+    MetricSpec(
+        "loadgen", "Fleet Task Throughput Skew", ("loadgen", "throughput_task_skew_p90_to_p10"),
+        "p90/p10", 3, "lower", "p90/p10 across per-task median current ops/sec; cross-AZ placement is intentionally included and has no validity threshold.",
+    ),
+    MetricSpec(
+        "loadgen", "Worst Within-AZ Throughput Skew", ("loadgen", "throughput_skew_within_az_max"),
+        "p90/p10", 3, "lower", "Maximum p90/p10 across tasks within the same AZ; above 1.3 indicates a generator problem.",
+        warning_above=1.3,
+    ),
+    MetricSpec(
+        "loadgen", "Between-AZ Throughput Ratio", ("loadgen", "throughput_skew_between_az_max_to_min"),
+        "max/min", 3, "lower", "Max/min across AZ median task throughput. Reported as a cross-AZ result without a validity threshold.",
+    ),
     MetricSpec("network_ecs", "Avg Cache In", ("network", "cache", "avg_in_kbs"), "KB/s", 2, "neutral", "Average inbound network throughput on the cache node."),
     MetricSpec("network_ecs", "Avg Cache Out", ("network", "cache", "avg_out_kbs"), "KB/s", 2, "neutral", "Average outbound network throughput on the cache node."),
     MetricSpec("network_ecs", "BW In Throttle Events", ("network", "throttling", "bw_in_exceeded_total"), "", 0, "lower", "Total bandwidth-in throttle events."),
     MetricSpec("network_ecs", "BW Out Throttle Events", ("network", "throttling", "bw_out_exceeded_total"), "", 0, "lower", "Total bandwidth-out throttle events."),
     MetricSpec("network_ecs", "PPS Throttle Events", ("network", "throttling", "pps_exceeded_total"), "", 0, "lower", "Total packets-per-second throttle events."),
-    MetricSpec("network_ecs", "Avg ECS CPU", ("ecs", "avg_cpu_pct"), "%", 2, "neutral", "Average CPU utilization across load generator tasks.", "points"),
-    MetricSpec("network_ecs", "Peak ECS CPU", ("ecs", "max_cpu_pct"), "%", 2, "lower", "Peak CPU utilization across load generator tasks.", "points"),
     MetricSpec("network_ecs", "Peak ECS Memory", ("ecs", "peak_mem_mb"), "MB", 1, "lower", "Peak load generator memory usage."),
 )
 
@@ -136,11 +169,23 @@ def format_delta(spec: MetricSpec, baseline: float | None, candidate: float | No
 
 def metric_rows(baseline: RunData, candidate: RunData) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    latency_invalid = any(
+        get_nested(run.summary, ("loadgen", "latency_tail_valid")) is False
+        for run in (baseline, candidate)
+    )
     for spec in METRICS:
         baseline_raw = get_nested(baseline.summary, spec.path)
         candidate_raw = get_nested(candidate.summary, spec.path)
         baseline_value = metric_value(spec, baseline_raw)
         candidate_value = metric_value(spec, candidate_raw)
+        tone = classify_delta(spec, baseline_value, candidate_value)
+        if spec.warning_above is not None and any(
+            value is not None and value > spec.warning_above
+            for value in (baseline_value, candidate_value)
+        ):
+            tone = "warning"
+        if spec.section == "client_latency" and latency_invalid:
+            tone = "warning"
         rows.append(
             {
                 "section": spec.section,
@@ -148,7 +193,7 @@ def metric_rows(baseline: RunData, candidate: RunData) -> list[dict[str, Any]]:
                 "baseline": display_value(spec, baseline_raw),
                 "candidate": display_value(spec, candidate_raw),
                 "delta": format_delta(spec, baseline_value, candidate_value),
-                "tone": classify_delta(spec, baseline_value, candidate_value),
+                "tone": tone,
                 "description": spec.description,
                 "path": spec.path,
             }
@@ -352,6 +397,24 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
                 "tone": "warning",
                 "title": "Config comparison is partial",
                 "text": f"cluster_details.json is missing for {missing_roles}, so engine and memtier configuration comparison is incomplete.",
+            }
+        )
+
+    invalid_runs = []
+    for run in (baseline, candidate):
+        loadgen = run.summary.get("loadgen", {})
+        if loadgen.get("validation_status") == "invalid":
+            reasons = ", ".join(loadgen.get("invalid_reasons", [])) or "load-generator gate failed"
+            invalid_runs.append(f"{run.role}: {reasons}")
+    if invalid_runs:
+        items.append(
+            {
+                "tone": "warning",
+                "title": "Load-generator validity gate failed",
+                "text": (
+                    "; ".join(invalid_runs)
+                    + ". Do not use affected runs for latency or tail-latency conclusions."
+                ),
             }
         )
 

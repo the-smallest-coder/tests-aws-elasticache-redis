@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 
 ECS_ENV_VARS = ("S3_BUCKET", "S3_PREFIX", "REPORT_TIMESTAMP", "CLUSTER_ID")
-GENERATOR_SCHEMA_VERSION = "2026-05-plan4"
+GENERATOR_SCHEMA_VERSION = "2026-08-loadgen-quality-v2"
 Normalizer = Callable[[Any], float | None]
 
 
@@ -37,6 +37,7 @@ class MetricSpec:
     delta_mode: str = "absolute"
     none_label: str = "n/a"
     normalizer: Normalizer | None = None
+    warning_above: float | None = None
 
 
 def get_env_var(name: str) -> str:
@@ -256,6 +257,14 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def enrich_summary_meta(summary: dict[str, Any], cluster_details: dict[str, Any] | None) -> None:
     meta = summary.setdefault("meta", {})
+    ecs = summary.setdefault("ecs", {})
+    if "service_cpu_time_avg_pct" not in ecs and "avg_cpu_pct" in ecs:
+        ecs["service_cpu_time_avg_pct"] = ecs.pop("avg_cpu_pct")
+    if "service_cpu_time_peak_pct" not in ecs and "max_cpu_pct" in ecs:
+        ecs["service_cpu_time_peak_pct"] = ecs.pop("max_cpu_pct")
+    expected_task_count = get_nested(summary, ("loadgen", "expected_task_count"))
+    if not ecs.get("task_count") and expected_task_count is not None:
+        ecs["task_count"] = expected_task_count
     if not cluster_details:
         return
 
@@ -272,8 +281,9 @@ def enrich_summary_meta(summary: dict[str, Any], cluster_details: dict[str, Any]
     meta["node_count"] = meta.get("node_count") or elasticache.get("num_cache_nodes") or ""
     if not meta.get("cluster_mode"):
         meta["cluster_mode"] = elasticache.get("cluster_mode_enabled")
-    if "task_count" not in summary.get("ecs", {}):
-        summary.setdefault("ecs", {})["task_count"] = memtier.get("task_count")
+    memtier_task_count = memtier.get("task_count")
+    if not ecs.get("task_count") and memtier_task_count:
+        ecs["task_count"] = memtier_task_count
 
 
 def load_run(role: str, raw_path: str) -> RunData:
