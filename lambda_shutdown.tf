@@ -35,6 +35,8 @@ resource "aws_lambda_function" "shutdown" {
   timeout          = 300
   memory_size      = 256
 
+  depends_on = [aws_cloudwatch_log_group.lambda_shutdown]
+
   environment {
     variables = {
       CLUSTER_ID     = local.cluster_id
@@ -58,6 +60,8 @@ resource "aws_lambda_function" "shutdown_scheduler" {
   runtime          = "python3.13"
   timeout          = 60
   memory_size      = 128
+
+  depends_on = [aws_cloudwatch_log_group.lambda_shutdown_scheduler]
 
   environment {
     variables = {
@@ -95,6 +99,8 @@ resource "aws_lambda_function" "shutdown_verify" {
   runtime          = "python3.13"
   timeout          = 60
   memory_size      = 128
+
+  depends_on = [aws_cloudwatch_log_group.lambda_shutdown_verify]
 
   environment {
     variables = {

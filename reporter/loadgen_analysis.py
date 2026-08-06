@@ -6,6 +6,8 @@ import re
 
 import pandas as pd
 
+from helpers import elasticache_availability_zone, ecs_task_index_map
+
 
 GENERATOR_CPU_THRESHOLD_PCT = 85.0
 WITHIN_AZ_SKEW_THRESHOLD = 1.3
@@ -125,6 +127,33 @@ def _rounded(value: float | None, digits: int = 3):
     return round(float(value), digits) if value is not None else None
 
 
+def _task_latency_map(memtier_totals_df: pd.DataFrame) -> dict[str, float]:
+    """Map ECS task ID -> final memtier p50 latency (ms) for AZ inference.
+
+    ``memtier_totals_df["source"]`` identifies the stream two different
+    ways depending on how it was loaded: a ``*.totals.json`` artifact path
+    (local/uploaded sidecar files) or the payload's own ``stream_id`` string
+    (in-memory reconstruction from raw logs), e.g.::
+
+        .../logs/loadgen/memtier/memtier/<task-id>.totals.json
+        memtier/memtier/<task-id>
+
+    Stripping a trailing ``.totals.json`` and then any ``.../`` prefix with
+    ``_task_id`` normalizes either shape to the bare ECS task ID, which is
+    the same ID Container Insights reports - no separate translation table
+    is needed.
+    """
+    required = {"source", "p50_latency_ms"}
+    if memtier_totals_df is None or memtier_totals_df.empty or not required.issubset(memtier_totals_df.columns):
+        return {}
+    df = memtier_totals_df.copy()
+    stream = df["source"].astype(str).str.replace(r"\.totals\.json$", "", regex=True)
+    df["TaskId"] = stream.map(_task_id)
+    df["p50_latency_ms"] = pd.to_numeric(df["p50_latency_ms"], errors="coerce")
+    df = df[df["TaskId"].astype(bool)].dropna(subset=["p50_latency_ms"])
+    return dict(zip(df["TaskId"], df["p50_latency_ms"]))
+
+
 def build_loadgen_summary(
     memtier_samples_df: pd.DataFrame,
     memtier_minute_df: pd.DataFrame,
@@ -133,6 +162,8 @@ def build_loadgen_summary(
     ci_service_df: pd.DataFrame,
     report_start,
     report_end,
+    measured_elasticache_az=None,
+    memtier_totals_df: pd.DataFrame | None = None,
 ) -> dict:
     """Build load-generator validity metrics using only complete absolute minutes."""
     samples = _clip(memtier_samples_df, report_start, report_end)
@@ -221,6 +252,24 @@ def build_loadgen_summary(
                 }
             )
 
+    elasticache_az = elasticache_availability_zone(
+        task_latency_map=_task_latency_map(memtier_totals_df),
+        task_az_map=az_by_task,
+        measured_availability_zone=measured_elasticache_az,
+    )
+    task_indexes = ecs_task_index_map(
+        {
+            row['task_id']
+            for row in cpu_vector + throughput_vector
+        },
+        task_az_map=az_by_task,
+        elasticache_az=elasticache_az['availability_zone'],
+    )
+    for vector in (cpu_vector, throughput_vector):
+        for row in vector:
+            row['task_index'] = task_indexes[row['task_id']]
+        vector.sort(key=lambda row: (row['task_index'], row['task_id']))
+
     throughput_df = pd.DataFrame(throughput_vector)
     fleet_ratio = None
     within_az_max = None
@@ -228,7 +277,13 @@ def build_loadgen_summary(
     az_vector = []
     if not throughput_df.empty:
         fleet_ratio = _ratio_p90_p10(throughput_df["median_ops_sec"])
-        for az, group in throughput_df.groupby("availability_zone", sort=True):
+        az_groups = list(throughput_df.groupby("availability_zone", sort=True))
+        az_groups.sort(key=lambda item: (
+            0 if item[0] == elasticache_az['availability_zone'] else 1,
+            item[0] == 'unknown',
+            item[0],
+        ))
+        for az, group in az_groups:
             az_vector.append(
                 {
                     "availability_zone": az,
@@ -272,6 +327,10 @@ def build_loadgen_summary(
     unknown_reasons = []
     if missing_az_tasks:
         unknown_reasons.append("availability_zone_missing")
+    if elasticache_az["source"] == "unavailable":
+        unknown_reasons.append("elasticache_availability_zone_unavailable")
+    elif elasticache_az["source"] == "ambiguous":
+        unknown_reasons.append("elasticache_availability_zone_ambiguous")
 
     has_cpu = generator_cpu_p95 is not None
     has_throughput = (
@@ -280,12 +339,14 @@ def build_loadgen_summary(
         and not missing_az_tasks
     )
     status = (
-        "invalid" if reasons
-        else ("unknown" if unknown_reasons else ("valid" if has_cpu and has_throughput else "unknown"))
+        "warning" if reasons
+        else ("unknown" if unknown_reasons else ("ok" if has_cpu and has_throughput else "unknown"))
     )
     return {
+        "diagnostic_status": status,
         "validation_status": status,
-        "invalid_reasons": reasons,
+        "warning_reasons": reasons,
+        "invalid_reasons": [],
         "unknown_reasons": unknown_reasons,
         "latency_tail_valid": not generator_limited if has_cpu else None,
         "expected_task_count": expected_task_count,
@@ -300,6 +361,8 @@ def build_loadgen_summary(
         "generator_cpu_limited": generator_limited if has_cpu else None,
         "generator_cpu_across_tasks": generator_cpu_across_tasks,
         "generator_cpu_p95_by_task": cpu_vector,
+        "elasticache_availability_zone": elasticache_az["availability_zone"],
+        "elasticache_availability_zone_source": elasticache_az["source"],
         "throughput_task_skew_p90_to_p10": _rounded(fleet_ratio),
         "throughput_skew_within_az_max": _rounded(within_az_max),
         "throughput_skew_within_az_threshold": WITHIN_AZ_SKEW_THRESHOLD,

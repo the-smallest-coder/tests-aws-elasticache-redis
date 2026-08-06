@@ -159,7 +159,7 @@ def generate_s3_html_report(
             {cpu_div}
         </section>
         <section class="chart-section">
-            <h2>Load Generator Health (CPU)</h2>
+            <h2>ECS Task Health (CPU)</h2>
             {ecs_div}
         </section>
     </div>

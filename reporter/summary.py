@@ -291,6 +291,8 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         extra_stats.get('container_insights_service_df'),
         first_message_ts,
         last_message_ts,
+        measured_elasticache_az=config.get('elasticache_availability_zone'),
+        memtier_totals_df=memtier_totals_df,
     ) if first_message_ts is not None and last_message_ts is not None else {}
     if loadgen.get('expected_task_count') is not None:
         ecs['task_count'] = loadgen['expected_task_count']

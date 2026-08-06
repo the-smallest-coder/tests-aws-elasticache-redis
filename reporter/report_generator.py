@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from html import escape
 from io import StringIO
 import json
 import os
@@ -19,7 +20,7 @@ from parsers import (
 )
 from summary import build_summary
 from cards import header_pills, loadgen_quality_html, stat_cards_html
-from charts import build_memtier_figure, build_infra_figure, build_client_latency_figure, build_elasticache_deep_dive_figure
+from charts import build_memtier_figure, build_infra_panels, build_elasticache_deep_dive_figure
 from template import render_html
 
 
@@ -28,15 +29,15 @@ def build_parser() -> argparse.ArgumentParser:
         description="Generate ElastiCache reports. No args uses ECS env vars; local comparison uses the compare command.",
     )
     subparsers = parser.add_subparsers(dest="command")
-    compare = subparsers.add_parser("compare", help="Compare two local results_local.json runs.")
-    compare.add_argument("baseline", help="Baseline results_local.json path or its parent run directory.")
-    compare.add_argument("candidate", help="Candidate results_local.json path or its parent run directory.")
+    compare = subparsers.add_parser("compare", help="Compare two results_<run>.json runs.")
+    compare.add_argument("baseline", help="Baseline results_<run>.json path or its parent run directory.")
+    compare.add_argument("candidate", help="Candidate results_<run>.json path or its parent run directory.")
     compare.add_argument(
         "-o",
         "--output",
         help="Output HTML path. Defaults to results/comparisons/<baseline>_vs_<candidate>.html.",
     )
-    generate = subparsers.add_parser("generate", help="Build results_local.json from local CSVs and logs.")
+    generate = subparsers.add_parser("generate", help="Build the run-named HTML and JSON from local CSVs and logs.")
     generate.add_argument("run_dir", help="Path to a run results directory (containing metrics/ and logs/).")
     generate.add_argument("--engine-type", default="", help="e.g. redis or valkey")
     generate.add_argument("--engine-version", default="", help="e.g. 7.1")
@@ -154,6 +155,7 @@ def _config_from_cluster_details(cluster_details: dict) -> dict[str, str]:
         "node_type": elasticache.get("node_type", ""),
         "node_memory_bytes": elasticache.get("node_memory_bytes", ""),
         "redis_hourly_usd": elasticache.get("redis_hourly_usd", ""),
+        "elasticache_availability_zone": elasticache.get("availability_zone", ""),
         "node_count": elasticache.get("num_cache_nodes", ""),
         "cluster_mode": elasticache.get("cluster_mode_enabled", ""),
     }
@@ -515,6 +517,9 @@ def _memtier_dfs_from_log_entries(log_entries: list[tuple[str, str]]):
             "source": p["stream_id"],
             "throughput_avg": float(p["ops_per_sec"]),
             "latency_avg_ms": float(p["avg_latency_ms"]),
+            "p50_latency_ms": float(p["p50_latency_ms"]),
+            "p99_latency_ms": float(p["p99_latency_ms"]),
+            "p999_latency_ms": float(p["p999_latency_ms"]),
             "total_bandwidth_kbs": float(p["bandwidth_kbs"]),
         }
         for p in totals_list
@@ -528,6 +533,86 @@ def _memtier_dfs_from_log_entries(log_entries: list[tuple[str, str]]):
         totals_df = pd.DataFrame(columns=totals_cols)
 
     return combined_df, totals_df
+
+
+def _infra_panels_html(panels) -> str:
+    component_css = """\
+.infra-panels { width: 100%; }
+.infra-panel { height: auto; min-width: 0; }
+.infra-panel + .infra-panel { margin-top: 18px; }
+.infra-panel-title {
+  color: #2f4b73;
+  font-size: 16px;
+  line-height: 22px;
+  min-height: 22px;
+  text-align: center;
+}
+.infra-plot { height: 320px; width: 100%; }
+.infra-plot > div { height: 320px !important; width: 100% !important; }
+.infra-legend {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+  height: auto;
+  justify-content: center;
+  padding: 4px 12px 10px;
+}
+.infra-legend:empty { display: none; }
+.infra-legend-item {
+  align-items: center;
+  color: #44546a;
+  display: inline-flex;
+  font-size: 11px;
+  gap: 8px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.infra-legend-line {
+  background: var(--legend-color);
+  display: inline-block;
+  flex: 0 0 34px;
+  height: 3px;
+  width: 34px;
+}
+.infra-legend-line.dash {
+  background: repeating-linear-gradient(to right, var(--legend-color) 0 9px, transparent 9px 14px);
+}
+.infra-legend-line.dot {
+  background: repeating-linear-gradient(to right, var(--legend-color) 0 3px, transparent 3px 7px);
+}
+.infra-legend-line.dashdot {
+  background: repeating-linear-gradient(to right, var(--legend-color) 0 9px, transparent 9px 12px, var(--legend-color) 12px 15px, transparent 15px 20px);
+}
+"""
+    dash_classes = {
+        'dash': 'dash',
+        'dot': 'dot',
+        'dashdot': 'dashdot',
+        'longdash': 'dash',
+        'longdashdot': 'dashdot',
+    }
+    rendered = []
+    for panel in panels:
+        legend_items = ''.join(
+            "<span class='infra-legend-item'>"
+            f"<span class='infra-legend-line{(' ' + dash_classes[item['dash']]) if item['dash'] in dash_classes else ''}' "
+            f"style='--legend-color:{escape(item['color'], quote=True)}'></span>"
+            f"<span>{escape(item['name'])}</span></span>"
+            for item in panel['legend_items']
+        )
+        title = escape(panel['title'])
+        rendered.append(
+            "<div class='infra-panel'>"
+            f"<div class='infra-panel-title'>{title}</div>"
+            f"<div class='infra-plot'>{panel['figure'].to_html(include_plotlyjs=False, full_html=False)}</div>"
+            f"<div class='infra-legend'>{legend_items}</div>"
+            "</div>"
+        )
+    return (
+        "<style data-component='infra-panels'>" + component_css + "</style>"
+        "<div class='infra-panels'>" + ''.join(rendered) + "</div>"
+    )
 
 
 def create_report(
@@ -561,18 +646,6 @@ def create_report(
     ecs_window_df = _clip_to_time_window(ecs_df, x_min, x_max)
 
     fig_m = build_memtier_figure(memtier_minute_df, oom_df, metrics_window_df, x_min, x_max)
-    fig_i = build_infra_figure(
-        ecs_window_df,
-        metrics_window_df,
-        cluster_id,
-        config,
-        x_min,
-        x_max,
-        task_az_map=_task_az_map(extra_stats.get("container_insights_task_df")),
-    )
-    fig_l = build_client_latency_figure(ecs_window_df, x_min, x_max)
-    fig_d = build_elasticache_deep_dive_figure(metrics_window_df, cluster_id, config, x_min, x_max)
-
     time_range = _format_time_range(x_min, x_max)
     cluster_mode = str(config.get("cluster_mode", "false")).lower() == "true"
     id_label = "Cluster" if cluster_mode else "Replication Group"
@@ -587,6 +660,28 @@ def create_report(
         cluster_id,
         time_range,
     )
+    loadgen = summary.get("loadgen", {})
+    task_index_by_id = {
+        row["task_id"]: row["task_index"]
+        for row in (
+            loadgen.get("generator_cpu_p95_by_task", [])
+            + loadgen.get("throughput_median_by_task", [])
+        )
+        if row.get("task_index") is not None
+    }
+    infra_panels = build_infra_panels(
+        ecs_window_df,
+        metrics_window_df,
+        cluster_id,
+        config,
+        x_min,
+        x_max,
+        task_az_map=_task_az_map(extra_stats.get("container_insights_task_df")),
+        task_index_by_id=task_index_by_id,
+        elasticache_az=loadgen.get("elasticache_availability_zone"),
+        elasticache_az_source=loadgen.get("elasticache_availability_zone_source"),
+    )
+    fig_d = build_elasticache_deep_dive_figure(metrics_window_df, cluster_id, config, x_min, x_max)
     summary_json = json.dumps(summary, indent=2, default=str)
 
     html_content = render_html(
@@ -607,8 +702,7 @@ def create_report(
         ),
         loadgen_quality_html=loadgen_quality_html(summary.get("loadgen")),
         chart_memtier_html=fig_m.to_html(include_plotlyjs="cdn", full_html=False),
-        chart_infra_html=fig_i.to_html(include_plotlyjs=False, full_html=False),
-        chart_client_latency_html=fig_l.to_html(include_plotlyjs=False, full_html=False),
+        chart_infra_html=_infra_panels_html(infra_panels),
         chart_deep_dive_html=fig_d.to_html(include_plotlyjs=False, full_html=False),
     )
     return html_content, summary_json
@@ -697,6 +791,8 @@ def run_generate_report(run_dir: str, config: dict) -> None:
         except Exception as exc:
             print(f"Warning: failed to enrich summary with cluster_details.json: {exc}")
 
+    # Local regeneration must never replace the canonical report downloaded
+    # from AWS for this immutable run.
     out_path = run_path / "results_local.json"
     out_path.write_text(summary_json, encoding="utf-8")
     print(f"Written: {out_path}")
@@ -704,7 +800,6 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     html_path = run_path / "results_local.html"
     html_path.write_text(html_content, encoding="utf-8")
     print(f"Written: {html_path}")
-
 
 def run_uploaded_report() -> None:
     import boto3
@@ -783,6 +878,18 @@ def run_uploaded_report() -> None:
         except Exception as exc:
             print(f"Warning: failed to read ECS metrics: {exc}")
 
+    cluster_details_uri = f"s3://{output_bucket}/{output_prefix}{timestamp}/cluster_details.json"
+    cluster_details = None
+    report_config = _config_from_env()
+    try:
+        cluster_details = json.loads(read_file_content(cluster_details_uri))
+        report_config = _merge_missing_config(
+            report_config,
+            _config_from_cluster_details(cluster_details),
+        )
+    except Exception:
+        pass  # cluster_details.json is optional
+
     html_content, summary_json = create_report(
         metrics_df=metrics_df,
         logs_df=logs_df,
@@ -791,20 +898,16 @@ def run_uploaded_report() -> None:
         cluster_id=cluster_id,
         suffix=suffix,
         ecs_metrics_df=ecs_df,
-        config=_config_from_env(),
+        config=report_config,
         extra_stats=extra_stats,
     )
 
-    cluster_details_uri = f"s3://{output_bucket}/{output_prefix}{timestamp}/cluster_details.json"
-    try:
+    if cluster_details:
         from report_common import enrich_summary_meta
-        cluster_details = json.loads(read_file_content(cluster_details_uri))
         summary_obj = json.loads(summary_json)
         enrich_summary_meta(summary_obj, cluster_details)
         summary_json = json.dumps(summary_obj, indent=2, default=str)
         print(f"Summary enriched from {cluster_details_uri}")
-    except Exception:
-        pass  # cluster_details.json is optional
 
     output_key = f"{output_prefix}{timestamp}/results_{suffix}.html"
     output_json_key = re.sub(r"\.html$", ".json", output_key)

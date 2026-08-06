@@ -30,6 +30,7 @@ resource "aws_s3_object" "cluster_details" {
       engine                     = var.engine_type
       engine_version_configured  = var.engine_version
       node_type                  = var.node_type
+      availability_zone          = var.elasticache_availability_zone != "" ? var.elasticache_availability_zone : null
       node_memory_bytes          = lookup(local._node_memory_bytes, var.node_type, 0)
       cluster_mode_enabled       = var.cluster_mode_enabled
       num_cache_nodes            = var.cluster_mode_enabled ? null : var.num_cache_nodes

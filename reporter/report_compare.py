@@ -24,9 +24,7 @@ SECTION_META: dict[str, dict[str, str]] = {
     "benchmark": {"title": "Benchmark Summary", "badge": "memtier"},
     "engine_memory": {"title": "Engine and Memory", "badge": "infra"},
     "cache_latency": {"title": "Cache, Latency, Connections", "badge": "behavior"},
-    "client_latency": {"title": "ECS Load-Generator Latency", "badge": "ecs-emf"},
-    "loadgen": {"title": "Load Generator Validity", "badge": "per-task + AZ"},
-    "network_ecs": {"title": "Network and ECS", "badge": "loadgen"},
+    "network_ecs": {"title": "ECS Infrastructure", "badge": "tasks + AZ"},
 }
 
 
@@ -79,51 +77,51 @@ METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("cache_latency", "String Latency", ("latency_server_us", "string_avg"), "us", 3, "lower", "Average server-side string command latency."),
     MetricSpec("cache_latency", "Avg Connections", ("connections", "avg"), "", 1, "neutral", "Average concurrent connections on the cache node."),
     MetricSpec("cache_latency", "Peak Connections", ("connections", "max"), "", 1, "neutral", "Highest concurrent connection count."),
-    MetricSpec("client_latency", "ECS p50", ("client_latency", "p50_ms"), "ms", 3, "lower", "Mean ECS load-generator EMF p50 latency over the report window."),
-    MetricSpec("client_latency", "ECS p99", ("client_latency", "p99_ms"), "ms", 3, "lower", "Mean ECS load-generator EMF p99 latency over the report window."),
-    MetricSpec("client_latency", "ECS p99.9", ("client_latency", "p999_ms"), "ms", 3, "lower", "Mean ECS load-generator EMF p99.9 latency over the report window."),
-    MetricSpec("client_latency", "Worst ECS Task p99", ("client_latency", "worst_stream_p99_ms"), "ms", 3, "lower", "Maximum per-task ECS load-generator EMF p99 latency."),
-    MetricSpec("client_latency", "Worst ECS Task p99.9", ("client_latency", "worst_stream_p999_ms"), "ms", 3, "lower", "Maximum per-task ECS load-generator EMF p99.9 latency."),
+    MetricSpec("network_ecs", "ECS Task Latency p50", ("client_latency", "p50_ms"), "ms", 3, "lower", "Mean ECS task EMF p50 latency over the report window."),
+    MetricSpec("network_ecs", "ECS Task Latency p99", ("client_latency", "p99_ms"), "ms", 3, "lower", "Mean ECS task EMF p99 latency over the report window."),
+    MetricSpec("network_ecs", "ECS Task Latency p99.9", ("client_latency", "p999_ms"), "ms", 3, "lower", "Mean ECS task EMF p99.9 latency over the report window."),
+    MetricSpec("network_ecs", "Worst ECS Task Latency p99", ("client_latency", "worst_stream_p99_ms"), "ms", 3, "lower", "Maximum per-task ECS EMF p99 latency."),
+    MetricSpec("network_ecs", "Worst ECS Task Latency p99.9", ("client_latency", "worst_stream_p999_ms"), "ms", 3, "lower", "Maximum per-task ECS EMF p99.9 latency."),
     MetricSpec(
-        "loadgen", "ECS Service CPU — Time Average", ("ecs", "service_cpu_time_avg_pct"),
+        "network_ecs", "ECS Service CPU — Time Average", ("ecs", "service_cpu_time_avg_pct"),
         "%", 2, "neutral", "Time average of service-level CPUUtilization; this is not an average across tasks.", "points",
     ),
     MetricSpec(
-        "loadgen", "ECS Service CPU — Time Peak", ("ecs", "service_cpu_time_peak_pct"),
+        "network_ecs", "ECS Service CPU — Time Peak", ("ecs", "service_cpu_time_peak_pct"),
         "%", 2, "lower", "Maximum over time of service-level CPUUtilization; this is not the worst task.", "points",
     ),
     MetricSpec(
-        "loadgen", "Task CPU p95 — Minimum Task", ("loadgen", "generator_cpu_across_tasks", "min"),
+        "network_ecs", "Task CPU p95 — Minimum Task", ("loadgen", "generator_cpu_across_tasks", "min"),
         "%", 2, "lower", "Minimum across the per-task CPU p95 values; ramp-up minima are not used.", "points",
     ),
     MetricSpec(
-        "loadgen", "Task CPU p95 — Median Task", ("loadgen", "generator_cpu_across_tasks", "median"),
+        "network_ecs", "Task CPU p95 — Median Task", ("loadgen", "generator_cpu_across_tasks", "median"),
         "%", 2, "lower", "Median across the per-task CPU p95 values.", "points",
     ),
     MetricSpec(
-        "loadgen", "Task CPU p95 — Maximum Task", ("loadgen", "generator_cpu_across_tasks", "max"),
+        "network_ecs", "Task CPU p95 — Maximum Task", ("loadgen", "generator_cpu_across_tasks", "max"),
         "%", 2, "lower", "Maximum across per-task p95(CpuUtilized / CpuReserved * 100); above 85% invalidates latency/tail conclusions.",
         "points", warning_above=85.0,
     ),
     MetricSpec(
-        "loadgen", "Fleet Task Throughput Skew", ("loadgen", "throughput_task_skew_p90_to_p10"),
-        "p90/p10", 3, "lower", "p90/p10 across per-task median current ops/sec; cross-AZ placement is intentionally included and has no validity threshold.",
+        "network_ecs", "Fleet Task Throughput Skew", ("loadgen", "throughput_task_skew_p90_to_p10"),
+        "p90/p10", 3, "lower", "p90/p10 across per-task median current ops/sec; cross-AZ placement is intentionally included and has no pass/fail threshold.",
     ),
     MetricSpec(
-        "loadgen", "Worst Within-AZ Throughput Skew", ("loadgen", "throughput_skew_within_az_max"),
-        "p90/p10", 3, "lower", "Maximum p90/p10 across tasks within the same AZ; above 1.3 indicates a generator problem.",
+        "network_ecs", "Worst Within-AZ Throughput Skew", ("loadgen", "throughput_skew_within_az_max"),
+        "p90/p10", 3, "lower", "Maximum p90/p10 across ECS tasks within the same AZ; above 1.3 indicates an ECS task imbalance.",
         warning_above=1.3,
     ),
     MetricSpec(
-        "loadgen", "Between-AZ Throughput Ratio", ("loadgen", "throughput_skew_between_az_max_to_min"),
-        "max/min", 3, "lower", "Max/min across AZ median task throughput. Reported as a cross-AZ result without a validity threshold.",
+        "network_ecs", "Between-AZ Throughput Ratio", ("loadgen", "throughput_skew_between_az_max_to_min"),
+        "max/min", 3, "lower", "Max/min across AZ median task throughput. Reported as a cross-AZ result without a pass/fail threshold.",
     ),
     MetricSpec("network_ecs", "Avg Cache In", ("network", "cache", "avg_in_kbs"), "KB/s", 2, "neutral", "Average inbound network throughput on the cache node."),
     MetricSpec("network_ecs", "Avg Cache Out", ("network", "cache", "avg_out_kbs"), "KB/s", 2, "neutral", "Average outbound network throughput on the cache node."),
     MetricSpec("network_ecs", "BW In Throttle Events", ("network", "throttling", "bw_in_exceeded_total"), "", 0, "lower", "Total bandwidth-in throttle events."),
     MetricSpec("network_ecs", "BW Out Throttle Events", ("network", "throttling", "bw_out_exceeded_total"), "", 0, "lower", "Total bandwidth-out throttle events."),
     MetricSpec("network_ecs", "PPS Throttle Events", ("network", "throttling", "pps_exceeded_total"), "", 0, "lower", "Total packets-per-second throttle events."),
-    MetricSpec("network_ecs", "Peak ECS Memory", ("ecs", "peak_mem_mb"), "MB", 1, "lower", "Peak load generator memory usage."),
+    MetricSpec("network_ecs", "Peak ECS Memory", ("ecs", "peak_mem_mb"), "MB", 1, "lower", "Peak ECS task memory usage."),
 )
 
 
@@ -184,7 +182,7 @@ def metric_rows(baseline: RunData, candidate: RunData) -> list[dict[str, Any]]:
             for value in (baseline_value, candidate_value)
         ):
             tone = "warning"
-        if spec.section == "client_latency" and latency_invalid:
+        if spec.path and spec.path[0] == "client_latency" and latency_invalid:
             tone = "warning"
         rows.append(
             {
@@ -400,20 +398,31 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
             }
         )
 
-    invalid_runs = []
+    constrained_runs = []
     for run in (baseline, candidate):
         loadgen = run.summary.get("loadgen", {})
-        if loadgen.get("validation_status") == "invalid":
-            reasons = ", ".join(loadgen.get("invalid_reasons", [])) or "load-generator gate failed"
-            invalid_runs.append(f"{run.role}: {reasons}")
-    if invalid_runs:
+        status = loadgen.get("diagnostic_status") or loadgen.get("validation_status")
+        if status in {"warning", "invalid"}:
+            reasons = (
+                loadgen.get("warning_reasons")
+                or loadgen.get("invalid_reasons", [])
+            )
+            reason_labels = {
+                "generator_cpu_p95_above_85_pct": "ECS task CPU p95 > 85%",
+                "throughput_skew_within_az_above_1_3": "within-AZ throughput p90/p10 > 1.3",
+            }
+            reason_text = ", ".join(
+                reason_labels.get(reason, reason) for reason in reasons
+            ) or "ECS task constraint detected"
+            constrained_runs.append(f"{run.role}: {reason_text}")
+    if constrained_runs:
         items.append(
             {
                 "tone": "warning",
-                "title": "Load-generator validity gate failed",
+                "title": "ECS task constraints detected",
                 "text": (
-                    "; ".join(invalid_runs)
-                    + ". Do not use affected runs for latency or tail-latency conclusions."
+                    "; ".join(constrained_runs)
+                    + ". ECS task latency may not be representative; this does not invalidate the ElastiCache result."
                 ),
             }
         )

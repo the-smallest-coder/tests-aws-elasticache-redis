@@ -99,6 +99,19 @@ resource "aws_elasticache_replication_group" "main" {
   security_group_ids = [aws_security_group.elasticache.id]
 
   # Availability and failover
+  #
+  # Pin the cache cluster's AZ when requested so which ECS AZ ends up
+  # co-located with the cache node is reproducible across repeated runs of
+  # the same config, rather than left to AWS's per-apply placement (which
+  # can flip between runs and inject AZ-placement noise unrelated to the
+  # node type under test). One entry per cache cluster, so this only
+  # applies to the single-node, non-cluster-mode case; cluster mode and
+  # multi-node runs fall back to AWS's own placement.
+  preferred_cache_cluster_azs = (
+    var.cluster_mode_enabled || var.elasticache_availability_zone == "" || var.num_cache_nodes != 1
+    ? null
+    : [var.elasticache_availability_zone]
+  )
   automatic_failover_enabled = var.automatic_failover_enabled
   multi_az_enabled           = var.automatic_failover_enabled
 

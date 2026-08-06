@@ -70,6 +70,12 @@ variable "num_cache_nodes" {
   }
 }
 
+variable "elasticache_availability_zone" {
+  description = "Pin the ElastiCache node to a specific AZ. Empty = let AWS choose. Must be one of the subnet group's AZs."
+  type        = string
+  default     = ""
+}
+
 # Cluster mode settings
 variable "num_node_groups" {
   description = "Number of node groups (shards) for cluster mode"

@@ -10,6 +10,55 @@ if REPORTER_DIR not in sys.path:
 
 
 class LoadgenQualityTests(unittest.TestCase):
+    def test_cluster_details_availability_zone_reaches_report_config(self):
+        try:
+            from report_generator import _config_from_cluster_details
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"{exc.name} is not installed in this environment")
+
+        config = _config_from_cluster_details({
+            "elasticache": {"availability_zone": "us-east-1f"},
+        })
+
+        self.assertEqual(config["elasticache_availability_zone"], "us-east-1f")
+
+    def test_visible_ecs_metrics_are_neutral(self):
+        try:
+            from cards import loadgen_quality_html
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"{exc.name} is not installed in this environment")
+
+        html = loadgen_quality_html({
+            "validation_status": "invalid",
+            "invalid_reasons": ["generator_cpu_p95_above_85_pct"],
+            "unknown_reasons": [],
+            "expected_task_count": 2,
+            "generator_cpu_limited": True,
+            "generator_cpu_p95_by_task": [
+                {"task_id": "a", "p95_pct": 98.0},
+                {"task_id": "b", "p95_pct": 50.0},
+            ],
+            "throughput_median_by_task": [],
+            "throughput_by_az": [],
+        })
+
+        self.assertEqual(html.count("<table>"), 2)
+        self.assertIn("<th>#</th>", html)
+        self.assertIn("<th>ECS Task ID</th>", html)
+        self.assertNotIn("ECS Task Metrics", html)
+        self.assertNotIn("ECS Task Diagnostics", html)
+        self.assertNotIn("<h3", html)
+        self.assertNotIn("group-header", html)
+        self.assertNotIn("Invalid", html)
+        self.assertNotIn("Validity", html)
+        self.assertNotIn("warning", html.lower())
+        self.assertNotIn("quality-status", html)
+        self.assertNotIn("Expected ECS tasks", html)
+        self.assertNotIn("complete minutes", html)
+        self.assertNotIn("fleet p90/p10", html)
+        self.assertNotIn("Load Generator", html)
+        self.assertNotIn("per task + AZ", html)
+
     def test_summary_migration_renames_service_cpu_and_fills_task_count(self):
         from report_common import enrich_summary_meta
 
@@ -105,15 +154,406 @@ class LoadgenQualityTests(unittest.TestCase):
         )
         self.assertTrue(result["generator_cpu_limited"])
         self.assertFalse(result["latency_tail_valid"])
+        self.assertEqual(result["diagnostic_status"], "warning")
+        self.assertEqual(result["validation_status"], "warning")
+        self.assertEqual(result["invalid_reasons"], [])
+        self.assertIn("generator_cpu_p95_above_85_pct", result["warning_reasons"])
         self.assertEqual(
             [row["sample_count"] for row in result["generator_cpu_p95_by_task"]],
             [1, 1, 1, 1],
+        )
+        self.assertEqual(
+            {row["task_id"]: row["task_index"] for row in result["generator_cpu_p95_by_task"]},
+            {"a": 1, "b": 2, "c": 3, "d": 4},
         )
         self.assertGreater(result["throughput_skew_within_az_max"], 1.3)
         self.assertEqual(
             {row["task_id"]: row["median_ops_sec"] for row in result["throughput_median_by_task"]},
             {"a": 100.0, "b": 200.0, "c": 50.0, "d": 52.0},
         )
+        self.assertEqual(
+            {row["task_id"]: row["task_index"] for row in result["throughput_median_by_task"]},
+            {"a": 1, "b": 2, "c": 3, "d": 4},
+        )
+
+    def test_task_indexes_are_deterministic_for_shuffled_input(self):
+        try:
+            from helpers import ecs_task_index_map
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"{exc.name} is not installed in this environment")
+
+        task_az = {
+            "task-d": "us-east-1f",
+            "task-b": "us-east-1e",
+            "task-c": "us-east-1f",
+            "task-a": "us-east-1e",
+            "task-z": "unknown",
+        }
+
+        forward = ecs_task_index_map(
+            ["task-d", "task-b", "task-z", "task-a", "task-c"],
+            task_az,
+            "us-east-1f",
+        )
+        shuffled = ecs_task_index_map(
+            ["task-c", "task-a", "task-d", "task-z", "task-b"],
+            dict(reversed(list(task_az.items()))),
+            "us-east-1f",
+        )
+
+        self.assertEqual(forward, shuffled)
+        self.assertEqual(
+            forward,
+            {
+                "task-c": 1,
+                "task-d": 2,
+                "task-a": 3,
+                "task-b": 4,
+                "task-z": 5,
+            },
+        )
+
+    def test_elasticache_az_tasks_receive_first_indexes(self):
+        try:
+            from helpers import ecs_task_index_map
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"{exc.name} is not installed in this environment")
+
+        indexes = ecs_task_index_map(
+            ["task-a", "task-b", "task-c", "task-d"],
+            {
+                "task-a": "us-east-1e",
+                "task-b": "us-east-1f",
+                "task-c": "us-east-1e",
+                "task-d": "us-east-1f",
+            },
+            "us-east-1f",
+        )
+
+        self.assertEqual([indexes["task-b"], indexes["task-d"]], [1, 2])
+        self.assertEqual([indexes["task-a"], indexes["task-c"]], [3, 4])
+
+    def test_missing_elasticache_az_is_inferred_from_task_latency_and_marked(self):
+        try:
+            import pandas as pd
+
+            from cards import loadgen_quality_html
+            from helpers import elasticache_availability_zone
+            from loadgen_analysis import build_loadgen_summary
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        # Fixture captured verbatim from a real downloaded run
+        # (results/20260802-012513-ab): 6 ECS tasks split 3/3 across two
+        # AZs. Container Insights' TaskId and memtier's totals.json
+        # stream_id both name the same 32-character ECS task ID (the
+        # memtier side carries a realistic "memtier/memtier/" log-stream
+        # prefix, exercising the prefix strip in `_task_latency_map`).
+        # A prior version of this fallback joined on the ECS ClientLatency
+        # EMF metric instead, whose TaskId dimension is a self-generated
+        # UUID in a completely different namespace (also captured from the
+        # same run, see test_elasticache_az_inference_ignores_disjoint_ids
+        # below) - that join always failed silently on real data.
+        task_az = {
+            "2e5ee144bb604580a48b378e5300d81c": "us-east-1f",
+            "e4e8bfbb425541d092c39868432d77ea": "us-east-1f",
+            "e6404c50f8864d66bac89d7286f37302": "us-east-1f",
+            "6f768707472b447f929a82ca7ffc3b60": "us-east-1e",
+            "84c52bc998d64e21837d5641d56cac19": "us-east-1e",
+            "d137d22478864d45a79f314f4a5667a3": "us-east-1e",
+        }
+        task_p50 = {
+            "2e5ee144bb604580a48b378e5300d81c": 0.231,
+            "e4e8bfbb425541d092c39868432d77ea": 0.207,
+            "e6404c50f8864d66bac89d7286f37302": 0.159,
+            "6f768707472b447f929a82ca7ffc3b60": 0.615,
+            "84c52bc998d64e21837d5641d56cac19": 0.559,
+            "d137d22478864d45a79f314f4a5667a3": 0.599,
+        }
+
+        inferred = elasticache_availability_zone(
+            task_latency_map=task_p50,
+            task_az_map=task_az,
+        )
+
+        self.assertEqual(inferred["availability_zone"], "us-east-1f")
+        self.assertEqual(inferred["source"], "inferred_from_memtier_task_p50_latency")
+
+        samples = pd.DataFrame([
+            {
+                "Timestamp": "2026-08-01T00:01:10Z",
+                "Stream": f"memtier/memtier/{task_id}",
+                "Ops/sec": 100,
+            }
+            for task_id in task_az
+        ])
+        minutes = pd.DataFrame([
+            {"Timestamp": "2026-08-01T00:00:00Z", "task_count_present": 6},
+            {"Timestamp": "2026-08-01T00:01:00Z", "task_count_present": 6},
+            {"Timestamp": "2026-08-01T00:02:00Z", "task_count_present": 6},
+        ])
+        ci_tasks = pd.DataFrame([
+            {
+                "Timestamp": "2026-08-01T00:01:00Z",
+                "TaskId": task_id,
+                "AvailabilityZone": az,
+                "CpuUtilized": 50,
+                "CpuReserved": 100,
+                "Stat": "Average",
+            }
+            for task_id, az in task_az.items()
+        ])
+        ci_service = pd.DataFrame([{
+            "Timestamp": "2026-08-01T00:01:00Z",
+            "RunningTaskCount": 6,
+        }])
+        # "source" is the *.totals.json artifact path exactly as produced by
+        # a local `report_generator.py generate` run - not the payload's own
+        # (prefixed) stream_id field. Getting this shape wrong is what broke
+        # the fix on the first pass: the ".totals.json" suffix survived
+        # normalization and no longer matched task_az_map's bare task IDs.
+        memtier_totals_df = pd.DataFrame([
+            {
+                "source": f"/run/logs/loadgen/memtier/memtier/{task_id}.totals.json",
+                "p50_latency_ms": p50,
+            }
+            for task_id, p50 in task_p50.items()
+        ])
+        result = build_loadgen_summary(
+            samples,
+            minutes,
+            pd.DataFrame(),
+            ci_tasks,
+            ci_service,
+            pd.Timestamp("2026-08-01T00:00:10"),
+            pd.Timestamp("2026-08-01T00:02:10"),
+            memtier_totals_df=memtier_totals_df,
+        )
+
+        self.assertEqual(result["elasticache_availability_zone"], "us-east-1f")
+        self.assertEqual(
+            result["elasticache_availability_zone_source"],
+            "inferred_from_memtier_task_p50_latency",
+        )
+        # us-east-1f (the inferred ElastiCache AZ) must rank first.
+        self.assertEqual(
+            [row["task_id"] for row in result["throughput_median_by_task"]],
+            [
+                "2e5ee144bb604580a48b378e5300d81c",
+                "e4e8bfbb425541d092c39868432d77ea",
+                "e6404c50f8864d66bac89d7286f37302",
+                "6f768707472b447f929a82ca7ffc3b60",
+                "84c52bc998d64e21837d5641d56cac19",
+                "d137d22478864d45a79f314f4a5667a3",
+            ],
+        )
+        self.assertEqual(
+            [row["task_index"] for row in result["throughput_median_by_task"]],
+            [1, 2, 3, 4, 5, 6],
+        )
+
+        html = loadgen_quality_html(result)
+        self.assertIn(
+            "us-east-1f — ElastiCache AZ (inferred from memtier task latency)",
+            html,
+        )
+
+    def test_task_latency_map_normalizes_both_totals_source_shapes(self):
+        """`memtier_totals_df["source"]` takes two different real shapes:
+        a *.totals.json artifact path (local/uploaded sidecar files) or a
+        bare stream_id (in-memory reconstruction from raw logs). Both must
+        normalize to the same bare ECS task ID that Container Insights uses.
+        """
+        try:
+            import pandas as pd
+
+            from loadgen_analysis import _task_latency_map
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        totals_df = pd.DataFrame([
+            {
+                "source": "/run/logs/loadgen/memtier/memtier/2e5ee144bb604580a48b378e5300d81c.totals.json",
+                "p50_latency_ms": 0.231,
+            },
+            {
+                "source": "memtier/memtier/e4e8bfbb425541d092c39868432d77ea",
+                "p50_latency_ms": 0.207,
+            },
+        ])
+
+        self.assertEqual(
+            _task_latency_map(totals_df),
+            {
+                "2e5ee144bb604580a48b378e5300d81c": 0.231,
+                "e4e8bfbb425541d092c39868432d77ea": 0.207,
+            },
+        )
+
+    def test_elasticache_az_inference_ignores_disjoint_client_latency_uuids(self):
+        """Regression: the legacy ECS-ClientLatency-based fallback joined on
+        the wrong ID namespace and always failed closed on real data. A
+        latency map keyed by those same (real, captured) ClientLatency
+        TaskId UUIDs must not coincidentally match the 32-hex ECS task IDs
+        in task_az_map - the function should report 'unavailable' rather
+        than silently misattributing the AZ.
+        """
+        try:
+            from helpers import elasticache_availability_zone
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"{exc.name} is not installed in this environment")
+
+        task_az = {
+            "2e5ee144bb604580a48b378e5300d81c": "us-east-1f",
+            "e4e8bfbb425541d092c39868432d77ea": "us-east-1f",
+            "e6404c50f8864d66bac89d7286f37302": "us-east-1f",
+            "6f768707472b447f929a82ca7ffc3b60": "us-east-1e",
+            "84c52bc998d64e21837d5641d56cac19": "us-east-1e",
+            "d137d22478864d45a79f314f4a5667a3": "us-east-1e",
+        }
+        # Real ECS ClientLatency EMF TaskId dimension values from the same
+        # run (results/20260802-012513-ab) - a self-generated UUID
+        # namespace, unrelated to the ECS task IDs above.
+        client_latency_uuids = [
+            "09af642d-6e33-4309-8c89-c429aa459579",
+            "46859b77-03d7-4e69-a820-8dbcea3877e2",
+            "5a04a81c-6b30-44cc-af9b-e81b73e58916",
+            "5d07550b-b9bc-453d-83d4-c2e1c9d43a64",
+            "6b9a5e02-efc4-4ee7-aef9-5706211362e8",
+            "949de4b1-fdae-4ccb-aa05-78f6221f7817",
+        ]
+
+        result = elasticache_availability_zone(
+            task_latency_map=dict.fromkeys(client_latency_uuids, 0.2),
+            task_az_map=task_az,
+        )
+
+        self.assertIsNone(result["availability_zone"])
+        self.assertEqual(result["source"], "unavailable")
+
+    def test_elasticache_az_inference_is_ambiguous_when_azs_are_close(self):
+        """Two AZs within noise of each other (here ~1.05x apart) must not
+        produce a confident winner - that would be exactly as overconfident
+        as the alphabetical-fallback bug this whole fix replaced, just
+        dressed up with real-looking numbers.
+        """
+        try:
+            from helpers import elasticache_availability_zone
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"{exc.name} is not installed in this environment")
+
+        task_az = {
+            "task-a": "us-east-1e",
+            "task-b": "us-east-1e",
+            "task-c": "us-east-1f",
+            "task-d": "us-east-1f",
+        }
+        task_p50 = {"task-a": 0.20, "task-b": 0.20, "task-c": 0.21, "task-d": 0.21}
+
+        result = elasticache_availability_zone(
+            task_latency_map=task_p50,
+            task_az_map=task_az,
+        )
+
+        self.assertIsNone(result["availability_zone"])
+        self.assertEqual(result["source"], "ambiguous")
+
+    def test_elasticache_az_inference_resolves_at_the_separation_threshold(self):
+        """The runner-up clears AZ_INFERENCE_MIN_SEPARATION_RATIO (1.5x) -
+        at/above that separation counts as resolvable, not ambiguous.
+        (0.32 rather than an exact 0.30 to avoid float-precision noise
+        right at the 1.5x boundary itself.)
+        """
+        try:
+            from helpers import elasticache_availability_zone
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"{exc.name} is not installed in this environment")
+
+        result = elasticache_availability_zone(
+            task_latency_map={"task-a": 0.20, "task-b": 0.32},
+            task_az_map={"task-a": "us-east-1e", "task-b": "us-east-1f"},
+        )
+
+        self.assertEqual(result["availability_zone"], "us-east-1e")
+        self.assertEqual(result["source"], "inferred_from_memtier_task_p50_latency")
+
+    def test_zero_latency_does_not_choose_an_alphabetical_az(self):
+        try:
+            from helpers import elasticache_availability_zone
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"{exc.name} is not installed in this environment")
+
+        result = elasticache_availability_zone(
+            task_latency_map={"task-a": 0.0, "task-b": 0.2},
+            task_az_map={"task-a": "us-east-1e", "task-b": "us-east-1f"},
+        )
+
+        self.assertIsNone(result["availability_zone"])
+        self.assertEqual(result["source"], "ambiguous")
+
+    def test_ambiguous_elasticache_az_is_reported_in_unknown_reasons(self):
+        try:
+            import pandas as pd
+
+            from loadgen_analysis import build_loadgen_summary
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        task_az = {
+            "task-a": "us-east-1e",
+            "task-b": "us-east-1e",
+            "task-c": "us-east-1f",
+            "task-d": "us-east-1f",
+        }
+        samples = pd.DataFrame([
+            {"Timestamp": "2026-08-01T00:01:10Z", "Stream": task_id, "Ops/sec": 100}
+            for task_id in task_az
+        ])
+        minutes = pd.DataFrame([
+            {"Timestamp": "2026-08-01T00:00:00Z", "task_count_present": 4},
+            {"Timestamp": "2026-08-01T00:01:00Z", "task_count_present": 4},
+            {"Timestamp": "2026-08-01T00:02:00Z", "task_count_present": 4},
+        ])
+        ci_tasks = pd.DataFrame([
+            {
+                "Timestamp": "2026-08-01T00:01:00Z",
+                "TaskId": task_id,
+                "AvailabilityZone": az,
+                "CpuUtilized": 50,
+                "CpuReserved": 100,
+                "Stat": "Average",
+            }
+            for task_id, az in task_az.items()
+        ])
+        ci_service = pd.DataFrame([{"Timestamp": "2026-08-01T00:01:00Z", "RunningTaskCount": 4}])
+        # ~1.05x apart - within the noise band, must not resolve a winner.
+        memtier_totals_df = pd.DataFrame([
+            {"source": "task-a", "p50_latency_ms": 0.20},
+            {"source": "task-b", "p50_latency_ms": 0.20},
+            {"source": "task-c", "p50_latency_ms": 0.21},
+            {"source": "task-d", "p50_latency_ms": 0.21},
+        ])
+
+        result = build_loadgen_summary(
+            samples,
+            minutes,
+            pd.DataFrame(),
+            ci_tasks,
+            ci_service,
+            pd.Timestamp("2026-08-01T00:00:10"),
+            pd.Timestamp("2026-08-01T00:02:10"),
+            memtier_totals_df=memtier_totals_df,
+        )
+
+        self.assertIsNone(result["elasticache_availability_zone"])
+        self.assertEqual(result["elasticache_availability_zone_source"], "ambiguous")
+        self.assertIn("elasticache_availability_zone_ambiguous", result["unknown_reasons"])
 
     def test_expected_task_count_uses_mode_not_transient_maximum(self):
         try:
@@ -251,8 +691,11 @@ class LoadgenQualityTests(unittest.TestCase):
         )
 
         self.assertEqual(result["validation_status"], "unknown")
-        self.assertEqual(result["unknown_reasons"], ["availability_zone_missing"])
-        self.assertNotIn("throughput_skew_within_az_above_1_3", result["invalid_reasons"])
+        self.assertEqual(
+            result["unknown_reasons"],
+            ["availability_zone_missing", "elasticache_availability_zone_unavailable"],
+        )
+        self.assertNotIn("throughput_skew_within_az_above_1_3", result["warning_reasons"])
         self.assertIsNone(result["throughput_skew_within_az_max"])
 
 

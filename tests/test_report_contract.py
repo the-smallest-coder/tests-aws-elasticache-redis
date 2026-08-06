@@ -473,10 +473,12 @@ class LocalGenerateLegacyLogTests(unittest.TestCase):
 
             run_generate_report(str(run_dir), {})
 
-            report_summary = json.loads((run_dir / "results_local.json").read_text(encoding="utf-8"))
+            report_summary = json.loads(
+                (run_dir / "results_local.json").read_text(encoding="utf-8")
+            )
             self.assertFalse(report_summary["benchmark"])
 
-    def test_local_generate_never_overwrites_downloaded_canonical_artifacts(self):
+    def test_local_generate_preserves_canonical_report_pair(self):
         try:
             from report_generator import run_generate_report
         except ModuleNotFoundError as exc:
@@ -497,15 +499,19 @@ class LocalGenerateLegacyLogTests(unittest.TestCase):
             )
             canonical_json = run_dir / f"results_{run_dir.name}.json"
             canonical_html = run_dir / f"results_{run_dir.name}.html"
-            canonical_json.write_text("canonical json\n", encoding="utf-8")
-            canonical_html.write_text("canonical html\n", encoding="utf-8")
+            canonical_json.write_text("stale canonical json\n", encoding="utf-8")
+            canonical_html.write_text("stale canonical html\n", encoding="utf-8")
+            local_json = run_dir / "results_local.json"
+            local_html = run_dir / "results_local.html"
+            local_json.write_text("stale local json\n", encoding="utf-8")
+            local_html.write_text("stale local html\n", encoding="utf-8")
 
             run_generate_report(str(run_dir), {})
 
-            self.assertEqual(canonical_json.read_text(encoding="utf-8"), "canonical json\n")
-            self.assertEqual(canonical_html.read_text(encoding="utf-8"), "canonical html\n")
-            self.assertTrue((run_dir / "results_local.json").is_file())
-            self.assertTrue((run_dir / "results_local.html").is_file())
+            self.assertEqual(canonical_json.read_text(encoding="utf-8"), "stale canonical json\n")
+            self.assertEqual(canonical_html.read_text(encoding="utf-8"), "stale canonical html\n")
+            self.assertNotEqual(local_json.read_text(encoding="utf-8"), "stale local json\n")
+            self.assertNotEqual(local_html.read_text(encoding="utf-8"), "stale local html\n")
 
 
 class ReportWindowValidationTests(unittest.TestCase):

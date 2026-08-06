@@ -28,7 +28,6 @@ class SingleReportEscapingTests(unittest.TestCase):
             cards_html="",
             chart_memtier_html="",
             chart_infra_html="",
-            chart_client_latency_html="",
             chart_deep_dive_html="",
         )
 
@@ -66,7 +65,7 @@ class SingleReportEscapingTests(unittest.TestCase):
         self.assertNotIn("redis<script>", html)
         self.assertNotIn("cache.m7g.large</span>", html)
 
-    def test_ecs_latency_is_the_last_part_of_infrastructure(self):
+    def test_validity_is_inside_infrastructure_without_separate_latency_section(self):
         from template import render_html
 
         page = render_html(
@@ -77,22 +76,25 @@ class SingleReportEscapingTests(unittest.TestCase):
             pills_html="",
             cards_html="",
             chart_memtier_html="MEMTIER_CHART",
-            chart_infra_html="INFRA_CHART",
-            chart_client_latency_html="ECS_LATENCY_CHART",
+            chart_infra_html="INFRA_WITH_ECS_TASK_LATENCY",
             chart_deep_dive_html="DEEP_DIVE_CHART",
+            loadgen_quality_html="LOADGEN_VALIDITY",
         )
 
         infrastructure_start = page.index("<h2>Infrastructure</h2>")
-        ecs_latency = page.index("<h2>ECS Load-Generator Latency</h2>")
         infrastructure_end = page.index("<h2>ElastiCache Deep-Dive</h2>")
         infrastructure_group_start = page.rfind(
             '<div class="chart-group">', 0, infrastructure_start
         )
         next_group_start = page.find('<div class="chart-group">', infrastructure_start)
         infrastructure_group = page[infrastructure_group_start:next_group_start]
-        self.assertLess(infrastructure_start, ecs_latency)
-        self.assertLess(ecs_latency, infrastructure_end)
-        self.assertIn("<h2>ECS Load-Generator Latency</h2>", infrastructure_group)
+        self.assertIn("INFRA_WITH_ECS_TASK_LATENCY", infrastructure_group)
+        self.assertIn("LOADGEN_VALIDITY", infrastructure_group)
+        self.assertIn(
+            '<div class="chart-wrap">INFRA_WITH_ECS_TASK_LATENCYLOADGEN_VALIDITY</div>',
+            infrastructure_group,
+        )
+        self.assertNotIn("<h2>ECS Load-Generator Latency</h2>", page)
 
     def test_stat_cards_escape_titles_and_text(self):
         try:

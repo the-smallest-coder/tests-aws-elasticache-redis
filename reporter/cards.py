@@ -126,13 +126,11 @@ def stat_cards_html(
 
     if loadgen and loadgen.get('generator_cpu_p95_pct') is not None:
         cpu_p95 = float(loadgen['generator_cpu_p95_pct'])
-        cpu_color = '#d93025' if loadgen.get('generator_cpu_limited') else '#188038'
-        cards.append(('Generator CPU p95', f"{cpu_p95:.1f}", '%', cpu_color,
-                      'Maximum of the per-task CPU p95 values. Warning above 85%.'))
+        cards.append(('ECS Task CPU p95', f"{cpu_p95:.1f}", '%', '#5c6bc0',
+                      'Maximum of the per-task CPU p95 values.'))
         within_az = loadgen.get('throughput_skew_within_az_max')
         if within_az is not None:
-            skew_color = '#d93025' if float(within_az) > 1.3 else '#188038'
-            cards.append(('Within-AZ Skew', f"{float(within_az):.2f}", 'p90/p10', skew_color,
+            cards.append(('Within-AZ Skew', f"{float(within_az):.2f}", 'p90/p10', '#5c6bc0',
                           'Maximum per-AZ p90/p10 ratio of per-task median current throughput.'))
     if not ecs_df.empty:
         mem_used_df = metric_filter(ecs_df, 'MemoryUtilized', 'Average')
@@ -140,13 +138,13 @@ def stat_cards_html(
             peak_mem_mb = mem_used_df['Value'].max()
             reserved_df = ecs_df[ecs_df['MetricName'] == 'MemoryReserved']
             reserved_mb = reserved_df['Value'].max() if not reserved_df.empty else None
-            tip = f"Peak loadgen container memory. Reserved: {reserved_mb:.0f} MB." if reserved_mb else 'Peak loadgen container memory.'
+            tip = f"Peak ECS task container memory. Reserved: {reserved_mb:.0f} MB." if reserved_mb else 'Peak ECS task container memory.'
             cards.append(('ECS Mem Peak', f"{peak_mem_mb:.0f}", 'MB', '#0097a7', tip))
 
         task_df = metric_filter(ecs_df, 'RunningTaskCount', 'Average')
         if not task_df.empty:
-            cards.append(('Loadgen Tasks', f"{int(task_df['Value'].max())}", '', '#5c6bc0',
-                          'Peak number of concurrent loadgen ECS tasks during the test.'))
+            cards.append(('ECS Tasks', f"{int(task_df['Value'].max())}", '', '#5c6bc0',
+                          'Peak number of concurrent ECS tasks during the test.'))
 
     # ---- ElastiCache Memory ----
     if not metrics_df.empty:
@@ -255,71 +253,67 @@ def stat_cards_html(
 
 
 def loadgen_quality_html(loadgen):
-    """Render the auditable per-task/AZ load-generator validity section."""
+    """Render ECS task diagnostics without assigning whole-run validity."""
     if not loadgen:
         return ''
 
     cpu_by_task = {row['task_id']: row for row in loadgen.get('generator_cpu_p95_by_task', [])}
     throughput_by_task = {row['task_id']: row for row in loadgen.get('throughput_median_by_task', [])}
-    task_ids = sorted(set(cpu_by_task) | set(throughput_by_task))
+    task_ids = sorted(
+        set(cpu_by_task) | set(throughput_by_task),
+        key=lambda task_id: (
+            cpu_by_task.get(task_id, {}).get(
+                'task_index',
+                throughput_by_task.get(task_id, {}).get('task_index', float('inf')),
+            ),
+            task_id,
+        ),
+    )
 
     task_rows = []
     for task_id in task_ids:
         cpu = cpu_by_task.get(task_id, {})
         throughput = throughput_by_task.get(task_id, {})
+        task_index = cpu.get('task_index') or throughput.get('task_index') or ''
         az = cpu.get('availability_zone') or throughput.get('availability_zone') or 'unknown'
         cpu_value = cpu.get('p95_pct')
         throughput_value = throughput.get('median_ops_sec')
         cpu_text = f"{float(cpu_value):.2f}%" if cpu_value is not None else 'n/a'
         throughput_text = f"{float(throughput_value):,.0f}" if throughput_value is not None else 'n/a'
-        cpu_tone = ' quality-warning' if cpu_value is not None and float(cpu_value) > 85 else ''
         task_rows.append(
-            f"<tr><td><code>{_html(task_id)}</code></td><td>{_html(az)}</td>"
-            f"<td class='{cpu_tone.strip()}'>{_html(cpu_text)}</td>"
+            f"<tr><td>{_html(task_index)}</td><td><code>{_html(task_id)}</code></td>"
+            f"<td>{_html(az)}</td>"
+            f"<td>{_html(cpu_text)}</td>"
             f"<td>{_html(throughput_text)}</td></tr>"
         )
 
+    elasticache_az = loadgen.get('elasticache_availability_zone')
+    elasticache_az_source = loadgen.get('elasticache_availability_zone_source')
     az_rows = []
     for row in loadgen.get('throughput_by_az', []):
         ratio = row.get('p90_to_p10')
         ratio_text = f"{float(ratio):.2f}" if ratio is not None else 'n/a'
-        ratio_tone = ' quality-warning' if ratio is not None and float(ratio) > 1.3 else ''
+        az = row.get('availability_zone', 'unknown')
+        if az == elasticache_az:
+            if elasticache_az_source == 'inferred_from_memtier_task_p50_latency':
+                az = f"{az} — ElastiCache AZ (inferred from memtier task latency)"
+            else:
+                az = f"{az} — ElastiCache AZ"
         az_rows.append(
-            f"<tr><td>{_html(row.get('availability_zone', 'unknown'))}</td>"
+            f"<tr><td>{_html(az)}</td>"
             f"<td>{_html(row.get('task_count', ''))}</td>"
             f"<td>{float(row.get('median_ops_sec', 0)):,.0f}</td>"
-            f"<td class='{ratio_tone.strip()}'>{_html(ratio_text)}</td></tr>"
+            f"<td>{_html(ratio_text)}</td></tr>"
         )
 
-    status = str(loadgen.get('validation_status', 'unknown'))
-    reasons = (
-        list(loadgen.get('invalid_reasons', []))
-        + list(loadgen.get('unknown_reasons', []))
-    )
-    reasons_text = ', '.join(reasons) or 'none'
-    status_class = 'quality-ok' if status == 'valid' else 'quality-warning'
-    fleet_skew = loadgen.get('throughput_task_skew_p90_to_p10')
-    between_az = loadgen.get('throughput_skew_between_az_max_to_min')
-    facts = (
-        f"Expected tasks: {_html(loadgen.get('expected_task_count', 'n/a'))}; "
-        f"complete minutes: {_html(loadgen.get('complete_minute_count', 0))}; "
-        f"discarded incomplete minutes: {_html(loadgen.get('discarded_incomplete_minute_count', 0))}; "
-        f"partial boundary minutes: {_html(loadgen.get('discarded_partial_boundary_minute_count', 0))}; "
-        f"full minutes missing tasks: {_html(loadgen.get('discarded_missing_task_minute_count', 0))}; "
-        f"fleet p90/p10: {_html(f'{float(fleet_skew):.2f}' if fleet_skew is not None else 'n/a')}; "
-        f"between-AZ max/min of medians: {_html(f'{float(between_az):.2f}' if between_az is not None else 'n/a')}."
-    )
     return (
-        "<div class='chart-group loadgen-quality'>"
-        "<div class='group-header'><h2>Load Generator Validity</h2>"
-        "<span class='group-badge infra'>per task + AZ</span></div>"
-        f"<div class='quality-status {status_class}'>Status: {_html(status)}; reasons: {_html(reasons_text)}. {facts}</div>"
-        "<div class='quality-grid'><div class='quality-table'><h3>Per task</h3>"
-        "<table><thead><tr><th>Task ID</th><th>AZ</th><th>CPU p95</th>"
+        "<div class='ecs-task-quality'>"
+        "<div class='quality-grid'><div class='quality-table'>"
+        "<table><thead><tr><th>#</th><th>ECS Task ID</th><th>AZ</th><th>CPU p95</th>"
         "<th>Median current ops/sec</th></tr></thead><tbody>"
         + ''.join(task_rows)
-        + "</tbody></table></div><div class='quality-table'><h3>Per AZ</h3>"
-        "<table><thead><tr><th>AZ</th><th>Tasks</th><th>Median ops/sec</th>"
+        + "</tbody></table></div><div class='quality-table'>"
+        "<table><thead><tr><th>AZ</th><th>ECS Tasks</th><th>Median ops/sec</th>"
         "<th>p90/p10</th></tr></thead><tbody>"
         + ''.join(az_rows)
         + "</tbody></table></div></div></div>"
