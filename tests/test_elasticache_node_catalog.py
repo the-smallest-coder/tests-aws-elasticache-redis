@@ -1,4 +1,3 @@
-import os
 import re
 import unittest
 from pathlib import Path
@@ -101,11 +100,30 @@ class ElastiCacheNodeCatalogTests(unittest.TestCase):
         self.assertIn("exit 0", script)
         self.assertNotIn("set -e", script)
 
-    def test_node_price_script_is_executable(self):
-        script_path = ROOT / "scripts" / "fetch_elasticache_price.sh"
-        self.assertTrue(script_path.exists())
-        if os.name != "nt":
-            self.assertTrue(os.access(script_path, os.X_OK))
+    def test_node_price_script_is_invoked_via_explicit_bash(self):
+        """ecs.tf's `program` must invoke the script as ["bash", path], not
+        rely on the file's own exec bit -- Terraform's external provider
+        execs `program[0]` directly, so an exec-bit-only invocation (just
+        the path, no explicit interpreter) would silently stop working
+        the moment a checkout loses the bit (e.g. some zip/tar extractions,
+        Windows filesystems that don't model it at all).
+        """
+        ecs_tf = ECS_TF.read_text(encoding="utf-8")
+
+        self.assertIn('program = ["bash", "${path.module}/scripts/fetch_elasticache_price.sh"]', ecs_tf)
+
+    def test_node_price_lookup_has_an_escape_hatch_for_destroy(self):
+        """`data` blocks re-evaluate on every plan, including
+        `terraform destroy`; the script's exit-0 contract only covers
+        failures inside it, not Terraform failing to launch it at all (no
+        bash on PATH). var.enable_price_lookup must be able to skip the
+        data source entirely so a launch failure can never block destroy.
+        """
+        ecs_tf = ECS_TF.read_text(encoding="utf-8")
+        variables_tf = (ROOT / "variables.tf").read_text(encoding="utf-8")
+
+        self.assertIn('variable "enable_price_lookup"', variables_tf)
+        self.assertRegex(ecs_tf, r"count\s*=\s*var\.enable_price_lookup\s*\?\s*1\s*:\s*0")
 
 
 if __name__ == "__main__":

@@ -65,6 +65,63 @@ class SingleReportEscapingTests(unittest.TestCase):
         self.assertNotIn("redis<script>", html)
         self.assertNotIn("cache.m7g.large</span>", html)
 
+    def test_header_pills_explain_an_unavailable_price_instead_of_hiding_it(self):
+        from cards import header_pills
+
+        html = header_pills(
+            {
+                "engine_type": "valkey",
+                "node_hourly_usd": "",
+                "node_hourly_usd_source": "unavailable",
+                "node_hourly_usd_reason": "no known Price List location for region: xx-fake-1",
+            }
+        )
+
+        self.assertIn("Valkey hourly: <span>unavailable</span>", html)
+        self.assertIn('title="no known Price List location for region: xx-fake-1"', html)
+
+    def test_header_pills_explain_a_disabled_price_lookup(self):
+        from cards import header_pills
+
+        html = header_pills(
+            {
+                "engine_type": "redis",
+                "node_hourly_usd": "",
+                "node_hourly_usd_source": "disabled",
+            }
+        )
+
+        self.assertIn("Redis hourly: <span>disabled</span>", html)
+        self.assertIn("enable_price_lookup", html)
+
+    def test_header_pills_omit_the_hourly_pill_for_legacy_runs_without_a_source(self):
+        """A run from before this feature existed has no node_hourly_usd_source
+        at all -- there's nothing true to say about it, so it must stay
+        omitted exactly like before, not claim "unavailable".
+        """
+        from cards import header_pills
+
+        html = header_pills({"engine_type": "redis", "node_hourly_usd": ""})
+
+        self.assertNotIn("hourly", html)
+
+    def test_header_pills_escape_the_unavailable_reason_tooltip(self):
+        from cards import header_pills
+
+        html = header_pills(
+            {
+                "engine_type": "redis",
+                "node_hourly_usd": "",
+                "node_hourly_usd_source": "unavailable",
+                "node_hourly_usd_reason": 'aws error: "quoted" & <script>bad</script>',
+            }
+        )
+
+        self.assertIn("&quot;quoted&quot;", html)
+        self.assertIn("&amp;", html)
+        self.assertIn("&lt;script&gt;", html)
+        self.assertNotIn("<script>bad</script>", html)
+
     def test_validity_is_inside_infrastructure_without_separate_latency_section(self):
         from template import render_html
 
@@ -82,7 +139,6 @@ class SingleReportEscapingTests(unittest.TestCase):
         )
 
         infrastructure_start = page.index("<h2>Infrastructure</h2>")
-        infrastructure_end = page.index("<h2>ElastiCache Deep-Dive</h2>")
         infrastructure_group_start = page.rfind(
             '<div class="chart-group">', 0, infrastructure_start
         )

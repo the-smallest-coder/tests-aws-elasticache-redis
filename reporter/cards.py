@@ -2,37 +2,11 @@
 
 from html import escape
 
-import pandas as pd
-
-from helpers import (
-    metric_filter,
-    cache_hit_rate_df,
-    select_mem_dims,
-    cloudwatch_eviction_series,
-    first_positive_timestamp,
-)
+from formatting import format_gib as _format_gib, format_usd_hour as _format_usd_hour
 
 
 def _html(value):
     return escape(str(value), quote=True)
-
-
-def _format_gib(byte_value):
-    try:
-        gib = float(byte_value) / (1024 ** 3)
-    except (TypeError, ValueError):
-        return None
-    decimals = 3 if gib < 1 else 2
-    text = f"{gib:,.{decimals}f}".rstrip('0').rstrip('.')
-    return text or "0"
-
-
-def _format_usd_hour(value):
-    try:
-        price = float(value)
-    except (TypeError, ValueError):
-        return None
-    return f"${price:,.3f}".rstrip('0').rstrip('.')
 
 
 def header_pills(config):
@@ -44,19 +18,37 @@ def header_pills(config):
     node_hourly = _format_usd_hour(config.get('node_hourly_usd'))
     engine_type = config.get('engine_type')
     hourly_label = f"{engine_type.title()} hourly" if engine_type else "Node hourly"
+
+    # A missing price should say why, not just silently vanish from the
+    # badge row. source/reason come from the live AWS Price List lookup
+    # (see ecs.tf / scripts/fetch_elasticache_price.sh); source is only
+    # populated once a lookup was actually attempted (or explicitly
+    # disabled), so its absence here means "legacy run, never had one" --
+    # nothing useful to say, so no pill at all, same as before.
+    hourly_value = node_hourly
+    hourly_tooltip = ''
+    if not hourly_value:
+        hourly_source = config.get('node_hourly_usd_source')
+        if hourly_source == 'disabled':
+            hourly_value = 'disabled'
+            hourly_tooltip = config.get('node_hourly_usd_reason') or 'Price lookup disabled (var.enable_price_lookup = false).'
+        elif hourly_source:
+            hourly_value = 'unavailable'
+            hourly_tooltip = config.get('node_hourly_usd_reason') or 'AWS Price List lookup failed.'
+
     items = [
-        ('Engine', engine_type),
-        ('Version', config.get('engine_version')),
-        ('Node type', config.get('node_type')),
-        ('Node memory', f"{node_memory} GiB" if node_memory else None),
-        (hourly_label, node_hourly),
-        ('Nodes', config.get('node_count')),
-        ('Mode', mode_label),
+        ('Engine', engine_type, ''),
+        ('Version', config.get('engine_version'), ''),
+        ('Node type', config.get('node_type'), ''),
+        ('Node memory', f"{node_memory} GiB" if node_memory else None, ''),
+        (hourly_label, hourly_value, hourly_tooltip),
+        ('Nodes', config.get('node_count'), ''),
+        ('Mode', mode_label, ''),
     ]
     pills = ''.join(
-        f"<div class='pill'>{_html(label)}: "
-        f"<span>{_html(val)}</span></div>"
-        for label, val in items if val
+        f"<div class='pill'{f' title=\"{_html(tooltip)}\"' if tooltip else ''}>"
+        f"{_html(label)}: <span>{_html(val)}</span></div>"
+        for label, val, tooltip in items if val
     )
     return f"<div class='pills'>{pills}</div>" if pills else ''
 
@@ -72,6 +64,14 @@ def stat_cards_html(
     loadgen=None,
 ):
     """Build the stat-cards grid HTML from all data sources."""
+    from helpers import (
+        metric_filter,
+        cache_hit_rate_df,
+        select_mem_dims,
+        cloudwatch_eviction_series,
+        first_positive_timestamp,
+    )
+
     extra_stats = extra_stats or {}
     config = config or {}
     cards = []  # tuples: (label, value_str, unit, color, tooltip)

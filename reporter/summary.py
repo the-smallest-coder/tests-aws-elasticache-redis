@@ -87,6 +87,7 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         'node_memory_bytes': config.get('node_memory_bytes', ''),
         'node_hourly_usd': config.get('node_hourly_usd', ''),
         'node_hourly_usd_source': config.get('node_hourly_usd_source', ''),
+        'node_hourly_usd_reason': config.get('node_hourly_usd_reason', ''),
         'node_count':      config.get('node_count', ''),
         'cluster_mode':    str(config.get('cluster_mode', 'false')).lower(),
         'generator_schema_version': GENERATOR_SCHEMA_VERSION,

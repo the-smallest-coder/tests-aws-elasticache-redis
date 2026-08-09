@@ -34,6 +34,7 @@ resource "aws_s3_object" "cluster_details" {
       node_memory_bytes          = lookup(local._node_memory_bytes, var.node_type, 0)
       node_hourly_usd            = local._node_hourly_usd
       node_hourly_usd_source     = local._node_hourly_usd_source
+      node_hourly_usd_reason     = local._node_hourly_usd_reason
       cluster_mode_enabled       = var.cluster_mode_enabled
       num_cache_nodes            = var.cluster_mode_enabled ? null : var.num_cache_nodes
       num_node_groups            = var.cluster_mode_enabled ? var.num_node_groups : null

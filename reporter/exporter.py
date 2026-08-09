@@ -968,6 +968,7 @@ def main() -> None:
             "node_memory_bytes": os.environ.get("NODE_MEMORY_BYTES", ""),
             "node_hourly_usd": os.environ.get("NODE_HOURLY_USD", ""),
             "node_hourly_usd_source": os.environ.get("NODE_HOURLY_USD_SOURCE", ""),
+            "node_hourly_usd_reason": os.environ.get("NODE_HOURLY_USD_REASON", ""),
             "num_cache_nodes": os.environ.get("NODE_COUNT", ""),
             "cluster_mode_enabled": os.environ.get("CLUSTER_MODE", "false"),
         },

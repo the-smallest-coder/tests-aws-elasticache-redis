@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import re
-
 import pandas as pd
 
-from helpers import elasticache_availability_zone, ecs_task_index_map
+from helpers import elasticache_availability_zone, ecs_task_index_map, ecs_task_metric_rows
 
 
 GENERATOR_CPU_THRESHOLD_PCT = 85.0
@@ -18,11 +16,6 @@ def _task_id(value: object) -> str:
     return text.replace("\\", "/").rsplit("/", 1)[-1]
 
 
-def _dimension_value(dimensions: object, name: str) -> str | None:
-    match = re.search(rf"(?:^|;){re.escape(name)}=([^;]+)", str(dimensions or ""))
-    return match.group(1) if match else None
-
-
 def _clip(df: pd.DataFrame, start, end) -> pd.DataFrame:
     if df is None or df.empty or "Timestamp" not in df.columns:
         return pd.DataFrame() if df is None else df.copy()
@@ -31,41 +24,20 @@ def _clip(df: pd.DataFrame, start, end) -> pd.DataFrame:
     return result[(result["Timestamp"] >= start) & (result["Timestamp"] <= end)].copy()
 
 
-def _preferred_task_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Deduplicate the multiple Container Insights dimension sets per task."""
-    if df.empty:
-        return df
-    rows = df.copy()
-    dims = rows["Dimensions"].astype(str)
-    rows["TaskId"] = dims.map(lambda value: _dimension_value(value, "TaskId"))
-    rows["AvailabilityZone"] = dims.map(
-        lambda value: _dimension_value(value, "AvailabilityZone") or "unknown"
-    )
-    rows = rows[rows["TaskId"].notna()].copy()
-    rows["_dimension_rank"] = (
-        dims.str.contains(r"(?:^|;)ServiceName=", regex=True, na=False).astype(int) * 2
-        + dims.str.contains(r"(?:^|;)AvailabilityZone=", regex=True, na=False).astype(int)
-    )
-    return (
-        rows.sort_values(["Timestamp", "TaskId", "_dimension_rank"])
-        .drop_duplicates(["Timestamp", "TaskId"], keep="last")
-        .drop(columns="_dimension_rank")
-    )
-
-
 def _task_cpu_from_ecs(ecs_df: pd.DataFrame) -> pd.DataFrame:
+    """Fallback per-task CPU when Container Insights EMF data is unavailable.
+
+    Uses the same CloudWatch-Dimensions-string dedup rule as
+    helpers.ecs_task_metric_rows (one row per Timestamp/TaskId, preferring
+    the most specific dimension set) instead of a second, differently-tiered
+    copy of that logic.
+    """
     columns = ["Timestamp", "TaskId", "AvailabilityZone", "CpuUtilized", "CpuReserved", "Stat"]
     if ecs_df is None or ecs_df.empty:
         return pd.DataFrame(columns=columns)
 
-    utilized = ecs_df[
-        (ecs_df["MetricName"] == "CpuUtilized") & (ecs_df["Stat"] == "Average")
-    ].copy()
-    reserved = ecs_df[
-        (ecs_df["MetricName"] == "CpuReserved") & (ecs_df["Stat"] == "Average")
-    ].copy()
-    utilized = _preferred_task_rows(utilized)
-    reserved = _preferred_task_rows(reserved)
+    utilized = ecs_task_metric_rows(ecs_df, "CpuUtilized", "Average")
+    reserved = ecs_task_metric_rows(ecs_df, "CpuReserved", "Average")
     if utilized.empty or reserved.empty:
         return pd.DataFrame(columns=columns)
 

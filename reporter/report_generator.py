@@ -146,6 +146,7 @@ def _config_from_env() -> dict[str, str]:
         "node_memory_bytes": os.environ.get("NODE_MEMORY_BYTES", ""),
         "node_hourly_usd": os.environ.get("NODE_HOURLY_USD", ""),
         "node_hourly_usd_source": os.environ.get("NODE_HOURLY_USD_SOURCE", ""),
+        "node_hourly_usd_reason": os.environ.get("NODE_HOURLY_USD_REASON", ""),
         "node_count": os.environ.get("NODE_COUNT", ""),
         "cluster_mode": os.environ.get("CLUSTER_MODE", "false"),
     }
@@ -160,6 +161,7 @@ def _config_from_cluster_details(cluster_details: dict) -> dict[str, str]:
         "node_memory_bytes": elasticache.get("node_memory_bytes", ""),
         "node_hourly_usd": elasticache.get("node_hourly_usd", ""),
         "node_hourly_usd_source": elasticache.get("node_hourly_usd_source", ""),
+        "node_hourly_usd_reason": elasticache.get("node_hourly_usd_reason", ""),
         "elasticache_availability_zone": elasticache.get("availability_zone", ""),
         "node_count": elasticache.get("num_cache_nodes", ""),
         "cluster_mode": elasticache.get("cluster_mode_enabled", ""),
@@ -817,6 +819,7 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     html_path = run_path / "results_local.html"
     html_path.write_text(html_content, encoding="utf-8")
     print(f"Written: {html_path}")
+
 
 def run_uploaded_report() -> None:
     import boto3

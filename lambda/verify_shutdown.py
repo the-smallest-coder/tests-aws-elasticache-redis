@@ -211,6 +211,7 @@ def _launch_exporter_task(cluster_id, ecs_cluster, ecs_service):
         "NODE_MEMORY_BYTES",
         "NODE_HOURLY_USD",
         "NODE_HOURLY_USD_SOURCE",
+        "NODE_HOURLY_USD_REASON",
         "NODE_COUNT",
         "NOTIFICATION_EMAIL",
         "SES_IDENTITY_ARN",

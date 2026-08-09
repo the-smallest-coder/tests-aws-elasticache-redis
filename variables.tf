@@ -52,6 +52,20 @@ variable "node_type" {
   default     = "cache.t4g.micro"
 }
 
+variable "enable_price_lookup" {
+  description = <<-EOT
+    Look up this run's live hourly node price via scripts/fetch_elasticache_price.sh
+    (requires bash, aws, and jq on whatever machine runs Terraform). The script itself
+    always exits 0, but Terraform launching it at all can still fail the plan if bash
+    isn't on PATH -- that's a `data` block, so it's re-evaluated on every plan,
+    including `terraform destroy`. Set to false (e.g. `-var enable_price_lookup=false`)
+    as an escape hatch if that ever blocks a destroy; node_hourly_usd_source in
+    cluster_details.json becomes "disabled" instead of erroring.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "cluster_mode_enabled" {
   description = "Enable Redis/Valkey cluster mode (sharding)"
   type        = bool

@@ -130,6 +130,7 @@ resource "aws_lambda_function" "shutdown_verify" {
       NODE_MEMORY_BYTES            = tostring(local._advertised_bytes)
       NODE_HOURLY_USD              = local._node_hourly_usd != null ? tostring(local._node_hourly_usd) : ""
       NODE_HOURLY_USD_SOURCE       = local._node_hourly_usd_source
+      NODE_HOURLY_USD_REASON       = local._node_hourly_usd_reason
       NODE_COUNT                   = tostring(var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes)
       AWS_REGION_NAME              = var.aws_region
       REPORTER_TASK_DEFINITION     = aws_ecs_task_definition.reporter.arn

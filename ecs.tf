@@ -6,9 +6,20 @@
 # has no native Terraform data source; the script always exits 0 and
 # reports source: "unavailable" on any failure (missing perms, no network,
 # no matching SKU), so a pricing hiccup never blocks `terraform apply`.
-# Requires `aws` and `jq` on the machine running Terraform, and
+# Requires `bash`, `aws`, and `jq` on the machine running Terraform, and
 # `pricing:GetProducts` on its credentials.
+#
+# The script's exit-0 contract only covers failures *inside* it -- it does
+# not cover Terraform failing to *launch* the program at all (bash missing
+# from PATH, this module's scripts/ directory unreadable). `data` blocks are
+# re-evaluated on every plan, including `terraform destroy`, so a launch
+# failure here could strand a running cluster the same way the AZ
+# data-source read-back this repo avoids elsewhere would (see
+# test_no_data_source_reads_back_the_cluster_shutdown_deletes). Gated by
+# var.enable_price_lookup as an escape hatch for exactly that case.
 data "external" "node_price" {
+  count = var.enable_price_lookup ? 1 : 0
+
   program = ["bash", "${path.module}/scripts/fetch_elasticache_price.sh"]
 
   query = {
@@ -298,15 +309,26 @@ locals {
 
   # Live on-demand hourly price for this run's exact node_type / engine_type
   # / aws_region, from the AWS Price List API (see data.external.node_price
-  # below). Replaces a hardcoded single-region Redis-only price table, which
+  # above). Replaces a hardcoded single-region Redis-only price table, which
   # silently mislabeled every non-us-east-1 run and every Valkey run (AWS
   # prices Valkey ~20% below Redis on the same node type).
   #
-  # "" (not a number) means the live lookup failed -- see
-  # data.external.node_price.result.reason. Never falls back to a stale
-  # guess; downstream consumers must treat "" as unknown, not zero.
-  _node_hourly_usd        = data.external.node_price.result.hourly_usd != "" ? tonumber(data.external.node_price.result.hourly_usd) : null
-  _node_hourly_usd_source = data.external.node_price.result.source
+  # count-indexed because the data source is gated by var.enable_price_lookup;
+  # lookup()s below default missing keys instead of erroring, since a plain
+  # `.result.reason` index fails plan/apply on the (expected) success path,
+  # where the script's JSON has no "reason" key at all.
+  _node_price_result = (
+    var.enable_price_lookup
+    ? data.external.node_price[0].result
+    : { hourly_usd = "", source = "disabled" }
+  )
+
+  # "" (not a number) means the live lookup failed or was disabled -- see
+  # _node_hourly_usd_reason. Never falls back to a stale guess; downstream
+  # consumers must treat "" as unknown, not zero.
+  _node_hourly_usd        = local._node_price_result.hourly_usd != "" ? tonumber(local._node_price_result.hourly_usd) : null
+  _node_hourly_usd_source = local._node_price_result.source
+  _node_hourly_usd_reason = lookup(local._node_price_result, "reason", "")
 
   # 85% fill factor — cache stays warm without hitting eviction pressure
   _fill_factor = 0.85

@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from formatting import format_gib, format_usd_hour
 from report_common import (
     MetricSpec,
     RunData,
@@ -29,22 +30,13 @@ SECTION_META: dict[str, dict[str, str]] = {
 
 
 def _format_gib(byte_value: Any) -> str | None:
-    try:
-        gib = float(byte_value) / (1024 ** 3)
-    except (TypeError, ValueError):
-        return None
-    decimals = 3 if gib < 1 else 2
-    text = f"{gib:,.{decimals}f}".rstrip("0").rstrip(".")
+    text = format_gib(byte_value)
     return f"{text} GiB" if text else None
 
 
 def _format_usd_hour(value: Any) -> str | None:
-    try:
-        price = float(value)
-    except (TypeError, ValueError):
-        return None
-    text = f"${price:,.3f}".rstrip("0").rstrip(".")
-    return f"{text}/h"
+    text = format_usd_hour(value)
+    return f"{text}/h" if text else None
 
 
 METRICS: tuple[MetricSpec, ...] = (

@@ -176,6 +176,72 @@ class LoadgenQualityTests(unittest.TestCase):
             {"a": 1, "b": 2, "c": 3, "d": 4},
         )
 
+    def test_task_cpu_falls_back_to_ecs_dimensions_when_container_insights_is_empty(self):
+        """When Container Insights EMF data is unavailable, per-task CPU
+        falls back to the raw ECS CloudWatch metrics CSV (Dimensions string
+        column, e.g. "ClusterName=c;ServiceName=s;TaskId=a"). That fallback
+        shares helpers.ecs_task_metric_rows's dimension-set dedup rule
+        (prefer the row carrying ServiceName over a bare TaskId-only row for
+        the same Timestamp/TaskId) rather than a second copy of that rule --
+        this pins the shared behavior so a future edit to one doesn't
+        silently diverge from the other.
+        """
+        try:
+            import pandas as pd
+
+            from loadgen_analysis import build_loadgen_summary
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        samples = pd.DataFrame([
+            {"Timestamp": "2026-08-01T00:01:10Z", "Stream": "a", "Ops/sec": 100},
+            {"Timestamp": "2026-08-01T00:01:10Z", "Stream": "b", "Ops/sec": 200},
+        ])
+        # Report window must wholly contain the 00:01:00 minute bucket, or
+        # build_loadgen_summary discards it as a partial boundary minute and
+        # every per-task vector -- CPU included -- comes back empty.
+        minutes = pd.DataFrame([
+            {"Timestamp": "2026-08-01T00:01:00Z", "task_count_present": 2},
+        ])
+
+        def _metric(metric_name, value, dimensions):
+            return {
+                "Timestamp": "2026-08-01T00:01:00Z",
+                "Namespace": "AWS/ECS",
+                "MetricName": metric_name,
+                "Stat": "Average",
+                "Value": value,
+                "Unit": "Percent",
+                "Dimensions": dimensions,
+            }
+
+        ecs_df = pd.DataFrame([
+            # Task "a" has two CpuUtilized dimension sets for the same
+            # Timestamp/TaskId; the bare one must lose to the ServiceName one.
+            _metric("CpuUtilized", 999, "ClusterName=c;TaskId=a"),
+            _metric("CpuUtilized", 60, "ClusterName=c;ServiceName=s;TaskId=a"),
+            _metric("CpuReserved", 100, "ClusterName=c;ServiceName=s;TaskId=a"),
+            _metric("CpuUtilized", 40, "ClusterName=c;ServiceName=s;TaskId=b"),
+            _metric("CpuReserved", 100, "ClusterName=c;ServiceName=s;TaskId=b"),
+        ])
+
+        result = build_loadgen_summary(
+            samples,
+            minutes,
+            ecs_df,
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.Timestamp("2026-08-01T00:01:00"),
+            pd.Timestamp("2026-08-01T00:02:00"),
+        )
+
+        self.assertEqual(
+            {row["task_id"]: row["p95_pct"] for row in result["generator_cpu_p95_by_task"]},
+            {"a": 60.0, "b": 40.0},
+        )
+
     def test_task_indexes_are_deterministic_for_shuffled_input(self):
         try:
             from helpers import ecs_task_index_map
