@@ -65,23 +65,23 @@ resource "aws_lambda_function" "shutdown_scheduler" {
 
   environment {
     variables = {
-      CLUSTER_ID           = local.cluster_id
-      ECS_CLUSTER          = local.loadgen_cluster_name
-      ECS_SERVICE          = local.loadgen_service_name
-      SHUTDOWN_RULE_NAME   = aws_cloudwatch_event_rule.shutdown.name
-      VERIFY_RULE_NAME     = aws_cloudwatch_event_rule.shutdown_verify.name
-      TEST_DURATION_MINUTES = var.test_duration_minutes
-      VERIFY_DELAY_MINUTES  = tostring(var.test_duration_minutes + 15)
+      CLUSTER_ID                = local.cluster_id
+      ECS_CLUSTER               = local.loadgen_cluster_name
+      ECS_SERVICE               = local.loadgen_service_name
+      SHUTDOWN_RULE_NAME        = aws_cloudwatch_event_rule.shutdown.name
+      VERIFY_RULE_NAME          = aws_cloudwatch_event_rule.shutdown_verify.name
+      TEST_DURATION_MINUTES     = var.test_duration_minutes
+      VERIFY_DELAY_MINUTES      = tostring(var.test_duration_minutes + 15)
       SHUTDOWN_RULE_PLACEHOLDER = "cron(0 0 1 1 ? 2099)"
-      NOTIFICATION_EMAIL    = var.notification_email
-      SES_IDENTITY_ARN      = var.notification_ses_identity_arn
-      ENGINE_TYPE           = var.engine_type
-      ENGINE_VERSION        = var.engine_version
-      NODE_TYPE             = var.node_type
-      NODE_COUNT            = tostring(var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes)
-      CLUSTER_MODE          = tostring(var.cluster_mode_enabled)
-      LOADGEN_TASK_COUNT    = tostring(var.loadgen_task_count)
-      AWS_REGION_NAME       = var.aws_region
+      NOTIFICATION_EMAIL        = var.notification_email
+      SES_IDENTITY_ARN          = var.notification_ses_identity_arn
+      ENGINE_TYPE               = var.engine_type
+      ENGINE_VERSION            = var.engine_version
+      NODE_TYPE                 = var.node_type
+      NODE_COUNT                = tostring(var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes)
+      CLUSTER_MODE              = tostring(var.cluster_mode_enabled)
+      LOADGEN_TASK_COUNT        = tostring(var.loadgen_task_count)
+      AWS_REGION_NAME           = var.aws_region
     }
   }
 
@@ -104,16 +104,16 @@ resource "aws_lambda_function" "shutdown_verify" {
 
   environment {
     variables = {
-      CLUSTER_ID         = local.cluster_id
-      ECS_CLUSTER        = local.loadgen_cluster_name
-      ECS_SERVICE        = local.loadgen_service_name
-      ELASTICACHE_ID     = aws_elasticache_replication_group.main.id
-      S3_BUCKET          = var.metrics_export_s3_bucket
-      S3_PREFIX          = var.metrics_export_s3_prefix
-      RUN_FOLDER         = local.run_folder
-      REPORT_TIMESTAMP   = local.run_folder
-      LOG_GROUP          = aws_cloudwatch_log_group.loadgen.name
-      LOADGEN_LOG_GROUP  = aws_cloudwatch_log_group.loadgen.name
+      CLUSTER_ID                   = local.cluster_id
+      ECS_CLUSTER                  = local.loadgen_cluster_name
+      ECS_SERVICE                  = local.loadgen_service_name
+      ELASTICACHE_ID               = aws_elasticache_replication_group.main.id
+      S3_BUCKET                    = var.metrics_export_s3_bucket
+      S3_PREFIX                    = var.metrics_export_s3_prefix
+      RUN_FOLDER                   = local.run_folder
+      REPORT_TIMESTAMP             = local.run_folder
+      LOG_GROUP                    = aws_cloudwatch_log_group.loadgen.name
+      LOADGEN_LOG_GROUP            = aws_cloudwatch_log_group.loadgen.name
       CONTAINER_INSIGHTS_LOG_GROUP = aws_cloudwatch_log_group.container_insights.name
       ELASTICACHE_LOG_GROUP        = aws_cloudwatch_log_group.elasticache.name
       LAMBDA_SCHEDULER_LOG_GROUP   = aws_cloudwatch_log_group.lambda_shutdown_scheduler.name
@@ -122,16 +122,17 @@ resource "aws_lambda_function" "shutdown_verify" {
       NUM_CACHE_NODES              = tostring(var.num_cache_nodes)
       NUM_NODE_GROUPS              = tostring(var.num_node_groups)
       REPLICAS_PER_NODE_GROUP      = tostring(var.replicas_per_node_group)
-      NOTIFICATION_EMAIL    = var.notification_email
-      SES_IDENTITY_ARN      = var.notification_ses_identity_arn
-      ENGINE_TYPE           = var.engine_type
-      ENGINE_VERSION        = var.engine_version
-      NODE_TYPE             = var.node_type
-      NODE_MEMORY_BYTES     = tostring(local._advertised_bytes)
-      NODE_REDIS_HOURLY_USD = tostring(local._node_redis_hourly_usd[var.node_type])
-      NODE_COUNT            = tostring(var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes)
-      AWS_REGION_NAME       = var.aws_region
-      REPORTER_TASK_DEFINITION = aws_ecs_task_definition.reporter.arn
+      NOTIFICATION_EMAIL           = var.notification_email
+      SES_IDENTITY_ARN             = var.notification_ses_identity_arn
+      ENGINE_TYPE                  = var.engine_type
+      ENGINE_VERSION               = var.engine_version
+      NODE_TYPE                    = var.node_type
+      NODE_MEMORY_BYTES            = tostring(local._advertised_bytes)
+      NODE_HOURLY_USD              = local._node_hourly_usd != null ? tostring(local._node_hourly_usd) : ""
+      NODE_HOURLY_USD_SOURCE       = local._node_hourly_usd_source
+      NODE_COUNT                   = tostring(var.cluster_mode_enabled ? var.num_node_groups : var.num_cache_nodes)
+      AWS_REGION_NAME              = var.aws_region
+      REPORTER_TASK_DEFINITION     = aws_ecs_task_definition.reporter.arn
     }
   }
 
@@ -392,11 +393,11 @@ resource "aws_cloudwatch_event_rule" "shutdown_scheduler" {
   description = "Schedule shutdown when ECS deployment reaches COMPLETED state"
 
   event_pattern = jsonencode({
-    source = ["aws.ecs"],
+    source        = ["aws.ecs"],
     "detail-type" = ["ECS Deployment State Change"],
-    resources = [local.loadgen_service_arn],
+    resources     = [local.loadgen_service_arn],
     detail = {
-      eventName  = ["SERVICE_DEPLOYMENT_COMPLETED"]
+      eventName = ["SERVICE_DEPLOYMENT_COMPLETED"]
     }
   })
 }

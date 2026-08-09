@@ -277,7 +277,8 @@ def enrich_summary_meta(summary: dict[str, Any], cluster_details: dict[str, Any]
     meta["engine_version"] = meta.get("engine_version") or elasticache.get("engine_version_configured") or ""
     meta["node_type"] = meta.get("node_type") or elasticache.get("node_type") or ""
     meta["node_memory_bytes"] = meta.get("node_memory_bytes") or elasticache.get("node_memory_bytes") or ""
-    meta["redis_hourly_usd"] = meta.get("redis_hourly_usd") or elasticache.get("redis_hourly_usd") or ""
+    meta["node_hourly_usd"] = meta.get("node_hourly_usd") or elasticache.get("node_hourly_usd") or ""
+    meta["node_hourly_usd_source"] = meta.get("node_hourly_usd_source") or elasticache.get("node_hourly_usd_source") or ""
     meta["node_count"] = meta.get("node_count") or elasticache.get("num_cache_nodes") or ""
     if not meta.get("cluster_mode"):
         meta["cluster_mode"] = elasticache.get("cluster_mode_enabled")

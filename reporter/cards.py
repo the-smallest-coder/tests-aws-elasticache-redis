@@ -41,13 +41,15 @@ def header_pills(config):
     cluster_mode = str(config.get('cluster_mode', 'false')).lower() == 'true'
     mode_label = 'Cluster Mode' if cluster_mode else 'Non-Cluster'
     node_memory = _format_gib(config.get('node_memory_bytes'))
-    redis_hourly = _format_usd_hour(config.get('redis_hourly_usd'))
+    node_hourly = _format_usd_hour(config.get('node_hourly_usd'))
+    engine_type = config.get('engine_type')
+    hourly_label = f"{engine_type.title()} hourly" if engine_type else "Node hourly"
     items = [
-        ('Engine', config.get('engine_type')),
+        ('Engine', engine_type),
         ('Version', config.get('engine_version')),
         ('Node type', config.get('node_type')),
         ('Node memory', f"{node_memory} GiB" if node_memory else None),
-        ('Redis hourly', redis_hourly),
+        (hourly_label, node_hourly),
         ('Nodes', config.get('node_count')),
         ('Mode', mode_label),
     ]
@@ -79,10 +81,12 @@ def stat_cards_html(
         cards.append(('Node Memory', node_memory, 'GiB', '#546e7a',
                       'Configured ElastiCache node memory used to compute memtier keyspace.'))
 
-    redis_hourly = _format_usd_hour(config.get('redis_hourly_usd'))
-    if redis_hourly:
-        cards.append(('Redis Cost', redis_hourly, '/h', '#546e7a',
-                      'Hourly Redis node price captured with the run metadata.'))
+    node_hourly = _format_usd_hour(config.get('node_hourly_usd'))
+    if node_hourly:
+        engine_type = config.get('engine_type')
+        cost_label = f"{engine_type.title()} Cost" if engine_type else "Node Cost"
+        cards.append((cost_label, node_hourly, '/h', '#546e7a',
+                      'Hourly node price for this run\'s node type, region, and engine, from the AWS Price List API.'))
 
     # ---- Memtier throughput / latency / bandwidth ----
     if not memtier_minute_df.empty and not memtier_totals_df.empty:

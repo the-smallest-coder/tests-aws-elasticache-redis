@@ -232,8 +232,12 @@ PY
           value = tostring(local._advertised_bytes)
         },
         {
-          name  = "NODE_REDIS_HOURLY_USD"
-          value = tostring(local._node_redis_hourly_usd[var.node_type])
+          name  = "NODE_HOURLY_USD"
+          value = local._node_hourly_usd != null ? tostring(local._node_hourly_usd) : ""
+        },
+        {
+          name  = "NODE_HOURLY_USD_SOURCE"
+          value = local._node_hourly_usd_source
         },
         {
           name  = "NODE_COUNT"

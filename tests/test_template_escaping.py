@@ -51,7 +51,7 @@ class SingleReportEscapingTests(unittest.TestCase):
                 "engine_version": "7&\"'",
                 "node_type": "cache.m7g.large</span>",
                 "node_memory_bytes": "6850472837",
-                "redis_hourly_usd": "0.158",
+                "node_hourly_usd": "0.158",
                 "node_count": "3",
                 "cluster_mode": "true",
             }
@@ -61,7 +61,7 @@ class SingleReportEscapingTests(unittest.TestCase):
         self.assertIn("7&amp;&quot;&#x27;", html)
         self.assertIn("cache.m7g.large&lt;/span&gt;", html)
         self.assertIn("Node memory: <span>6.38 GiB</span>", html)
-        self.assertIn("Redis hourly: <span>$0.158</span>", html)
+        self.assertIn("hourly: <span>$0.158</span>", html)
         self.assertNotIn("redis<script>", html)
         self.assertNotIn("cache.m7g.large</span>", html)
 
@@ -125,7 +125,8 @@ class SingleReportEscapingTests(unittest.TestCase):
             ecs_df=pd.DataFrame(),
             config={
                 "node_memory_bytes": "6850472837",
-                "redis_hourly_usd": "0.158",
+                "node_hourly_usd": "0.158",
+                "engine_type": "redis",
             },
         )
 

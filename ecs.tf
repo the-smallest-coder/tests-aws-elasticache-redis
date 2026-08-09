@@ -1,3 +1,23 @@
+# Live AWS Price List lookup for this run's ElastiCache node hourly cost.
+# Region- and engine-qualified (Valkey is priced ~20% below Redis on the
+# same node type) instead of a hardcoded single-region Redis-only table.
+#
+# Shells out to `aws pricing get-products` because the Price List Query API
+# has no native Terraform data source; the script always exits 0 and
+# reports source: "unavailable" on any failure (missing perms, no network,
+# no matching SKU), so a pricing hiccup never blocks `terraform apply`.
+# Requires `aws` and `jq` on the machine running Terraform, and
+# `pricing:GetProducts` on its credentials.
+data "external" "node_price" {
+  program = ["bash", "${path.module}/scripts/fetch_elasticache_price.sh"]
+
+  query = {
+    node_type   = var.node_type
+    engine_type = var.engine_type
+    aws_region  = var.aws_region
+  }
+}
+
 # CloudWatch Log Group for ECS Container Insights (managed for cleanup on destroy)
 resource "aws_cloudwatch_log_group" "container_insights" {
   name              = "/aws/ecs/containerinsights/${local.cluster_id}-loadgen/performance"
@@ -205,21 +225,21 @@ locals {
     "cache.m7g.4xlarge" = 56113747722  # 52.26 GiB
     "cache.m7g.8xlarge" = 111325552312 # 103.68 GiB
     # M6g family
-    "cache.m6g.large"   = 6850472837  # 6.38 GiB
-    "cache.m6g.xlarge"  = 13883481784 # 12.93 GiB
-    "cache.m6g.2xlarge" = 27960237096 # 26.04 GiB
-    "cache.m6g.4xlarge" = 56113747722 # 52.26 GiB
+    "cache.m6g.large"   = 6850472837   # 6.38 GiB
+    "cache.m6g.xlarge"  = 13883481784  # 12.93 GiB
+    "cache.m6g.2xlarge" = 27960237096  # 26.04 GiB
+    "cache.m6g.4xlarge" = 56113747722  # 52.26 GiB
     "cache.m6g.8xlarge" = 111325552312 # 103.68 GiB
     # R4 family
-    "cache.r4.large"   = 13207024435 # 12.3 GiB
-    "cache.r4.xlarge"  = 26897232691 # 25.05 GiB
-    "cache.r4.2xlarge" = 54191749857 # 50.47 GiB
+    "cache.r4.large"   = 13207024435  # 12.3 GiB
+    "cache.r4.xlarge"  = 26897232691  # 25.05 GiB
+    "cache.r4.2xlarge" = 54191749857  # 50.47 GiB
     "cache.r4.4xlarge" = 108855946117 # 101.38 GiB
     "cache.r4.8xlarge" = 218248763146 # 203.26 GiB
     # R5 family
-    "cache.r5.large"   = 14033805639 # 13.07 GiB
-    "cache.r5.xlarge"  = 28260884807 # 26.32 GiB
-    "cache.r5.2xlarge" = 56715043143 # 52.82 GiB
+    "cache.r5.large"   = 14033805639  # 13.07 GiB
+    "cache.r5.xlarge"  = 28260884807  # 26.32 GiB
+    "cache.r5.2xlarge" = 56715043143  # 52.82 GiB
     "cache.r5.4xlarge" = 113612622397 # 105.81 GiB
     # R7g family
     "cache.r7g.large"   = 14033805639  # 13.07 GiB
@@ -228,76 +248,29 @@ locals {
     "cache.r7g.4xlarge" = 113612622397 # 105.81 GiB
     "cache.r7g.8xlarge" = 225002599219 # 209.55 GiB
     # R6g family
-    "cache.r6g.large"   = 14033805639 # 13.07 GiB
-    "cache.r6g.xlarge"  = 28260884807 # 26.32 GiB
-    "cache.r6g.2xlarge" = 56715043143 # 52.82 GiB
+    "cache.r6g.large"   = 14033805639  # 13.07 GiB
+    "cache.r6g.xlarge"  = 28260884807  # 26.32 GiB
+    "cache.r6g.2xlarge" = 56715043143  # 52.82 GiB
     "cache.r6g.4xlarge" = 113612622397 # 105.81 GiB
     "cache.r6g.8xlarge" = 225002599219 # 209.55 GiB
     # R6gd family
-    "cache.r6gd.xlarge"  = 28260884807 # 26.32 GiB
-    "cache.r6gd.2xlarge" = 56715043143 # 52.82 GiB
+    "cache.r6gd.xlarge"  = 28260884807  # 26.32 GiB
+    "cache.r6gd.2xlarge" = 56715043143  # 52.82 GiB
     "cache.r6gd.4xlarge" = 113612622397 # 105.81 GiB
     "cache.r6gd.8xlarge" = 225002599219 # 209.55 GiB
   }
 
-  # Redis hourly prices from the same user-provided Vantage table.
-  _node_redis_hourly_usd = {
-    "cache.t2.micro"   = 0.017
-    "cache.t2.small"   = 0.034
-    "cache.t2.medium"  = 0.068
-    "cache.t3.micro"   = 0.017
-    "cache.t3.small"   = 0.034
-    "cache.t3.medium"  = 0.068
-    "cache.t4g.micro"  = 0.016
-    "cache.t4g.small"  = 0.032
-    "cache.t4g.medium" = 0.065
-    "cache.c7gn.large"   = 0.255
-    "cache.c7gn.xlarge"  = 0.509
-    "cache.c7gn.2xlarge" = 1.018
-    "cache.c7gn.4xlarge" = 2.037
-    "cache.c7gn.8xlarge" = 4.073
-    "cache.m4.large"   = 0.156
-    "cache.m4.xlarge"  = 0.311
-    "cache.m4.2xlarge" = 0.623
-    "cache.m4.4xlarge" = 1.245
-    "cache.m5.large"   = 0.156
-    "cache.m5.xlarge"  = 0.311
-    "cache.m5.2xlarge" = 0.623
-    "cache.m5.4xlarge" = 1.245
-    "cache.m6g.large"   = 0.149
-    "cache.m6g.xlarge"  = 0.297
-    "cache.m6g.2xlarge" = 0.593
-    "cache.m6g.4xlarge" = 1.186
-    "cache.m6g.8xlarge" = 2.372
-    "cache.m7g.large"   = 0.158
-    "cache.m7g.xlarge"  = 0.315
-    "cache.m7g.2xlarge" = 0.629
-    "cache.m7g.4xlarge" = 1.257
-    "cache.m7g.8xlarge" = 2.514
-    "cache.r4.large"   = 0.228
-    "cache.r4.xlarge"  = 0.455
-    "cache.r4.2xlarge" = 0.91
-    "cache.r4.4xlarge" = 1.82
-    "cache.r4.8xlarge" = 3.64
-    "cache.r5.large"   = 0.216
-    "cache.r5.xlarge"  = 0.431
-    "cache.r5.2xlarge" = 0.862
-    "cache.r5.4xlarge" = 1.724
-    "cache.r6g.large"   = 0.206
-    "cache.r6g.xlarge"  = 0.411
-    "cache.r6g.2xlarge" = 0.821
-    "cache.r6g.4xlarge" = 1.642
-    "cache.r6g.8xlarge" = 3.284
-    "cache.r6gd.xlarge"  = 0.781
-    "cache.r6gd.2xlarge" = 1.56
-    "cache.r6gd.4xlarge" = 3.12
-    "cache.r6gd.8xlarge" = 6.24
-    "cache.r7g.large"   = 0.219
-    "cache.r7g.xlarge"  = 0.437
-    "cache.r7g.2xlarge" = 0.873
-    "cache.r7g.4xlarge" = 1.745
-    "cache.r7g.8xlarge" = 3.491
-  }
+  # Live on-demand hourly price for this run's exact node_type / engine_type
+  # / aws_region, from the AWS Price List API (see data.external.node_price
+  # below). Replaces a hardcoded single-region Redis-only price table, which
+  # silently mislabeled every non-us-east-1 run and every Valkey run (AWS
+  # prices Valkey ~20% below Redis on the same node type).
+  #
+  # "" (not a number) means the live lookup failed -- see
+  # data.external.node_price.result.reason. Never falls back to a stale
+  # guess; downstream consumers must treat "" as unknown, not zero.
+  _node_hourly_usd        = data.external.node_price.result.hourly_usd != "" ? tonumber(data.external.node_price.result.hourly_usd) : null
+  _node_hourly_usd_source = data.external.node_price.result.source
 
   # 85% fill factor — cache stays warm without hitting eviction pressure
   _fill_factor = 0.85

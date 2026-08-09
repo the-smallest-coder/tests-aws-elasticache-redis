@@ -229,11 +229,15 @@ def build_run_context(run: RunData) -> dict[str, Any]:
     add("Time range", meta.get("time_range"))
     add("Report start", meta.get("report_start"))
     add("Report end", meta.get("report_end"))
-    add("Engine", meta.get("engine_type") or elasticache.get("engine"))
+    engine = meta.get("engine_type") or elasticache.get("engine")
+    add("Engine", engine)
     add("Engine version", meta.get("engine_version") or elasticache.get("engine_version_configured"))
     add("Node type", meta.get("node_type") or elasticache.get("node_type"))
     add("Node memory", _format_gib(meta.get("node_memory_bytes") or elasticache.get("node_memory_bytes")))
-    add("Redis hourly", _format_usd_hour(meta.get("redis_hourly_usd") or elasticache.get("redis_hourly_usd")))
+    add(
+        f"{engine.title()} hourly" if engine else "Node hourly",
+        _format_usd_hour(meta.get("node_hourly_usd") or elasticache.get("node_hourly_usd")),
+    )
     add("Node count", meta.get("node_count") or elasticache.get("num_cache_nodes"))
     add("Cluster mode", normalize_cluster_mode(meta.get("cluster_mode")))
     add("Task count", memtier.get("task_count") or get_nested(run.summary, ("ecs", "task_count")))

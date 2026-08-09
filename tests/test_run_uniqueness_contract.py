@@ -61,13 +61,22 @@ class RunUniquenessContractTests(unittest.TestCase):
         main_tf = (ROOT / "main.tf").read_text(encoding="utf-8")
 
         self.assertIn('variable "elasticache_availability_zone"', variables_tf)
+        # cluster_details.json must only ever report an AZ that was actually
+        # applied via preferred_cache_cluster_azs, so both must be driven by
+        # the same local rather than independently re-deriving the gate
+        # (cluster_mode_enabled / num_cache_nodes == 1 / var non-empty).
+        self.assertRegex(
+            main_tf,
+            r"elasticache_pinned_az\s*=\s*\(\s*"
+            r"var\.cluster_mode_enabled\s*\|\|\s*var\.elasticache_availability_zone\s*==\s*\"\"\s*"
+            r"\|\|\s*var\.num_cache_nodes\s*!=\s*1",
+        )
         self.assertRegex(
             node_details_tf,
-            r'availability_zone\s*=\s*var\.elasticache_availability_zone\s*!=\s*""'
-            r'\s*\?\s*var\.elasticache_availability_zone\s*:\s*null',
+            r"availability_zone\s*=\s*local\.elasticache_pinned_az",
         )
         self.assertIn("preferred_cache_cluster_azs", main_tf)
-        self.assertIn("[var.elasticache_availability_zone]", main_tf)
+        self.assertIn("[local.elasticache_pinned_az]", main_tf)
         self.assertNotRegex(
             node_details_tf,
             r"availability_zone\s*=\s*var\.subnet_ids",

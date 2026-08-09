@@ -27,6 +27,17 @@ locals {
     Engine      = var.engine_type
     ClusterMode = var.cluster_mode_enabled ? "enabled" : "disabled"
   }
+
+  # AZ pinning only applies to the single-node, non-cluster-mode case (see
+  # preferred_cache_cluster_azs below); cluster mode and multi-node runs
+  # fall back to AWS's own placement. Shared with node_details.tf so
+  # cluster_details.json never records an AZ that was requested but not
+  # actually applied.
+  elasticache_pinned_az = (
+    var.cluster_mode_enabled || var.elasticache_availability_zone == "" || var.num_cache_nodes != 1
+    ? null
+    : var.elasticache_availability_zone
+  )
 }
 
 # Subnet group for ElastiCache
@@ -107,13 +118,9 @@ resource "aws_elasticache_replication_group" "main" {
   # node type under test). One entry per cache cluster, so this only
   # applies to the single-node, non-cluster-mode case; cluster mode and
   # multi-node runs fall back to AWS's own placement.
-  preferred_cache_cluster_azs = (
-    var.cluster_mode_enabled || var.elasticache_availability_zone == "" || var.num_cache_nodes != 1
-    ? null
-    : [var.elasticache_availability_zone]
-  )
-  automatic_failover_enabled = var.automatic_failover_enabled
-  multi_az_enabled           = var.automatic_failover_enabled
+  preferred_cache_cluster_azs = local.elasticache_pinned_az == null ? null : [local.elasticache_pinned_az]
+  automatic_failover_enabled  = var.automatic_failover_enabled
+  multi_az_enabled            = var.automatic_failover_enabled
 
   # Security
   at_rest_encryption_enabled = var.at_rest_encryption_enabled
