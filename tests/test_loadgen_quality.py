@@ -155,8 +155,8 @@ class LoadgenQualityTests(unittest.TestCase):
         self.assertTrue(result["generator_cpu_limited"])
         self.assertFalse(result["latency_tail_valid"])
         self.assertEqual(result["diagnostic_status"], "warning")
-        self.assertEqual(result["validation_status"], "warning")
-        self.assertEqual(result["invalid_reasons"], [])
+        self.assertNotIn("validation_status", result)
+        self.assertNotIn("invalid_reasons", result)
         self.assertIn("generator_cpu_p95_above_85_pct", result["warning_reasons"])
         self.assertEqual(
             [row["sample_count"] for row in result["generator_cpu_p95_by_task"]],
@@ -690,7 +690,7 @@ class LoadgenQualityTests(unittest.TestCase):
             pd.Timestamp("2026-08-01T00:02:10"),
         )
 
-        self.assertEqual(result["validation_status"], "unknown")
+        self.assertEqual(result["diagnostic_status"], "unknown")
         self.assertEqual(
             result["unknown_reasons"],
             ["availability_zone_missing", "elasticache_availability_zone_unavailable"],

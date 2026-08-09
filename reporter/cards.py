@@ -132,10 +132,15 @@ def stat_cards_html(
         cpu_p95 = float(loadgen['generator_cpu_p95_pct'])
         cards.append(('ECS Task CPU p95', f"{cpu_p95:.1f}", '%', '#5c6bc0',
                       'Maximum of the per-task CPU p95 values.'))
-        within_az = loadgen.get('throughput_skew_within_az_max')
-        if within_az is not None:
-            cards.append(('Within-AZ Skew', f"{float(within_az):.2f}", 'p90/p10', '#5c6bc0',
-                          'Maximum per-AZ p90/p10 ratio of per-task median current throughput.'))
+
+    # Independent of ECS Task CPU p95 -- derived from memtier throughput
+    # (throughput_vector), not Container Insights CPU (cpu_vector). Must not
+    # be gated on CPU data being present, or it silently disappears whenever
+    # Container Insights CPU is missing even though skew was computed fine.
+    if loadgen and loadgen.get('throughput_skew_within_az_max') is not None:
+        within_az = loadgen['throughput_skew_within_az_max']
+        cards.append(('Within-AZ Skew', f"{float(within_az):.2f}", 'p90/p10', '#5c6bc0',
+                      'Maximum per-AZ p90/p10 ratio of per-task median current throughput.'))
     if not ecs_df.empty:
         mem_used_df = metric_filter(ecs_df, 'MemoryUtilized', 'Average')
         if not mem_used_df.empty:

@@ -405,6 +405,11 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
     constrained_runs = []
     for run in (baseline, candidate):
         loadgen = run.summary.get("loadgen", {})
+        # "validation_status"/"invalid_reasons" is a pre-rename fallback:
+        # older results_*.json summaries only have those fields (with real
+        # "invalid" values), not "diagnostic_status"/"warning_reasons".
+        # build_loadgen_summary() no longer writes the old names, but keep
+        # reading them here so comparisons against those older runs still work.
         status = loadgen.get("diagnostic_status") or loadgen.get("validation_status")
         if status in {"warning", "invalid"}:
             reasons = (

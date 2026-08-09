@@ -212,15 +212,21 @@ The report validates one run at task and AZ granularity before its latency resul
 - `loadgen.generator_cpu_p95_pct` is the maximum of the per-task p95 values of
   `CpuUtilized / CpuReserved * 100`. Only `Average` task records inside the report
   window are used, and zero-utilization shutdown samples are excluded. A value
-  above 85% marks the run generator-limited and invalid for latency/tail conclusions.
+  above 85% sets `loadgen.latency_tail_valid` to `false` -- the run's latency/tail
+  conclusions are not trustworthy -- and adds `generator_cpu_p95_above_85_pct` to
+  `loadgen.warning_reasons`. `loadgen.diagnostic_status` becomes `"warning"`, not
+  `"invalid"`: a CPU-bound load generator doesn't invalidate the ElastiCache-side
+  measurements, only conclusions drawn from ECS task latency.
   `loadgen.generator_cpu_across_tasks` reports the min, median, and max across
   those per-task p95 values; it does not use ramp-up minima from the time series.
 - `loadgen.throughput_task_skew_p90_to_p10` is computed across per-task medians of
   the leading, current `ops/sec` value in memtier progress records. The cumulative
   `(avg: ...)` value and final `Totals` rows are not used for this metric.
 - `loadgen.throughput_skew_within_az_max` is the worst per-AZ p90/p10 ratio. A
-  value above 1.3 marks a generator problem inside an AZ. The max/min ratio of AZ
-  median throughputs is reported separately without a validity threshold.
+  value above 1.3 marks a generator problem inside an AZ (adds
+  `throughput_skew_within_az_above_1_3` to `loadgen.warning_reasons`, same
+  `"warning"` severity as above). The max/min ratio of AZ median throughputs is
+  reported separately without a validity threshold.
 
 Only full UTC minute buckets wholly contained in the absolute report window are
 eligible. Eligible minutes where fewer than the expected number of memtier tasks
@@ -233,8 +239,9 @@ ECS CSV dimensions; downloaded historical runs can recover the same mapping from
 `logs/container-insights/*.txt` through the literal `TaskId` match.
 
 If any task lacks an AZ mapping, within-AZ and between-AZ gates are not computed,
-the report records `availability_zone_missing`, and validation remains `unknown`
-unless another independent validity gate already makes the run invalid.
+the report records `availability_zone_missing`, and `loadgen.diagnostic_status`
+remains `"unknown"` unless another independent gate above already makes it
+`"warning"` (a warning takes precedence over unknown).
 
 With only 6 or 9 tasks, p90/p10 is close to max/min. It is retained as a compact
 skew indicator, while the per-task vector and per-AZ breakdown remain the primary

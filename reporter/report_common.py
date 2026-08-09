@@ -182,8 +182,6 @@ def inspect_run_directory(run_dir: Path) -> dict[str, Any]:
     else:
         info["warnings"].append("Missing report_status.json.")
 
-    if not canonical_jsons:
-        info["warnings"].append("Missing canonical results_*.json.")
     if not info["files"]["memtier_logs"]:
         info["warnings"].append("Missing memtier logs under logs/loadgen.")
     if not info["files"]["memtier_minute_artifact"] or not info["files"]["memtier_totals_artifacts"]:
@@ -226,6 +224,16 @@ def inspect_run_directory(run_dir: Path) -> dict[str, Any]:
     )
     if local_summary and not info["local_ready"]:
         info["warnings"].append("results_local.json is legacy/incomplete for current schema/readiness checks.")
+
+    # A canonical results_*.json is only ever written by the S3-upload/ECS
+    # pipeline (see run_uploaded_report in report_generator.py); the local
+    # `generate` command deliberately never writes one, so it doesn't
+    # clobber a canonical report later downloaded for the same run (see its
+    # comment there). A purely local run is therefore permanently without
+    # one by design -- only warn when there's also no ready local report to
+    # fall back on, i.e. when this run has nothing usable at all.
+    if not canonical_jsons and not info["local_ready"]:
+        info["warnings"].append("Missing canonical results_*.json.")
 
     if status is not None:
         status_complete = bool(status.get("complete") is True)

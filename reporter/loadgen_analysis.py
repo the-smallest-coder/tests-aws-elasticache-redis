@@ -342,11 +342,19 @@ def build_loadgen_summary(
         "warning" if reasons
         else ("unknown" if unknown_reasons else ("ok" if has_cpu and has_throughput else "unknown"))
     )
+    # `status` used to be "invalid"/"valid" with reasons under
+    # "invalid_reasons"; a run over the generator-CPU/within-AZ-skew
+    # thresholds does not invalidate the ElastiCache-side result, only ECS
+    # task latency conclusions (see latency_tail_valid below), so this was
+    # renamed to "warning"/"ok" with reasons under "warning_reasons".
+    # `diagnostic_status` was added as the new canonical name at the same
+    # time -- `validation_status` is no longer written here, but
+    # report_compare.py still reads it (and invalid_reasons) as a fallback
+    # for summaries generated before this rename. Do not remove that
+    # fallback without checking for pre-rename results_*.json files first.
     return {
         "diagnostic_status": status,
-        "validation_status": status,
         "warning_reasons": reasons,
-        "invalid_reasons": [],
         "unknown_reasons": unknown_reasons,
         "latency_tail_valid": not generator_limited if has_cpu else None,
         "expected_task_count": expected_task_count,

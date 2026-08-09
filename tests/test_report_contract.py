@@ -110,6 +110,51 @@ class MemtierParserTests(unittest.TestCase):
         self.assertEqual(int(stats["oom_df"]["OOM_events"].sum()), 2)
 
 
+class MinuteArtifactNormalizationTests(unittest.TestCase):
+    """task_count_present is a recent addition to the minute CSV schema
+    (memtier_etl.py). loadgen_analysis.build_loadgen_summary() already
+    treats its absence as "recompute from samples" rather than an error, so
+    normalization must agree: a _memtier.minute.csv from an older reporter
+    image, written before that column existed, must load successfully with
+    the column simply absent -- not raise, and not fill it with NaN (which
+    would satisfy the downstream presence check while feeding it garbage).
+    """
+
+    def test_minute_csv_without_task_count_present_loads_with_column_absent(self):
+        try:
+            from report_generator import _normalize_memtier_minute_artifact
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        content = (
+            "Timestamp,throughput_sum,latency_weighted_avg,throughput_median,"
+            "throughput_avg,throughput_p10,throughput_p90,throughput_min,"
+            "throughput_max,latency_median,latency_avg,latency_p10,latency_p90,"
+            "latency_min,latency_max\n"
+            "2026-05-01T00:00:00Z,900,9,900,900,900,900,900,900,9,9,9,9,9,9\n"
+        )
+
+        df = _normalize_memtier_minute_artifact(content, "legacy_memtier.minute.csv")
+
+        self.assertNotIn("task_count_present", df.columns)
+        self.assertEqual(df["throughput_sum"].tolist(), [900.0])
+
+    def test_minute_csv_missing_a_required_column_still_raises(self):
+        try:
+            from report_generator import _normalize_memtier_minute_artifact
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        content = "Timestamp,throughput_sum\n2026-05-01T00:00:00Z,900\n"
+
+        with self.assertRaises(ValueError):
+            _normalize_memtier_minute_artifact(content, "broken_memtier.minute.csv")
+
+
 class MemtierLatencyMaxTests(unittest.TestCase):
     def test_combined_minutes_keep_progress_latency_max(self):
         try:
@@ -313,6 +358,34 @@ class CardRenderingTests(unittest.TestCase):
         self.assertNotIn("avg_cpu_pct", summary["ecs"])
         self.assertIn("ECS Service CPU — Time Avg", html)
         self.assertIn("ECS Service CPU — Time Peak", html)
+
+    def test_within_az_skew_card_renders_without_generator_cpu(self):
+        """generator_cpu_p95_pct comes from Container Insights CPU data;
+        throughput_skew_within_az_max comes from memtier throughput data --
+        independent sources. The skew card must not disappear just because
+        Container Insights CPU is missing for this run.
+        """
+        try:
+            import pandas as pd
+
+            from cards import stat_cards_html
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        empty = pd.DataFrame()
+        html = stat_cards_html(
+            empty, empty, empty, empty,
+            loadgen={
+                "generator_cpu_p95_pct": None,
+                "throughput_skew_within_az_max": 1.42,
+            },
+        )
+
+        self.assertNotIn("ECS Task CPU p95", html)
+        self.assertIn("Within-AZ Skew", html)
+        self.assertIn(">1.42<", html)
 
     def test_first_eviction_card_shows_absolute_timestamp(self):
         try:

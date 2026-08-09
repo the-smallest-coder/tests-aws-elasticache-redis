@@ -37,7 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         help="Output HTML path. Defaults to results/comparisons/<baseline>_vs_<candidate>.html.",
     )
-    generate = subparsers.add_parser("generate", help="Build the run-named HTML and JSON from local CSVs and logs.")
+    generate = subparsers.add_parser(
+        "generate",
+        help="Build results_local.{html,json} from local CSVs and logs (never overwrites a canonical report downloaded from AWS).",
+    )
     generate.add_argument("run_dir", help="Path to a run results directory (containing metrics/ and logs/).")
     generate.add_argument("--engine-type", default="", help="e.g. redis or valkey")
     generate.add_argument("--engine-version", default="", help="e.g. 7.1")
@@ -396,6 +399,15 @@ _MINUTE_COLUMN_ALIASES = {
     "latency_max": ("latency_max",),
 }
 
+# Columns that older reporter images' _memtier.minute.csv artifacts may not
+# have written yet. loadgen_analysis.build_loadgen_summary() already treats
+# a missing task_count_present as "recompute from samples instead" (checks
+# `"task_count_present" in memtier_minute_df`); normalization must agree and
+# leave the column out entirely rather than hard-failing the whole artifact
+# or filling it with NaN (NaN would satisfy that `in` check while comparing
+# false against every minute, silently zeroing out task-count coverage).
+_MINUTE_OPTIONAL_COLUMNS = {"task_count_present"}
+
 _TOTAL_FIELD_ALIASES = {
     "throughput_avg": ("throughput_avg", "avg_throughput", "ops_per_sec", "ops_sec", "Ops/sec"),
     "latency_avg_ms": ("latency_avg_ms", "avg_latency_ms", "latency_weighted_avg", "Latency (ms)"),
@@ -421,9 +433,12 @@ def _normalize_memtier_minute_artifact(content: str, source: str):
     for canonical, aliases in _MINUTE_COLUMN_ALIASES.items():
         source_name = next((name for name in aliases if name in df.columns), None)
         if source_name is None:
+            if canonical in _MINUTE_OPTIONAL_COLUMNS:
+                continue
             raise ValueError(f"Memtier minute artifact {source} is missing required column {canonical}")
         rename[source_name] = canonical
-    df = df.rename(columns=rename)[list(_MINUTE_COLUMN_ALIASES)]
+    present_columns = [canonical for canonical in _MINUTE_COLUMN_ALIASES if canonical in rename.values()]
+    df = df.rename(columns=rename)[present_columns]
     df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True).dt.tz_localize(None)
     return df.sort_values("Timestamp").reset_index(drop=True)
 
