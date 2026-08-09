@@ -72,11 +72,11 @@ class ClientLatencyReportTests(unittest.TestCase):
             },
         )
 
-    def test_client_latency_chart_has_expected_traces_and_missing_annotation(self):
+    def test_ecs_task_latency_is_the_final_infrastructure_row(self):
         try:
             import pandas as pd
 
-            from charts import build_client_latency_figure
+            from charts import build_infra_figure
         except ModuleNotFoundError as exc:
             if exc.name in {"pandas", "plotly"}:
                 self.skipTest(f"{exc.name} is not installed in this environment")
@@ -89,14 +89,27 @@ class ClientLatencyReportTests(unittest.TestCase):
         ])
         ecs_df["Timestamp"] = pd.to_datetime(ecs_df["Timestamp"], utc=True).dt.tz_localize(None)
 
-        figure = build_client_latency_figure(ecs_df)
-        empty_figure = build_client_latency_figure(pd.DataFrame())
+        figure = build_infra_figure(ecs_df, pd.DataFrame(), "cluster-a", {})
+        empty_figure = build_infra_figure(pd.DataFrame(), pd.DataFrame(), "cluster-a", {})
 
         self.assertEqual(
             {trace.name for trace in figure.data},
-            {"p50", "p99", "p99.9", "worst_stream_p99", "worst_stream_p999"},
+            {
+                "ECS task p50",
+                "ECS task p99",
+                "ECS task p99.9",
+                "Worst ECS task p99",
+                "Worst ECS task p99.9",
+            },
         )
-        self.assertIn("No ECS client latency datapoints", empty_figure.layout.annotations[1].text)
+        self.assertIn(
+            "ECS Task Latency (ms)",
+            {annotation.text for annotation in figure.layout.annotations},
+        )
+        self.assertIn(
+            "No ECS task latency datapoints",
+            {annotation.text for annotation in empty_figure.layout.annotations},
+        )
 
     def test_rendered_report_does_not_add_latency_cards(self):
         try:

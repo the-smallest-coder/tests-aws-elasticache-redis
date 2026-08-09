@@ -1,3 +1,34 @@
+# Live AWS Price List lookup for this run's ElastiCache node hourly cost.
+# Region- and engine-qualified (Valkey is priced ~20% below Redis on the
+# same node type) instead of a hardcoded single-region Redis-only table.
+#
+# Shells out to `aws pricing get-products` because the Price List Query API
+# has no native Terraform data source; the script always exits 0 and
+# reports source: "unavailable" on any failure (missing perms, no network,
+# no matching SKU), so a pricing hiccup never blocks `terraform apply`.
+# Requires `bash`, `aws`, and `jq` on the machine running Terraform, and
+# `pricing:GetProducts` on its credentials.
+#
+# The script's exit-0 contract only covers failures *inside* it -- it does
+# not cover Terraform failing to *launch* the program at all (bash missing
+# from PATH, this module's scripts/ directory unreadable). `data` blocks are
+# re-evaluated on every plan, including `terraform destroy`, so a launch
+# failure here could strand a running cluster the same way the AZ
+# data-source read-back this repo avoids elsewhere would (see
+# test_no_data_source_reads_back_the_cluster_shutdown_deletes). Gated by
+# var.enable_price_lookup as an escape hatch for exactly that case.
+data "external" "node_price" {
+  count = var.enable_price_lookup ? 1 : 0
+
+  program = ["bash", "${path.module}/scripts/fetch_elasticache_price.sh"]
+
+  query = {
+    node_type   = var.node_type
+    engine_type = var.engine_type
+    aws_region  = var.aws_region
+  }
+}
+
 # CloudWatch Log Group for ECS Container Insights (managed for cleanup on destroy)
 resource "aws_cloudwatch_log_group" "container_insights" {
   name              = "/aws/ecs/containerinsights/${local.cluster_id}-loadgen/performance"
@@ -164,52 +195,147 @@ locals {
   memtier_duration_label    = var.loadgen_memtier_test_time > 0 ? "${var.loadgen_memtier_test_time}s" : "until stopped"
 
   # ---------------------------------------------------------------------------
-  # Advertised memory (bytes) per ElastiCache node type. The 85% target is
-  # applied separately by _fill_factor below so the map stays easy to audit
-  # against AWS instance specs.
-  # Source: https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/CacheNodes.SupportedTypes.html
+  # Advertised memory (bytes) per ElastiCache node type, sourced from AWS's
+  # own "Supported node types" table:
+  #   https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/CacheNodes.SupportedTypes.html
+  # (every row below was checked directly against that page, most recently
+  # when the 12xlarge/16xlarge/24xlarge/10xlarge rows were added so real
+  # ElastiCache sizes above each family's original top entry don't hit the
+  # raw "Invalid index" below -- see the precondition on
+  # aws_elasticache_replication_group.main for the friendly version of that
+  # failure). The 85% target is applied separately by _fill_factor below so
+  # the map stays easy to audit against that table.
+  #
+  # Comparability note: before 2026-06-15 (commit 145feec) this map held
+  # coarse rounded advertised-GB figures (e.g. m7g.large = 7 GB, t4g.small =
+  # 1.5 GB, cited to this same AWS page but not transcribed precisely from
+  # it); it now holds AWS's exact decimal-GiB figures (6.38 GiB, 1.37 GiB).
+  # That's strictly more correct, but it also changed memtier_key_maximum
+  # for every node type on any run that let key-maximum auto-size
+  # (var.loadgen_memtier_key_maximum == 0) -- an auto-sized run from before
+  # that commit is NOT keyspace-comparable to one after it, even for the
+  # identical node_type. Each run's actual keyspace is recorded in
+  # cluster_details.json (memtier.key_maximum / memtier.key_maximum_auto);
+  # check that field, not node_type alone, before comparing two reports.
   # ---------------------------------------------------------------------------
   _node_memory_bytes = {
+    # T2 family
+    "cache.t2.micro"  = 595926712  # 0.555 GiB
+    "cache.t2.small"  = 1664299827 # 1.55 GiB
+    "cache.t2.medium" = 3457448673 # 3.22 GiB
     # T4g family
-    "cache.t4g.micro"  = 536870912  # 512 MB advertised
-    "cache.t4g.small"  = 1610612736 # 1.5 GB advertised
-    "cache.t4g.medium" = 3435973836 # 3.2 GB advertised
+    "cache.t4g.micro"  = 536870912  # 0.5 GiB
+    "cache.t4g.small"  = 1471026298 # 1.37 GiB
+    "cache.t4g.medium" = 3317862236 # 3.09 GiB
     # T3 family
-    "cache.t3.micro"  = 536870912
-    "cache.t3.small"  = 1610612736
-    "cache.t3.medium" = 3435973836
+    "cache.t3.micro"  = 536870912  # 0.5 GiB
+    "cache.t3.small"  = 1471026298 # 1.37 GiB
+    "cache.t3.medium" = 3317862236 # 3.09 GiB
+    # C7gn family
+    "cache.c7gn.large"    = 3317862236   # 3.09 GiB
+    "cache.c7gn.xlarge"   = 6850472837   # 6.38 GiB
+    "cache.c7gn.2xlarge"  = 13894219202  # 12.94 GiB
+    "cache.c7gn.4xlarge"  = 27970974515  # 26.05 GiB
+    "cache.c7gn.8xlarge"  = 56113747722  # 52.26 GiB
+    "cache.c7gn.12xlarge" = 84353157693  # 78.56 GiB
+    "cache.c7gn.16xlarge" = 113612622397 # 105.81 GiB
+    # M4 family
+    "cache.m4.large"    = 6893422510   # 6.42 GiB
+    "cache.m4.xlarge"   = 15333033246  # 14.28 GiB
+    "cache.m4.2xlarge"  = 31890132172  # 29.7 GiB
+    "cache.m4.4xlarge"  = 65262028062  # 60.78 GiB
+    "cache.m4.10xlarge" = 166043435663 # 154.64 GiB
+    # M5 family
+    "cache.m5.large"    = 6850472837   # 6.38 GiB
+    "cache.m5.xlarge"   = 13883481784  # 12.93 GiB
+    "cache.m5.2xlarge"  = 27960237096  # 26.04 GiB
+    "cache.m5.4xlarge"  = 56113747722  # 52.26 GiB
+    "cache.m5.12xlarge" = 168706315387 # 157.12 GiB
+    "cache.m5.24xlarge" = 337498530120 # 314.32 GiB
     # M7g family
-    "cache.m7g.large"   = 7516192768   # 7 GB
-    "cache.m7g.xlarge"  = 15032385536  # 14 GB
-    "cache.m7g.2xlarge" = 30064771072  # 28 GB
-    "cache.m7g.4xlarge" = 60129542144  # 56 GB
-    "cache.m7g.8xlarge" = 120259084288 # 112 GB
+    "cache.m7g.large"    = 6850472837   # 6.38 GiB
+    "cache.m7g.xlarge"   = 13883481784  # 12.93 GiB
+    "cache.m7g.2xlarge"  = 27960237096  # 26.04 GiB
+    "cache.m7g.4xlarge"  = 56113747722  # 52.26 GiB
+    "cache.m7g.8xlarge"  = 111325552312 # 103.68 GiB
+    "cache.m7g.12xlarge" = 168706315387 # 157.12 GiB
+    "cache.m7g.16xlarge" = 225002599219 # 209.55 GiB
     # M6g family
-    "cache.m6g.large"   = 7516192768
-    "cache.m6g.xlarge"  = 15032385536
-    "cache.m6g.2xlarge" = 30064771072
-    "cache.m6g.4xlarge" = 60129542144
-    "cache.m6g.8xlarge" = 120259084288
+    "cache.m6g.large"    = 6850472837   # 6.38 GiB
+    "cache.m6g.xlarge"   = 13883481784  # 12.93 GiB
+    "cache.m6g.2xlarge"  = 27960237096  # 26.04 GiB
+    "cache.m6g.4xlarge"  = 56113747722  # 52.26 GiB
+    "cache.m6g.8xlarge"  = 111325552312 # 103.68 GiB
+    "cache.m6g.12xlarge" = 168706315387 # 157.12 GiB
+    "cache.m6g.16xlarge" = 225002599219 # 209.55 GiB
+    # R4 family
+    "cache.r4.large"    = 13207024435  # 12.3 GiB
+    "cache.r4.xlarge"   = 26897232691  # 25.05 GiB
+    "cache.r4.2xlarge"  = 54191749857  # 50.47 GiB
+    "cache.r4.4xlarge"  = 108855946117 # 101.38 GiB
+    "cache.r4.8xlarge"  = 218248763146 # 203.26 GiB
+    "cache.r4.16xlarge" = 437012922368 # 407.0 GiB
+    # R5 family
+    "cache.r5.large"    = 14033805639  # 13.07 GiB
+    "cache.r5.xlarge"   = 28260884807  # 26.32 GiB
+    "cache.r5.2xlarge"  = 56715043143  # 52.82 GiB
+    "cache.r5.4xlarge"  = 113612622397 # 105.81 GiB
+    "cache.r5.12xlarge" = 341202939412 # 317.77 GiB
+    "cache.r5.24xlarge" = 682481040753 # 635.61 GiB
     # R7g family
-    "cache.r7g.large"   = 16106127360  # 15 GB
-    "cache.r7g.xlarge"  = 32212254720  # 30 GB
-    "cache.r7g.2xlarge" = 64424509440  # 60 GB
-    "cache.r7g.4xlarge" = 128849018880 # 120 GB
-    "cache.r7g.8xlarge" = 257698037760 # 240 GB
+    "cache.r7g.large"    = 14033805639  # 13.07 GiB
+    "cache.r7g.xlarge"   = 28260884807  # 26.32 GiB
+    "cache.r7g.2xlarge"  = 56715043143  # 52.82 GiB
+    "cache.r7g.4xlarge"  = 113612622397 # 105.81 GiB
+    "cache.r7g.8xlarge"  = 225002599219 # 209.55 GiB
+    "cache.r7g.12xlarge" = 341202939412 # 317.77 GiB
+    "cache.r7g.16xlarge" = 449994461020 # 419.09 GiB
     # R6g family
-    "cache.r6g.large"   = 16106127360
-    "cache.r6g.xlarge"  = 32212254720
-    "cache.r6g.2xlarge" = 64424509440
-    "cache.r6g.4xlarge" = 128849018880
-    "cache.r6g.8xlarge" = 257698037760
+    "cache.r6g.large"    = 14033805639  # 13.07 GiB
+    "cache.r6g.xlarge"   = 28260884807  # 26.32 GiB
+    "cache.r6g.2xlarge"  = 56715043143  # 52.82 GiB
+    "cache.r6g.4xlarge"  = 113612622397 # 105.81 GiB
+    "cache.r6g.8xlarge"  = 225002599219 # 209.55 GiB
+    "cache.r6g.12xlarge" = 341202939412 # 317.77 GiB
+    "cache.r6g.16xlarge" = 449994461020 # 419.09 GiB
+    # R6gd family
+    "cache.r6gd.xlarge"   = 28260884807  # 26.32 GiB
+    "cache.r6gd.2xlarge"  = 56715043143  # 52.82 GiB
+    "cache.r6gd.4xlarge"  = 113612622397 # 105.81 GiB
+    "cache.r6gd.8xlarge"  = 225002599219 # 209.55 GiB
+    "cache.r6gd.12xlarge" = 341202939412 # 317.77 GiB
+    "cache.r6gd.16xlarge" = 449994461020 # 419.09 GiB
   }
+
+  # Live on-demand hourly price for this run's exact node_type / engine_type
+  # / aws_region, from the AWS Price List API (see data.external.node_price
+  # above). Replaces a hardcoded single-region Redis-only price table, which
+  # silently mislabeled every non-us-east-1 run and every Valkey run (AWS
+  # prices Valkey ~20% below Redis on the same node type).
+  #
+  # count-indexed because the data source is gated by var.enable_price_lookup;
+  # lookup()s below default missing keys instead of erroring, since a plain
+  # `.result.reason` index fails plan/apply on the (expected) success path,
+  # where the script's JSON has no "reason" key at all.
+  _node_price_result = (
+    var.enable_price_lookup
+    ? data.external.node_price[0].result
+    : { hourly_usd = "", source = "disabled" }
+  )
+
+  # "" (not a number) means the live lookup failed or was disabled -- see
+  # _node_hourly_usd_reason. Never falls back to a stale guess; downstream
+  # consumers must treat "" as unknown, not zero.
+  _node_hourly_usd        = local._node_price_result.hourly_usd != "" ? tonumber(local._node_price_result.hourly_usd) : null
+  _node_hourly_usd_source = local._node_price_result.source
+  _node_hourly_usd_reason = lookup(local._node_price_result, "reason", "")
 
   # 85% fill factor — cache stays warm without hitting eviction pressure
   _fill_factor = 0.85
 
-  # Advertised bytes for this run; fall back to t4g.micro if type is unknown.
-  _advertised_bytes = lookup(local._node_memory_bytes, var.node_type,
-  local._node_memory_bytes["cache.t4g.micro"])
+  # Advertised bytes for this run. Unknown node types must fail at plan time;
+  # silent fallback would corrupt the benchmark keyspace.
+  _advertised_bytes = local._node_memory_bytes[var.node_type]
 
   # key-maximum: how many data_size-byte values fit at the target fill factor.
   # Each Redis key has ~70 bytes of overhead on top of the value.

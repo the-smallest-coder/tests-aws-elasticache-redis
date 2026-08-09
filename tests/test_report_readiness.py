@@ -69,6 +69,11 @@ class ReportReadinessTests(unittest.TestCase):
             inspection = inspect_run_directory(run_dir)
 
             self.assertTrue(inspection["local_ready"])
+            # A canonical results_*.json is only ever written by the
+            # S3-upload/ECS pipeline; `generate` deliberately never writes
+            # one for a purely local run, so this run permanently lacking
+            # one is expected, not a problem -- must not warn about it.
+            self.assertNotIn("Missing canonical results_*.json.", inspection["warnings"])
 
     def test_load_run_prefers_canonical_current_schema_json(self):
         from report_common import GENERATOR_SCHEMA_VERSION, load_run
@@ -118,6 +123,43 @@ class ReportReadinessTests(unittest.TestCase):
             warning_text = "\n".join(run.warnings)
             self.assertIn("legacy/incomplete", warning_text)
             self.assertIn("Using results_local.json fallback", warning_text)
+
+    def test_load_run_has_no_canonical_json_warning_for_complete_local_only_run(self):
+        """A run generated purely via `report_generator.py generate` never
+        gets a canonical results_*.json -- that file only comes from the
+        S3-upload/ECS pipeline. load_run() inherits inspect_run_directory's
+        warnings verbatim, so this run type must not carry forward a
+        permanently-true "missing canonical" warning once it's otherwise
+        complete.
+        """
+        from report_common import GENERATOR_SCHEMA_VERSION, load_run
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "20260520-114237"
+            run_dir.mkdir()
+            (run_dir / "logs" / "loadgen").mkdir(parents=True)
+            (run_dir / "logs" / "loadgen" / "stream-a.txt").write_text("line\n", encoding="utf-8")
+            _write_json(
+                run_dir / "results_local.json",
+                {
+                    "meta": {
+                        "cluster_id": "current-run",
+                        "generator_schema_version": GENERATOR_SCHEMA_VERSION,
+                        "source_mode": "local",
+                        "memtier_window_source": "memtier_log_messages",
+                        "artifact_source": "generated",
+                        "report_start": "2026-05-20T11:42:37",
+                        "report_end": "2026-05-20T12:42:37",
+                    },
+                    "benchmark": {},
+                    "cache_efficiency": {},
+                },
+            )
+
+            run = load_run("baseline", str(run_dir))
+
+            self.assertEqual(run.results_path.name, "results_local.json")
+            self.assertNotIn("Missing canonical results_*.json.", run.warnings)
 
 
 if __name__ == "__main__":

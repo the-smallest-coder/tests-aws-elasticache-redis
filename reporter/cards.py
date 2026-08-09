@@ -2,29 +2,11 @@
 
 from html import escape
 
-import pandas as pd
-
-from helpers import (
-    metric_filter,
-    cache_hit_rate_df,
-    select_mem_dims,
-    cloudwatch_eviction_series,
-    first_positive_timestamp,
-)
+from formatting import format_gib as _format_gib, format_usd_hour as _format_usd_hour
 
 
 def _html(value):
     return escape(str(value), quote=True)
-
-
-def _format_elapsed(delta):
-    """Return compact elapsed text suitable for a stat card."""
-    total_seconds = max(0, int(delta.total_seconds()))
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours:
-        return f"{hours}h {minutes:02d}m {seconds:02d}s"
-    return f"{minutes}m {seconds:02d}s"
 
 
 def header_pills(config):
@@ -32,18 +14,46 @@ def header_pills(config):
     config = config or {}
     cluster_mode = str(config.get('cluster_mode', 'false')).lower() == 'true'
     mode_label = 'Cluster Mode' if cluster_mode else 'Non-Cluster'
+    node_memory = _format_gib(config.get('node_memory_bytes'))
+    node_hourly = _format_usd_hour(config.get('node_hourly_usd'))
+    engine_type = config.get('engine_type')
+    hourly_label = f"{engine_type.title()} hourly" if engine_type else "Node hourly"
+
+    # A missing price should say why, not just silently vanish from the
+    # badge row. source/reason come from the live AWS Price List lookup
+    # (see ecs.tf / scripts/fetch_elasticache_price.sh); source is only
+    # populated once a lookup was actually attempted (or explicitly
+    # disabled), so its absence here means "legacy run, never had one" --
+    # nothing useful to say, so no pill at all, same as before.
+    hourly_value = node_hourly
+    hourly_tooltip = ''
+    if not hourly_value:
+        hourly_source = config.get('node_hourly_usd_source')
+        if hourly_source == 'disabled':
+            hourly_value = 'disabled'
+            hourly_tooltip = config.get('node_hourly_usd_reason') or 'Price lookup disabled (var.enable_price_lookup = false).'
+        elif hourly_source:
+            hourly_value = 'unavailable'
+            hourly_tooltip = config.get('node_hourly_usd_reason') or 'AWS Price List lookup failed.'
+
     items = [
-        ('Engine', config.get('engine_type')),
-        ('Version', config.get('engine_version')),
-        ('Node type', config.get('node_type')),
-        ('Nodes', config.get('node_count')),
-        ('Mode', mode_label),
+        ('Engine', engine_type, ''),
+        ('Version', config.get('engine_version'), ''),
+        ('Node type', config.get('node_type'), ''),
+        ('Node memory', f"{node_memory} GiB" if node_memory else None, ''),
+        (hourly_label, hourly_value, hourly_tooltip),
+        ('Nodes', config.get('node_count'), ''),
+        ('Mode', mode_label, ''),
     ]
-    pills = ''.join(
-        f"<div class='pill'>{_html(label)}: "
-        f"<span>{_html(val)}</span></div>"
-        for label, val in items if val
-    )
+    pill_parts = []
+    for label, val, tooltip in items:
+        if not val:
+            continue
+        title_attr = f' title="{_html(tooltip)}"' if tooltip else ''
+        pill_parts.append(
+            f"<div class='pill'{title_attr}>{_html(label)}: <span>{_html(val)}</span></div>"
+        )
+    pills = ''.join(pill_parts)
     return f"<div class='pills'>{pills}</div>" if pills else ''
 
 
@@ -55,11 +65,32 @@ def stat_cards_html(
     extra_stats=None,
     config=None,
     cluster_id=None,
+    loadgen=None,
 ):
     """Build the stat-cards grid HTML from all data sources."""
+    from helpers import (
+        metric_filter,
+        cache_hit_rate_df,
+        select_mem_dims,
+        cloudwatch_eviction_series,
+        first_positive_timestamp,
+    )
+
     extra_stats = extra_stats or {}
     config = config or {}
     cards = []  # tuples: (label, value_str, unit, color, tooltip)
+
+    node_memory = _format_gib(config.get('node_memory_bytes'))
+    if node_memory:
+        cards.append(('Node Memory', node_memory, 'GiB', '#546e7a',
+                      'Configured ElastiCache node memory used to compute memtier keyspace.'))
+
+    node_hourly = _format_usd_hour(config.get('node_hourly_usd'))
+    if node_hourly:
+        engine_type = config.get('engine_type')
+        cost_label = f"{engine_type.title()} Cost" if engine_type else "Node Cost"
+        cards.append((cost_label, node_hourly, '/h', '#546e7a',
+                      'Hourly node price for this run\'s node type, region, and engine, from the AWS Price List API.'))
 
     # ---- Memtier throughput / latency / bandwidth ----
     if not memtier_minute_df.empty and not memtier_totals_df.empty:
@@ -90,23 +121,43 @@ def stat_cards_html(
 
     # ---- ECS CPU / Memory ----
     if not ecs_df.empty:
-        cpu_df = metric_filter(ecs_df, 'CPUUtilization', 'Average')
-        if not cpu_df.empty:
-            cards.append(('Avg ECS CPU', f"{cpu_df['Value'].mean():.1f}", '%', '#188038', ''))
-            cards.append(('Peak ECS CPU', f"{cpu_df['Value'].max():.1f}", '%', '#188038', ''))
+        service_cpu_df = metric_filter(ecs_df, 'CPUUtilization', 'Average')
+        if not service_cpu_df.empty:
+            cards.append((
+                'ECS Service CPU — Time Avg', f"{service_cpu_df['Value'].mean():.1f}", '%', '#188038',
+                'Time average of the ECS service-level CPUUtilization series; not a cross-task average.'
+            ))
+            cards.append((
+                'ECS Service CPU — Time Peak', f"{service_cpu_df['Value'].max():.1f}", '%', '#188038',
+                'Maximum over time of the ECS service-level CPUUtilization series; not the worst task.'
+            ))
 
+    if loadgen and loadgen.get('generator_cpu_p95_pct') is not None:
+        cpu_p95 = float(loadgen['generator_cpu_p95_pct'])
+        cards.append(('ECS Task CPU p95', f"{cpu_p95:.1f}", '%', '#5c6bc0',
+                      'Maximum of the per-task CPU p95 values.'))
+
+    # Independent of ECS Task CPU p95 -- derived from memtier throughput
+    # (throughput_vector), not Container Insights CPU (cpu_vector). Must not
+    # be gated on CPU data being present, or it silently disappears whenever
+    # Container Insights CPU is missing even though skew was computed fine.
+    if loadgen and loadgen.get('throughput_skew_within_az_max') is not None:
+        within_az = loadgen['throughput_skew_within_az_max']
+        cards.append(('Within-AZ Skew', f"{float(within_az):.2f}", 'p90/p10', '#5c6bc0',
+                      'Maximum per-AZ p90/p10 ratio of per-task median current throughput.'))
+    if not ecs_df.empty:
         mem_used_df = metric_filter(ecs_df, 'MemoryUtilized', 'Average')
         if not mem_used_df.empty:
             peak_mem_mb = mem_used_df['Value'].max()
             reserved_df = ecs_df[ecs_df['MetricName'] == 'MemoryReserved']
             reserved_mb = reserved_df['Value'].max() if not reserved_df.empty else None
-            tip = f"Peak loadgen container memory. Reserved: {reserved_mb:.0f} MB." if reserved_mb else 'Peak loadgen container memory.'
+            tip = f"Peak ECS task container memory. Reserved: {reserved_mb:.0f} MB." if reserved_mb else 'Peak ECS task container memory.'
             cards.append(('ECS Mem Peak', f"{peak_mem_mb:.0f}", 'MB', '#0097a7', tip))
 
         task_df = metric_filter(ecs_df, 'RunningTaskCount', 'Average')
         if not task_df.empty:
-            cards.append(('Loadgen Tasks', f"{int(task_df['Value'].max())}", '', '#5c6bc0',
-                          'Peak number of concurrent loadgen ECS tasks during the test.'))
+            cards.append(('ECS Tasks', f"{int(task_df['Value'].max())}", '', '#5c6bc0',
+                          'Peak number of concurrent ECS tasks during the test.'))
 
     # ---- ElastiCache Memory ----
     if not metrics_df.empty:
@@ -173,22 +224,8 @@ def stat_cards_html(
         fets = first_eviction_ts
         if hasattr(fets, 'tzinfo') and fets.tzinfo is not None:
             fets = fets.replace(tzinfo=None)
-        first_message_ts = extra_stats.get('first_message_ts')
-        if first_message_ts is not None:
-            fmts = pd.Timestamp(first_message_ts)
-            if fmts.tzinfo is not None:
-                fmts = fmts.tz_convert(None)
-            eviction_label = _format_elapsed(fets - fmts)
-            eviction_tip = (
-                'Elapsed time from report start to the first positive CloudWatch '
-                f"Evictions datapoint. Event timestamp: {fets.strftime('%Y-%m-%d %H:%M:%S')} UTC."
-            )
-        else:
-            eviction_label = 'Unavailable'
-            eviction_tip = (
-                'Report start timestamp unavailable; first positive CloudWatch '
-                f"Evictions datapoint occurred at {fets.strftime('%Y-%m-%d %H:%M:%S')} UTC."
-            )
+        eviction_label = fets.strftime('%Y-%m-%d %H:%M:%S UTC')
+        eviction_tip = 'Absolute timestamp of the first positive CloudWatch Evictions datapoint.'
         eviction_color = '#d93025'
     else:
         eviction_label, eviction_color = 'None', '#188038'
@@ -226,3 +263,71 @@ def stat_cards_html(
         for label, val, unit, color, tip in cards
     )
     return f"<div class='cards'>{html}</div>"
+
+
+def loadgen_quality_html(loadgen):
+    """Render ECS task diagnostics without assigning whole-run validity."""
+    if not loadgen:
+        return ''
+
+    cpu_by_task = {row['task_id']: row for row in loadgen.get('generator_cpu_p95_by_task', [])}
+    throughput_by_task = {row['task_id']: row for row in loadgen.get('throughput_median_by_task', [])}
+    task_ids = sorted(
+        set(cpu_by_task) | set(throughput_by_task),
+        key=lambda task_id: (
+            cpu_by_task.get(task_id, {}).get(
+                'task_index',
+                throughput_by_task.get(task_id, {}).get('task_index', float('inf')),
+            ),
+            task_id,
+        ),
+    )
+
+    task_rows = []
+    for task_id in task_ids:
+        cpu = cpu_by_task.get(task_id, {})
+        throughput = throughput_by_task.get(task_id, {})
+        task_index = cpu.get('task_index') or throughput.get('task_index') or ''
+        az = cpu.get('availability_zone') or throughput.get('availability_zone') or 'unknown'
+        cpu_value = cpu.get('p95_pct')
+        throughput_value = throughput.get('median_ops_sec')
+        cpu_text = f"{float(cpu_value):.2f}%" if cpu_value is not None else 'n/a'
+        throughput_text = f"{float(throughput_value):,.0f}" if throughput_value is not None else 'n/a'
+        task_rows.append(
+            f"<tr><td>{_html(task_index)}</td><td><code>{_html(task_id)}</code></td>"
+            f"<td>{_html(az)}</td>"
+            f"<td>{_html(cpu_text)}</td>"
+            f"<td>{_html(throughput_text)}</td></tr>"
+        )
+
+    elasticache_az = loadgen.get('elasticache_availability_zone')
+    elasticache_az_source = loadgen.get('elasticache_availability_zone_source')
+    az_rows = []
+    for row in loadgen.get('throughput_by_az', []):
+        ratio = row.get('p90_to_p10')
+        ratio_text = f"{float(ratio):.2f}" if ratio is not None else 'n/a'
+        az = row.get('availability_zone', 'unknown')
+        if az == elasticache_az:
+            if elasticache_az_source == 'inferred_from_memtier_task_p50_latency':
+                az = f"{az} — ElastiCache AZ (inferred from memtier task latency)"
+            else:
+                az = f"{az} — ElastiCache AZ"
+        az_rows.append(
+            f"<tr><td>{_html(az)}</td>"
+            f"<td>{_html(row.get('task_count', ''))}</td>"
+            f"<td>{float(row.get('median_ops_sec', 0)):,.0f}</td>"
+            f"<td>{_html(ratio_text)}</td></tr>"
+        )
+
+    return (
+        "<div class='ecs-task-quality'>"
+        "<div class='quality-grid'><div class='quality-table'>"
+        "<table><thead><tr><th>#</th><th>ECS Task ID</th><th>AZ</th><th>CPU p95</th>"
+        "<th>Median current ops/sec</th></tr></thead><tbody>"
+        + ''.join(task_rows)
+        + "</tbody></table></div><div class='quality-table'>"
+        "<table><thead><tr><th>AZ</th><th>ECS Tasks</th><th>Median ops/sec</th>"
+        "<th>p90/p10</th></tr></thead><tbody>"
+        + ''.join(az_rows)
+        + "</tbody></table></div></div></div>"
+    )

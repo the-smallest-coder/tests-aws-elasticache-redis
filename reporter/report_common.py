@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 
 ECS_ENV_VARS = ("S3_BUCKET", "S3_PREFIX", "REPORT_TIMESTAMP", "CLUSTER_ID")
-GENERATOR_SCHEMA_VERSION = "2026-05-plan4"
+GENERATOR_SCHEMA_VERSION = "2026-08-loadgen-quality-v2"
 Normalizer = Callable[[Any], float | None]
 
 
@@ -37,6 +37,7 @@ class MetricSpec:
     delta_mode: str = "absolute"
     none_label: str = "n/a"
     normalizer: Normalizer | None = None
+    warning_above: float | None = None
 
 
 def get_env_var(name: str) -> str:
@@ -181,8 +182,6 @@ def inspect_run_directory(run_dir: Path) -> dict[str, Any]:
     else:
         info["warnings"].append("Missing report_status.json.")
 
-    if not canonical_jsons:
-        info["warnings"].append("Missing canonical results_*.json.")
     if not info["files"]["memtier_logs"]:
         info["warnings"].append("Missing memtier logs under logs/loadgen.")
     if not info["files"]["memtier_minute_artifact"] or not info["files"]["memtier_totals_artifacts"]:
@@ -226,6 +225,16 @@ def inspect_run_directory(run_dir: Path) -> dict[str, Any]:
     if local_summary and not info["local_ready"]:
         info["warnings"].append("results_local.json is legacy/incomplete for current schema/readiness checks.")
 
+    # A canonical results_*.json is only ever written by the S3-upload/ECS
+    # pipeline (see run_uploaded_report in report_generator.py); the local
+    # `generate` command deliberately never writes one, so it doesn't
+    # clobber a canonical report later downloaded for the same run (see its
+    # comment there). A purely local run is therefore permanently without
+    # one by design -- only warn when there's also no ready local report to
+    # fall back on, i.e. when this run has nothing usable at all.
+    if not canonical_jsons and not info["local_ready"]:
+        info["warnings"].append("Missing canonical results_*.json.")
+
     if status is not None:
         status_complete = bool(status.get("complete") is True)
         status_has_outputs = bool(
@@ -256,6 +265,14 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def enrich_summary_meta(summary: dict[str, Any], cluster_details: dict[str, Any] | None) -> None:
     meta = summary.setdefault("meta", {})
+    ecs = summary.setdefault("ecs", {})
+    if "service_cpu_time_avg_pct" not in ecs and "avg_cpu_pct" in ecs:
+        ecs["service_cpu_time_avg_pct"] = ecs.pop("avg_cpu_pct")
+    if "service_cpu_time_peak_pct" not in ecs and "max_cpu_pct" in ecs:
+        ecs["service_cpu_time_peak_pct"] = ecs.pop("max_cpu_pct")
+    expected_task_count = get_nested(summary, ("loadgen", "expected_task_count"))
+    if not ecs.get("task_count") and expected_task_count is not None:
+        ecs["task_count"] = expected_task_count
     if not cluster_details:
         return
 
@@ -267,11 +284,16 @@ def enrich_summary_meta(summary: dict[str, Any], cluster_details: dict[str, Any]
     meta["engine_type"] = meta.get("engine_type") or elasticache.get("engine") or ""
     meta["engine_version"] = meta.get("engine_version") or elasticache.get("engine_version_configured") or ""
     meta["node_type"] = meta.get("node_type") or elasticache.get("node_type") or ""
+    meta["node_memory_bytes"] = meta.get("node_memory_bytes") or elasticache.get("node_memory_bytes") or ""
+    meta["node_hourly_usd"] = meta.get("node_hourly_usd") or elasticache.get("node_hourly_usd") or ""
+    meta["node_hourly_usd_source"] = meta.get("node_hourly_usd_source") or elasticache.get("node_hourly_usd_source") or ""
+    meta["node_hourly_usd_reason"] = meta.get("node_hourly_usd_reason") or elasticache.get("node_hourly_usd_reason") or ""
     meta["node_count"] = meta.get("node_count") or elasticache.get("num_cache_nodes") or ""
     if not meta.get("cluster_mode"):
         meta["cluster_mode"] = elasticache.get("cluster_mode_enabled")
-    if "task_count" not in summary.get("ecs", {}):
-        summary.setdefault("ecs", {})["task_count"] = memtier.get("task_count")
+    memtier_task_count = memtier.get("task_count")
+    if not ecs.get("task_count") and memtier_task_count:
+        ecs["task_count"] = memtier_task_count
 
 
 def load_run(role: str, raw_path: str) -> RunData:

@@ -10,6 +10,10 @@ terraform {
       source  = "hashicorp/time"
       version = "~> 0.10"
     }
+    external = {
+      source  = "hashicorp/external"
+      version = "~> 2.3"
+    }
   }
 }
 
@@ -19,9 +23,9 @@ provider "aws" {
   default_tags {
     tags = merge(
       {
-        Project     = var.project_name
-        ManagedBy   = "Terraform"
-        Purpose     = "ElastiCache Performance Testing"
+        Project   = var.project_name
+        ManagedBy = "Terraform"
+        Purpose   = "ElastiCache Performance Testing"
       },
       var.tags
     )

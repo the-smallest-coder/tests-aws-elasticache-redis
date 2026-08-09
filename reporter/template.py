@@ -64,6 +64,13 @@ body {
 .group-badge.latency  { background: #fce8e6; color: #b3261e; }
 .group-badge.deepdive { background: #f3e5f5; color: #6a1b9a; }
 .group-header::after { content: ''; flex: 1; height: 1px; background: #e0e4ea; }
+.ecs-task-quality { padding: 8px 12px 12px; }
+.quality-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr); gap: 14px; }
+.quality-table { overflow-x: auto; background: #fff; border: 1px solid #e0e4ea; border-radius: 10px; padding: 12px; }
+.quality-table table { width: 100%; border-collapse: collapse; }
+.quality-table th, .quality-table td { padding: 8px; border-top: 1px solid #edf2f7; text-align: left; white-space: nowrap; }
+.quality-table th { color: #5f6368; font-size: 10px; text-transform: uppercase; }
+@media (max-width: 900px) { .quality-grid { grid-template-columns: 1fr; } }
 #copy-btn {
   position: fixed; top: 16px; right: 20px; z-index: 9999;
   display: flex; align-items: center; gap: 6px;
@@ -142,8 +149,8 @@ def render_html(
     cards_html: str,
     chart_memtier_html: str,
     chart_infra_html: str,
-    chart_client_latency_html: str,
     chart_deep_dive_html: str,
+    loadgen_quality_html: str = "",
 ) -> str:
     """Assemble the full standalone single-run HTML report page."""
     escaped_cluster_id = escape(str(cluster_id), quote=True)
@@ -189,15 +196,7 @@ def render_html(
       <h2>Infrastructure</h2>
       <span class="group-badge infra">report window</span>
     </div>
-    <div class="chart-wrap">{chart_infra_html}</div>
-  </div>
-
-  <div class="chart-group">
-    <div class="group-header">
-      <h2>Client Latency</h2>
-      <span class="group-badge latency">ECS EMF</span>
-    </div>
-    <div class="chart-wrap">{chart_client_latency_html}</div>
+    <div class="chart-wrap">{chart_infra_html}{loadgen_quality_html}</div>
   </div>
 
   <div class="chart-group">

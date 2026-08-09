@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from html import escape
 from io import StringIO
 import json
 import os
@@ -12,12 +13,14 @@ from report_common import ECS_ENV_VARS, inspect_run_directory
 from report_compare import run_compare_report
 from helpers import read_file_content
 from parsers import (
+    parse_container_insights_logs,
     parse_metrics_csv,
     parse_memtier_extra_stats,
+    parse_memtier_logs,
 )
 from summary import build_summary
-from cards import header_pills, stat_cards_html
-from charts import build_memtier_figure, build_infra_figure, build_client_latency_figure, build_elasticache_deep_dive_figure
+from cards import header_pills, loadgen_quality_html, stat_cards_html
+from charts import build_memtier_figure, build_infra_panels, build_elasticache_deep_dive_figure
 from template import render_html
 
 
@@ -26,15 +29,18 @@ def build_parser() -> argparse.ArgumentParser:
         description="Generate ElastiCache reports. No args uses ECS env vars; local comparison uses the compare command.",
     )
     subparsers = parser.add_subparsers(dest="command")
-    compare = subparsers.add_parser("compare", help="Compare two local results_local.json runs.")
-    compare.add_argument("baseline", help="Baseline results_local.json path or its parent run directory.")
-    compare.add_argument("candidate", help="Candidate results_local.json path or its parent run directory.")
+    compare = subparsers.add_parser("compare", help="Compare two results_<run>.json runs.")
+    compare.add_argument("baseline", help="Baseline results_<run>.json path or its parent run directory.")
+    compare.add_argument("candidate", help="Candidate results_<run>.json path or its parent run directory.")
     compare.add_argument(
         "-o",
         "--output",
         help="Output HTML path. Defaults to results/comparisons/<baseline>_vs_<candidate>.html.",
     )
-    generate = subparsers.add_parser("generate", help="Build results_local.json from local CSVs and logs.")
+    generate = subparsers.add_parser(
+        "generate",
+        help="Build results_local.{html,json} from local CSVs and logs (never overwrites a canonical report downloaded from AWS).",
+    )
     generate.add_argument("run_dir", help="Path to a run results directory (containing metrics/ and logs/).")
     generate.add_argument("--engine-type", default="", help="e.g. redis or valkey")
     generate.add_argument("--engine-version", default="", help="e.g. 7.1")
@@ -137,9 +143,37 @@ def _config_from_env() -> dict[str, str]:
         "engine_type": os.environ.get("ENGINE_TYPE", ""),
         "engine_version": os.environ.get("ENGINE_VERSION", ""),
         "node_type": os.environ.get("NODE_TYPE", ""),
+        "node_memory_bytes": os.environ.get("NODE_MEMORY_BYTES", ""),
+        "node_hourly_usd": os.environ.get("NODE_HOURLY_USD", ""),
+        "node_hourly_usd_source": os.environ.get("NODE_HOURLY_USD_SOURCE", ""),
+        "node_hourly_usd_reason": os.environ.get("NODE_HOURLY_USD_REASON", ""),
         "node_count": os.environ.get("NODE_COUNT", ""),
         "cluster_mode": os.environ.get("CLUSTER_MODE", "false"),
     }
+
+
+def _config_from_cluster_details(cluster_details: dict) -> dict[str, str]:
+    elasticache = cluster_details.get("elasticache", {}) if cluster_details else {}
+    return {
+        "engine_type": elasticache.get("engine", ""),
+        "engine_version": elasticache.get("engine_version_configured", ""),
+        "node_type": elasticache.get("node_type", ""),
+        "node_memory_bytes": elasticache.get("node_memory_bytes", ""),
+        "node_hourly_usd": elasticache.get("node_hourly_usd", ""),
+        "node_hourly_usd_source": elasticache.get("node_hourly_usd_source", ""),
+        "node_hourly_usd_reason": elasticache.get("node_hourly_usd_reason", ""),
+        "elasticache_availability_zone": elasticache.get("availability_zone", ""),
+        "node_count": elasticache.get("num_cache_nodes", ""),
+        "cluster_mode": elasticache.get("cluster_mode_enabled", ""),
+    }
+
+
+def _merge_missing_config(config: dict | None, extra_config: dict | None) -> dict:
+    merged = dict(config or {})
+    for key, value in (extra_config or {}).items():
+        if value not in (None, "") and not merged.get(key):
+            merged[key] = str(value)
+    return merged
 
 
 def _warn_if_cache_hit_rate_missing(metrics_df, source: str) -> None:
@@ -220,6 +254,63 @@ def _read_uploaded_log_contents(logs_prefix: str) -> list[tuple[str, str]]:
     return _read_s3_prefix_contents(logs_prefix, (".txt",)) if logs_prefix else []
 
 
+def _read_local_container_insights_contents(logs_dir: Path) -> list[tuple[str, str]]:
+    container_dir = logs_dir / "container-insights"
+    files = sorted(container_dir.rglob("*.txt")) if container_dir.exists() else []
+    return [(str(path), path.read_text(encoding="utf-8", errors="replace")) for path in files]
+
+
+def _container_insights_prefix_from_loadgen(logs_prefix: str) -> str:
+    marker = "/logs/loadgen/"
+    return logs_prefix.replace(marker, "/logs/container-insights/", 1) if marker in logs_prefix else ""
+
+
+def _read_uploaded_container_insights_contents(logs_prefix: str) -> list[tuple[str, str]]:
+    configured = os.environ.get("CONTAINER_INSIGHTS_LOGS_PREFIX", "")
+    prefix = configured or _container_insights_prefix_from_loadgen(logs_prefix)
+    return _read_s3_prefix_contents(prefix, (".txt",)) if prefix else []
+
+
+def _parse_container_insights_entries(entries: list[tuple[str, str]]):
+    import pandas as pd
+
+    task_frames = []
+    service_frames = []
+    for _source, content in entries:
+        task_df, service_df = parse_container_insights_logs(content)
+        if not task_df.empty:
+            task_frames.append(task_df)
+        if not service_df.empty:
+            service_frames.append(service_df)
+    tasks = pd.concat(task_frames, ignore_index=True) if task_frames else pd.DataFrame()
+    services = pd.concat(service_frames, ignore_index=True) if service_frames else pd.DataFrame()
+    if not tasks.empty:
+        tasks = tasks.drop_duplicates(["Timestamp", "TaskId"], keep="last")
+    if not services.empty:
+        services = services.drop_duplicates(["Timestamp"], keep="last")
+    return tasks, services
+
+
+def _task_az_map(container_insights_task_df) -> dict[str, str]:
+    if container_insights_task_df is None or container_insights_task_df.empty:
+        return {}
+    required = {"TaskId", "AvailabilityZone"}
+    if not required.issubset(container_insights_task_df.columns):
+        return {}
+    known = container_insights_task_df[
+        container_insights_task_df["AvailabilityZone"].notna()
+        & container_insights_task_df["AvailabilityZone"].astype(str).ne("unknown")
+    ]
+    if known.empty:
+        return {}
+    return {
+        str(task_id): str(availability_zone)
+        for task_id, availability_zone in (
+            known.groupby("TaskId")["AvailabilityZone"].last().items()
+        )
+    }
+
+
 def _read_uploaded_memtier_artifact_contents(logs_prefix: str) -> list[tuple[str, str]]:
     return _read_s3_prefix_contents(logs_prefix, (".minute.csv", ".totals.json")) if logs_prefix else []
 
@@ -250,9 +341,13 @@ def _parse_memtier_log_entries(entries: list[tuple[str, str]]):
     last_message_ts = None
     first_oom_rejection_ts = None
     oom_frames = []
+    memtier_frames = []
     for source, content in memtier_entries:
         stream = _memtier_stream_from_source(source)
         stats = parse_memtier_extra_stats(content, stream)
+        parsed = parse_memtier_logs(content, stream)
+        if not parsed.empty:
+            memtier_frames.append(parsed)
         for key, current in (
             ("first_message_ts", first_message_ts),
             ("last_message_ts", last_message_ts),
@@ -275,7 +370,11 @@ def _parse_memtier_log_entries(entries: list[tuple[str, str]]):
     if not oom_df.empty:
         oom_df = oom_df.groupby("Timestamp", as_index=False)["OOM_events"].sum()
 
-    return pd.DataFrame(), {
+    memtier_df = pd.concat(memtier_frames, ignore_index=True) if memtier_frames else pd.DataFrame()
+    if not memtier_df.empty:
+        memtier_df = memtier_df.sort_values(["Timestamp", "Stream"]).reset_index(drop=True)
+
+    return memtier_df, {
         "first_message_ts": first_message_ts,
         "last_message_ts": last_message_ts,
         "first_oom_rejection_ts": first_oom_rejection_ts,
@@ -285,6 +384,7 @@ def _parse_memtier_log_entries(entries: list[tuple[str, str]]):
 
 _MINUTE_COLUMN_ALIASES = {
     "Timestamp": ("Timestamp", "timestamp", "minute_utc", "minute_start_utc"),
+    "task_count_present": ("task_count_present",),
     "throughput_sum": ("throughput_sum",),
     "latency_weighted_avg": ("latency_weighted_avg",),
     "throughput_median": ("throughput_median",),
@@ -300,6 +400,15 @@ _MINUTE_COLUMN_ALIASES = {
     "latency_min": ("latency_min",),
     "latency_max": ("latency_max",),
 }
+
+# Columns that older reporter images' _memtier.minute.csv artifacts may not
+# have written yet. loadgen_analysis.build_loadgen_summary() already treats
+# a missing task_count_present as "recompute from samples instead" (checks
+# `"task_count_present" in memtier_minute_df`); normalization must agree and
+# leave the column out entirely rather than hard-failing the whole artifact
+# or filling it with NaN (NaN would satisfy that `in` check while comparing
+# false against every minute, silently zeroing out task-count coverage).
+_MINUTE_OPTIONAL_COLUMNS = {"task_count_present"}
 
 _TOTAL_FIELD_ALIASES = {
     "throughput_avg": ("throughput_avg", "avg_throughput", "ops_per_sec", "ops_sec", "Ops/sec"),
@@ -326,9 +435,12 @@ def _normalize_memtier_minute_artifact(content: str, source: str):
     for canonical, aliases in _MINUTE_COLUMN_ALIASES.items():
         source_name = next((name for name in aliases if name in df.columns), None)
         if source_name is None:
+            if canonical in _MINUTE_OPTIONAL_COLUMNS:
+                continue
             raise ValueError(f"Memtier minute artifact {source} is missing required column {canonical}")
         rename[source_name] = canonical
-    df = df.rename(columns=rename)[list(_MINUTE_COLUMN_ALIASES)]
+    present_columns = [canonical for canonical in _MINUTE_COLUMN_ALIASES if canonical in rename.values()]
+    df = df.rename(columns=rename)[present_columns]
     df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True).dt.tz_localize(None)
     return df.sort_values("Timestamp").reset_index(drop=True)
 
@@ -424,6 +536,9 @@ def _memtier_dfs_from_log_entries(log_entries: list[tuple[str, str]]):
             "source": p["stream_id"],
             "throughput_avg": float(p["ops_per_sec"]),
             "latency_avg_ms": float(p["avg_latency_ms"]),
+            "p50_latency_ms": float(p["p50_latency_ms"]),
+            "p99_latency_ms": float(p["p99_latency_ms"]),
+            "p999_latency_ms": float(p["p999_latency_ms"]),
             "total_bandwidth_kbs": float(p["bandwidth_kbs"]),
         }
         for p in totals_list
@@ -437,6 +552,86 @@ def _memtier_dfs_from_log_entries(log_entries: list[tuple[str, str]]):
         totals_df = pd.DataFrame(columns=totals_cols)
 
     return combined_df, totals_df
+
+
+def _infra_panels_html(panels) -> str:
+    component_css = """\
+.infra-panels { width: 100%; }
+.infra-panel { height: auto; min-width: 0; }
+.infra-panel + .infra-panel { margin-top: 18px; }
+.infra-panel-title {
+  color: #2f4b73;
+  font-size: 16px;
+  line-height: 22px;
+  min-height: 22px;
+  text-align: center;
+}
+.infra-plot { height: 320px; width: 100%; }
+.infra-plot > div { height: 320px !important; width: 100% !important; }
+.infra-legend {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+  height: auto;
+  justify-content: center;
+  padding: 4px 12px 10px;
+}
+.infra-legend:empty { display: none; }
+.infra-legend-item {
+  align-items: center;
+  color: #44546a;
+  display: inline-flex;
+  font-size: 11px;
+  gap: 8px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.infra-legend-line {
+  background: var(--legend-color);
+  display: inline-block;
+  flex: 0 0 34px;
+  height: 3px;
+  width: 34px;
+}
+.infra-legend-line.dash {
+  background: repeating-linear-gradient(to right, var(--legend-color) 0 9px, transparent 9px 14px);
+}
+.infra-legend-line.dot {
+  background: repeating-linear-gradient(to right, var(--legend-color) 0 3px, transparent 3px 7px);
+}
+.infra-legend-line.dashdot {
+  background: repeating-linear-gradient(to right, var(--legend-color) 0 9px, transparent 9px 12px, var(--legend-color) 12px 15px, transparent 15px 20px);
+}
+"""
+    dash_classes = {
+        'dash': 'dash',
+        'dot': 'dot',
+        'dashdot': 'dashdot',
+        'longdash': 'dash',
+        'longdashdot': 'dashdot',
+    }
+    rendered = []
+    for panel in panels:
+        legend_items = ''.join(
+            "<span class='infra-legend-item'>"
+            f"<span class='infra-legend-line{(' ' + dash_classes[item['dash']]) if item['dash'] in dash_classes else ''}' "
+            f"style='--legend-color:{escape(item['color'], quote=True)}'></span>"
+            f"<span>{escape(item['name'])}</span></span>"
+            for item in panel['legend_items']
+        )
+        title = escape(panel['title'])
+        rendered.append(
+            "<div class='infra-panel'>"
+            f"<div class='infra-panel-title'>{title}</div>"
+            f"<div class='infra-plot'>{panel['figure'].to_html(include_plotlyjs=False, full_html=False)}</div>"
+            f"<div class='infra-legend'>{legend_items}</div>"
+            "</div>"
+        )
+    return (
+        "<style data-component='infra-panels'>" + component_css + "</style>"
+        "<div class='infra-panels'>" + ''.join(rendered) + "</div>"
+    )
 
 
 def create_report(
@@ -470,17 +665,42 @@ def create_report(
     ecs_window_df = _clip_to_time_window(ecs_df, x_min, x_max)
 
     fig_m = build_memtier_figure(memtier_minute_df, oom_df, metrics_window_df, x_min, x_max)
-    fig_i = build_infra_figure(ecs_window_df, metrics_window_df, cluster_id, config, x_min, x_max)
-    fig_l = build_client_latency_figure(ecs_window_df, x_min, x_max)
-    fig_d = build_elasticache_deep_dive_figure(metrics_window_df, cluster_id, config, x_min, x_max)
-
     time_range = _format_time_range(x_min, x_max)
     cluster_mode = str(config.get("cluster_mode", "false")).lower() == "true"
     id_label = "Cluster" if cluster_mode else "Replication Group"
 
     summary = build_summary(
-        metrics_window_df, memtier_minute_df, memtier_totals_df, ecs_window_df, extra_stats, config, cluster_id, time_range
+        metrics_window_df,
+        memtier_minute_df,
+        memtier_totals_df,
+        ecs_window_df,
+        {**extra_stats, "memtier_samples_df": logs_df},
+        config,
+        cluster_id,
+        time_range,
     )
+    loadgen = summary.get("loadgen", {})
+    task_index_by_id = {
+        row["task_id"]: row["task_index"]
+        for row in (
+            loadgen.get("generator_cpu_p95_by_task", [])
+            + loadgen.get("throughput_median_by_task", [])
+        )
+        if row.get("task_index") is not None
+    }
+    infra_panels = build_infra_panels(
+        ecs_window_df,
+        metrics_window_df,
+        cluster_id,
+        config,
+        x_min,
+        x_max,
+        task_az_map=_task_az_map(extra_stats.get("container_insights_task_df")),
+        task_index_by_id=task_index_by_id,
+        elasticache_az=loadgen.get("elasticache_availability_zone"),
+        elasticache_az_source=loadgen.get("elasticache_availability_zone_source"),
+    )
+    fig_d = build_elasticache_deep_dive_figure(metrics_window_df, cluster_id, config, x_min, x_max)
     summary_json = json.dumps(summary, indent=2, default=str)
 
     html_content = render_html(
@@ -497,10 +717,11 @@ def create_report(
             extra_stats=extra_stats,
             config=config,
             cluster_id=cluster_id,
+            loadgen=summary.get("loadgen"),
         ),
+        loadgen_quality_html=loadgen_quality_html(summary.get("loadgen")),
         chart_memtier_html=fig_m.to_html(include_plotlyjs="cdn", full_html=False),
-        chart_infra_html=fig_i.to_html(include_plotlyjs=False, full_html=False),
-        chart_client_latency_html=fig_l.to_html(include_plotlyjs=False, full_html=False),
+        chart_infra_html=_infra_panels_html(infra_panels),
         chart_deep_dive_html=fig_d.to_html(include_plotlyjs=False, full_html=False),
     )
     return html_content, summary_json
@@ -540,6 +761,10 @@ def run_generate_report(run_dir: str, config: dict) -> None:
 
     print(f"Reading {len(log_entries)} loadgen log file(s)")
     logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
+    ci_entries = _read_local_container_insights_contents(logs_dir)
+    ci_task_df, ci_service_df = _parse_container_insights_entries(ci_entries)
+    extra_stats["container_insights_task_df"] = ci_task_df
+    extra_stats["container_insights_service_df"] = ci_service_df
     extra_stats["source_mode"] = "local"
     extra_stats["memtier_window_source"] = "memtier_log_messages"
     extra_stats["artifact_source"] = "generated" if artifact_entries else "missing"
@@ -555,6 +780,15 @@ def run_generate_report(run_dir: str, config: dict) -> None:
 
     _warn_if_cache_hit_rate_missing(metrics_df, str(ec_csvs[0]))
 
+    cluster_details_path = run_path / "cluster_details.json"
+    cluster_details = None
+    if cluster_details_path.exists():
+        try:
+            cluster_details = json.loads(cluster_details_path.read_text(encoding="utf-8"))
+            config = _merge_missing_config(config, _config_from_cluster_details(cluster_details))
+        except Exception as exc:
+            print(f"Warning: failed to read cluster_details.json before rendering: {exc}")
+
     html_content, summary_json = create_report(
         metrics_df=metrics_df,
         logs_df=logs_df,
@@ -567,32 +801,24 @@ def run_generate_report(run_dir: str, config: dict) -> None:
         extra_stats=extra_stats,
     )
 
-    cluster_details_path = run_path / "cluster_details.json"
-    if cluster_details_path.exists():
+    if cluster_details:
         try:
             from report_common import enrich_summary_meta
-            cluster_details = json.loads(cluster_details_path.read_text(encoding="utf-8"))
             summary_obj = json.loads(summary_json)
             enrich_summary_meta(summary_obj, cluster_details)
             summary_json = json.dumps(summary_obj, indent=2, default=str)
         except Exception as exc:
             print(f"Warning: failed to enrich summary with cluster_details.json: {exc}")
 
+    # Local regeneration must never replace the canonical report downloaded
+    # from AWS for this immutable run.
     out_path = run_path / "results_local.json"
     out_path.write_text(summary_json, encoding="utf-8")
     print(f"Written: {out_path}")
 
-    canonical_json_path = run_path / f"results_{run_path.name}.json"
-    canonical_json_path.write_text(summary_json, encoding="utf-8")
-    print(f"Written: {canonical_json_path}")
-
     html_path = run_path / "results_local.html"
     html_path.write_text(html_content, encoding="utf-8")
     print(f"Written: {html_path}")
-
-    canonical_html_path = run_path / f"results_{run_path.name}.html"
-    canonical_html_path.write_text(html_content, encoding="utf-8")
-    print(f"Written: {canonical_html_path}")
 
 
 def run_uploaded_report() -> None:
@@ -641,6 +867,10 @@ def run_uploaded_report() -> None:
         sys.exit(2)
     print(f"Reading {len(log_entries)} loadgen log file(s)")
     logs_df, extra_stats = _parse_memtier_log_entries(log_entries)
+    ci_entries = _read_uploaded_container_insights_contents(logs_prefix)
+    ci_task_df, ci_service_df = _parse_container_insights_entries(ci_entries)
+    extra_stats["container_insights_task_df"] = ci_task_df
+    extra_stats["container_insights_service_df"] = ci_service_df
     extra_stats["source_mode"] = "uploaded"
     extra_stats["memtier_window_source"] = "memtier_log_messages"
     extra_stats["artifact_source"] = "uploaded"
@@ -668,6 +898,18 @@ def run_uploaded_report() -> None:
         except Exception as exc:
             print(f"Warning: failed to read ECS metrics: {exc}")
 
+    cluster_details_uri = f"s3://{output_bucket}/{output_prefix}{timestamp}/cluster_details.json"
+    cluster_details = None
+    report_config = _config_from_env()
+    try:
+        cluster_details = json.loads(read_file_content(cluster_details_uri))
+        report_config = _merge_missing_config(
+            report_config,
+            _config_from_cluster_details(cluster_details),
+        )
+    except Exception:
+        pass  # cluster_details.json is optional
+
     html_content, summary_json = create_report(
         metrics_df=metrics_df,
         logs_df=logs_df,
@@ -676,20 +918,16 @@ def run_uploaded_report() -> None:
         cluster_id=cluster_id,
         suffix=suffix,
         ecs_metrics_df=ecs_df,
-        config=_config_from_env(),
+        config=report_config,
         extra_stats=extra_stats,
     )
 
-    cluster_details_uri = f"s3://{output_bucket}/{output_prefix}{timestamp}/cluster_details.json"
-    try:
+    if cluster_details:
         from report_common import enrich_summary_meta
-        cluster_details = json.loads(read_file_content(cluster_details_uri))
         summary_obj = json.loads(summary_json)
         enrich_summary_meta(summary_obj, cluster_details)
         summary_json = json.dumps(summary_obj, indent=2, default=str)
         print(f"Summary enriched from {cluster_details_uri}")
-    except Exception:
-        pass  # cluster_details.json is optional
 
     output_key = f"{output_prefix}{timestamp}/results_{suffix}.html"
     output_json_key = re.sub(r"\.html$", ".json", output_key)

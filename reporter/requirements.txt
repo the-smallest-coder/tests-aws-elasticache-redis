@@ -1,3 +1,8 @@
 boto3>=1.35.81
 pandas>=2.2.3
-plotly>=5.24.1
+# Pinned exactly, unlike boto3/pandas above: charts.py reads plotly's
+# private subplot internals (fig._grid_ref, trace_kwargs, layout_keys) that
+# aren't part of its public API and can change shape without notice on any
+# release. Verified working against this exact version; bump deliberately
+# and re-verify build_infra_panels, not via a floating >= constraint.
+plotly==6.9.0

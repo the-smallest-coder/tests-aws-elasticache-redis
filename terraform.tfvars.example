@@ -16,6 +16,7 @@ cluster_mode_enabled = false            # Set to true for cluster mode testing
 
 # Non-cluster mode settings
 num_cache_nodes = 1                     # Number of nodes (1 = single node, 2+ = primary + replicas)
+# elasticache_availability_zone = "us-east-1a"  # Pin the node's AZ (single-node, non-cluster-mode only). Empty = let AWS choose.
 
 # Cluster mode settings (only used when cluster_mode_enabled = true)
 num_node_groups         = 1             # Number of shards

@@ -30,7 +30,11 @@ resource "aws_s3_object" "cluster_details" {
       engine                     = var.engine_type
       engine_version_configured  = var.engine_version
       node_type                  = var.node_type
+      availability_zone          = local.elasticache_pinned_az
       node_memory_bytes          = lookup(local._node_memory_bytes, var.node_type, 0)
+      node_hourly_usd            = local._node_hourly_usd
+      node_hourly_usd_source     = local._node_hourly_usd_source
+      node_hourly_usd_reason     = local._node_hourly_usd_reason
       cluster_mode_enabled       = var.cluster_mode_enabled
       num_cache_nodes            = var.cluster_mode_enabled ? null : var.num_cache_nodes
       num_node_groups            = var.cluster_mode_enabled ? var.num_node_groups : null
@@ -47,10 +51,10 @@ resource "aws_s3_object" "cluster_details" {
       cloudwatch_log_group       = aws_cloudwatch_log_group.elasticache.name
 
       # Live endpoints (resolved after cluster is created)
-      primary_endpoint           = var.cluster_mode_enabled ? null : aws_elasticache_replication_group.main.primary_endpoint_address
-      reader_endpoint            = var.cluster_mode_enabled ? null : aws_elasticache_replication_group.main.reader_endpoint_address
-      configuration_endpoint     = var.cluster_mode_enabled ? aws_elasticache_replication_group.main.configuration_endpoint_address : null
-      replication_group_arn      = aws_elasticache_replication_group.main.arn
+      primary_endpoint       = var.cluster_mode_enabled ? null : aws_elasticache_replication_group.main.primary_endpoint_address
+      reader_endpoint        = var.cluster_mode_enabled ? null : aws_elasticache_replication_group.main.reader_endpoint_address
+      configuration_endpoint = var.cluster_mode_enabled ? aws_elasticache_replication_group.main.configuration_endpoint_address : null
+      replication_group_arn  = aws_elasticache_replication_group.main.arn
     }
 
     # ----- memtier_benchmark configuration -----
@@ -65,7 +69,7 @@ resource "aws_s3_object" "cluster_details" {
       key_maximum       = local.memtier_key_maximum
       key_maximum_total = local.memtier_key_maximum * var.loadgen_task_count
       key_maximum_auto  = var.loadgen_memtier_key_maximum == 0
-      auto_sizing       = {
+      auto_sizing = {
         writable_shard_count = local._writable_shard_count
         target_fill_bytes    = local._target_fill_bytes
         target_total_keys    = local._target_total_keys
@@ -78,10 +82,10 @@ resource "aws_s3_object" "cluster_details" {
 
     # ----- ECS load generator resources -----
     ecs = {
-      cluster_name    = local.loadgen_cluster_name
-      service_name    = local.loadgen_service_name
-      fargate_cpu     = var.loadgen_cpu
-      fargate_memory  = var.loadgen_memory
+      cluster_name            = local.loadgen_cluster_name
+      service_name            = local.loadgen_service_name
+      fargate_cpu             = var.loadgen_cpu
+      fargate_memory          = var.loadgen_memory
       container_insights_mode = var.ecs_container_insights_mode
     }
 

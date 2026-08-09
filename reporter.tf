@@ -10,6 +10,7 @@ locals {
     "cards.py",
     "template.py",
     "summary.py",
+    "loadgen_analysis.py",
     "exporter.py",
     "memtier_etl.py",
   ])
@@ -101,8 +102,13 @@ resource "aws_ecs_task_definition" "reporter" {
         <<-EOT
           set -e
 
-          # Install required Python dependencies (minimum versions; latest compatible release is used)
-          pip install --no-cache-dir "boto3>=1.35.81" "pandas>=2.2.3" "plotly>=5.24.1"
+          # boto3/pandas: minimum versions, latest compatible release is used.
+          # plotly: exact pin -- charts.py reads its private subplot
+          # internals (fig._grid_ref, trace_kwargs, layout_keys), which can
+          # change shape on any release with no warning. Keep this in sync
+          # with reporter/requirements.txt; bump deliberately and re-verify
+          # build_infra_panels, not via a floating >= constraint.
+          pip install --no-cache-dir "boto3>=1.35.81" "pandas>=2.2.3" "plotly==6.9.0"
 
           # Download all reporter modules from S3
           python - << 'PY'
@@ -121,6 +127,7 @@ modules = [
     "cards.py",
     "template.py",
     "summary.py",
+    "loadgen_analysis.py",
     "exporter.py",
     "memtier_etl.py",
 ]
@@ -224,6 +231,22 @@ PY
         {
           name  = "NODE_TYPE"
           value = var.node_type
+        },
+        {
+          name  = "NODE_MEMORY_BYTES"
+          value = tostring(local._advertised_bytes)
+        },
+        {
+          name  = "NODE_HOURLY_USD"
+          value = local._node_hourly_usd != null ? tostring(local._node_hourly_usd) : ""
+        },
+        {
+          name  = "NODE_HOURLY_USD_SOURCE"
+          value = local._node_hourly_usd_source
+        },
+        {
+          name  = "NODE_HOURLY_USD_REASON"
+          value = local._node_hourly_usd_reason
         },
         {
           name  = "NODE_COUNT"

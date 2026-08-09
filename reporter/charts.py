@@ -15,7 +15,8 @@ from helpers import (
     C_CURR_CONN, C_MEM_FRAG,
     C_LAT_P50, C_LAT_P99, C_LAT_P999, C_LAT_WORST99, C_LAT_WORST999,
     metric_filter, cache_hit_rate_df, shorten_dim, select_mem_dims, cloudwatch_eviction_series,
-    client_latency_series,
+    client_latency_series, ecs_task_metric_distribution, ecs_task_metric_rows,
+    ecs_task_index_map,
 )
 
 ABS_TIME_HOVER = "%{customdata}"
@@ -45,6 +46,17 @@ def _plot_x(values):
 
 def _plot_times(values):
     return [_format_timestamp(value) for value in values]
+
+
+def _plot_times_with_counts(timestamps, counts):
+    return [[time, int(count)] for time, count in zip(_plot_times(timestamps), counts)]
+
+
+def _task_distribution_hover(unit, value_format=":.1f"):
+    return (
+        f"%{{customdata[0]}}<br><b>%{{y{value_format}}} {unit}</b>"
+        "<br>sources: %{customdata[1]:.0f}<extra></extra>"
+    )
 
 
 def _set_absolute_xaxes(fig, rows, x_min, x_max):
@@ -280,81 +292,326 @@ def build_memtier_figure(memtier_df, oom_df, metrics_df, x_min, x_max):
 #  GROUP 2 — Infrastructure figure                                     #
 # ------------------------------------------------------------------ #
 
-def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max=None):
-    """Build a 4-row figure: CPU, Network TX, ECS Memory, ElastiCache Memory.
+def _add_ecs_task_latency_traces(fig, ecs_df, row, legend="legend5"):
+    """Add ECS task EMF latency percentiles to an existing subplot row."""
+    series = client_latency_series(ecs_df)
+    traces = (
+        ("p50_ms", "ECS task p50", C_LAT_P50, "solid"),
+        ("p99_ms", "ECS task p99", C_LAT_P99, "solid"),
+        ("p999_ms", "ECS task p99.9", C_LAT_P999, "solid"),
+        ("worst_stream_p99_ms", "Worst ECS task p99", C_LAT_WORST99, "dash"),
+        ("worst_stream_p999_ms", "Worst ECS task p99.9", C_LAT_WORST999, "dash"),
+    )
+    shown = False
+    if not series.empty:
+        for column, label, color, dash in traces:
+            points = series[["Timestamp", column]].dropna()
+            if points.empty:
+                continue
+            fig.add_trace(go.Scatter(
+                x=_plot_x(points["Timestamp"]), y=points[column],
+                customdata=_plot_times(points["Timestamp"]),
+                name=label, mode="lines",
+                line=dict(**LINE_OPTS, color=color, dash=dash),
+                legend=legend,
+                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.3f}} ms</b><extra></extra>",
+            ), row=row, col=1)
+            shown = True
+    if not shown:
+        _add_empty_panel_annotation(fig, row, "No ECS task latency datapoints")
+    return shown
+
+
+EMPTY_STATE_ANNOTATION_NAME = 'empty-state'
+
+
+def _add_empty_panel_annotation(fig, row, text):
+    """Place an empty-state message in the centre of one subplot row.
+
+    Tagged with ``name=EMPTY_STATE_ANNOTATION_NAME`` so ``build_infra_panels``
+    can identify and copy it structurally, rather than by matching the
+    message text (which would silently break for any future empty-state
+    message that doesn't happen to start with "No ").
+    """
+    subplot_ref = fig._grid_ref[row - 1][0][0]
+    xaxis = subplot_ref.trace_kwargs['xaxis']
+    yaxis = subplot_ref.trace_kwargs['yaxis']
+    fig.add_annotation(
+        text=text,
+        name=EMPTY_STATE_ANNOTATION_NAME,
+        x=0.5,
+        y=0.5,
+        xref=f"{xaxis} domain",
+        yref=f"{yaxis} domain",
+        showarrow=False,
+    )
+
+
+def _legend_id_for_row(row):
+    """Return the Plotly legend id dedicated to one infrastructure row."""
+    return "legend" if row == 1 else f"legend{row}"
+
+
+def build_infra_figure(
+    ecs_df,
+    metrics_df,
+    cluster_id,
+    config,
+    x_min=None,
+    x_max=None,
+    task_az_map=None,
+    task_index_by_id=None,
+    elasticache_az=None,
+    elasticache_az_source=None,
+):
+    """Build infrastructure panels with dynamic per-AZ ECS CPU detail.
 
     Returns a Plotly Figure ready for ``to_html()``.
     """
     config = config or {}
+    task_cpu_rows = ecs_task_metric_rows(
+        ecs_df, 'TaskCpuUtilization', 'Average', task_az_map=task_az_map
+    )
+    known_cpu_rows = task_cpu_rows[
+        task_cpu_rows['AvailabilityZone'].astype(str) != 'unknown'
+    ].copy() if not task_cpu_rows.empty else task_cpu_rows
+    chart_task_az = dict(task_az_map or {})
+    if not task_cpu_rows.empty:
+        chart_task_az.update(
+            task_cpu_rows.groupby('TaskId')['AvailabilityZone'].last().astype(str).to_dict()
+        )
+    chart_task_ids = (
+        task_cpu_rows['TaskId'].astype(str).unique()
+        if not task_cpu_rows.empty else []
+    )
+    all_task_ids = sorted({*map(str, chart_task_ids), *map(str, (task_index_by_id or {}).keys())})
+    default_task_indexes = ecs_task_index_map(
+        all_task_ids,
+        task_az_map=chart_task_az,
+        elasticache_az=elasticache_az,
+    )
+    supplied_indexes = task_index_by_id or {}
+    used_indexes = set()
+    supplied_applied = set()
+    for task_id in all_task_ids:
+        supplied = supplied_indexes.get(task_id)
+        if isinstance(supplied, int) and supplied > 0 and supplied not in used_indexes:
+            default_task_indexes[task_id] = supplied
+            used_indexes.add(supplied)
+            supplied_applied.add(task_id)
+    next_index = 1
+    for task_id in all_task_ids:
+        if task_id in supplied_applied:
+            continue
+        while next_index in used_indexes:
+            next_index += 1
+        default_task_indexes[task_id] = next_index
+        used_indexes.add(next_index)
+    task_index_by_id = default_task_indexes
+    az_groups = [
+        (az, group.copy())
+        for az, group in known_cpu_rows.groupby('AvailabilityZone', sort=False)
+    ] if not known_cpu_rows.empty else []
+    az_groups.sort(key=lambda item: (
+        0 if item[0] == elasticache_az else 1,
+        item[0],
+    ))
+    az_count = len(az_groups)
+    network_row = 2 + az_count
+    ecs_memory_row = network_row + 1
+    cache_memory_row = network_row + 2
+    ecs_latency_row = cache_memory_row + 1
+    row_count = ecs_latency_row
+    subplot_titles = ["ECS Tasks — CPU Across Tasks (%)"]
+    for az, group in az_groups:
+        title = f"{az} — {group['TaskId'].nunique()} tasks"
+        if az == elasticache_az:
+            if elasticache_az_source == 'inferred_from_memtier_task_p50_latency':
+                title += " — ElastiCache AZ (inferred from memtier task latency)"
+            else:
+                title += " — ElastiCache AZ"
+        subplot_titles.append(title)
+    subplot_titles.extend((
+        "ECS Tasks — Network TX (KB/min)",
+        "ECS Tasks — Memory (MB)",
+        "ElastiCache Memory Usage (%)",
+        "ECS Task Latency (ms)",
+    ))
 
     fig = make_subplots(
-        rows=4, cols=1,
+        rows=row_count, cols=1,
         shared_xaxes=False,
-        vertical_spacing=0.15,
-        subplot_titles=(
-            "ECS Load Generator — CPU (%)",
-            "ECS Load Generator — Network TX (KB/min)",
-            "ECS Load Generator — Memory (MB)",
-            "ElastiCache Memory Usage (%)",
+        vertical_spacing=min(0.04, 0.24 / max(1, row_count - 1)),
+        specs=(
+            [[{"secondary_y": True}]]
+            + [[{"secondary_y": False}] for _ in az_groups]
+            + [
+                [{"secondary_y": True}],
+                [{"secondary_y": False}],
+                [{"secondary_y": False}],
+                [{"secondary_y": False}],
+            ]
         ),
-        row_heights=[0.25, 0.25, 0.25, 0.25],
+        subplot_titles=tuple(subplot_titles),
+        row_heights=[0.20] + ([0.14] * az_count) + [0.18, 0.16, 0.17, 0.15],
     )
 
     # ---- Row 1: ECS CPU + EngineCPU overlay ----
     if not ecs_df.empty:
-        cpu_df = metric_filter(ecs_df, 'CPUUtilization', 'Average')
-        if cpu_df.empty:
-            cpu_df = metric_filter(ecs_df, 'TaskCpuUtilization', 'Average')
-        if not cpu_df.empty:
-            for dim, group in cpu_df.groupby('Dimensions'):
+        cpu_dist = ecs_task_metric_distribution(ecs_df, 'TaskCpuUtilization', 'Average')
+        if not cpu_dist.empty:
+            cpu_custom = _plot_times_with_counts(cpu_dist['Timestamp'], cpu_dist['source_count'])
+            for column, label, color, dash in (
+                ('avg', 'CPU avg/task', C_CPU_ECS, 'solid'),
+                ('median', 'CPU median/task', C_CPU_ECS, 'dash'),
+                ('min', 'CPU min task', '#7cb342', 'dot'),
+                ('max', 'CPU max task', '#0b8043', 'dashdot'),
+            ):
                 fig.add_trace(go.Scatter(
-                    x=_plot_x(group['Timestamp']), y=group['Value'],
-                    customdata=_plot_times(group['Timestamp']),
-                    name=f"CPU – {shorten_dim(dim, cluster_id)}", mode='lines',
-                    line=dict(**LINE_OPTS, color=C_CPU_ECS),
-                    legend="legend",
-                    hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}}%</b><extra></extra>"
-                ), row=1, col=1)
+                    x=_plot_x(cpu_dist['Timestamp']), y=cpu_dist[column],
+                    customdata=cpu_custom,
+                    name=label, mode='lines',
+                    line=dict(**LINE_OPTS, color=color, dash=dash),
+                    legend=_legend_id_for_row(1),
+                    hovertemplate=_task_distribution_hover('%'),
+                ), row=1, col=1, secondary_y=False)
+            fig.add_trace(go.Scatter(
+                x=_plot_x(cpu_dist['Timestamp']), y=cpu_dist['source_count'],
+                customdata=_plot_times(cpu_dist['Timestamp']),
+                name="CPU source count", mode='lines',
+                line=dict(**LINE_OPTS, color='#546e7a', dash='dot'),
+                legend=_legend_id_for_row(1),
+                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.0f}} sources</b><extra></extra>"
+            ), row=1, col=1, secondary_y=True)
         else:
-            fig.add_annotation(text="No ECS CPU Metrics", xref="paper", yref="paper",
-                               x=0.5, y=0.75, showarrow=False)
+            cpu_df = metric_filter(ecs_df, 'CPUUtilization', 'Average')
+            if cpu_df.empty:
+                cpu_df = metric_filter(ecs_df, 'TaskCpuUtilization', 'Average')
+            if not cpu_df.empty:
+                for dim, group in cpu_df.groupby('Dimensions'):
+                    fig.add_trace(go.Scatter(
+                        x=_plot_x(group['Timestamp']), y=group['Value'],
+                        customdata=_plot_times(group['Timestamp']),
+                        name=f"CPU – {shorten_dim(dim, cluster_id)}", mode='lines',
+                        line=dict(**LINE_OPTS, color=C_CPU_ECS),
+                        legend=_legend_id_for_row(1),
+                        hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}}%</b><extra></extra>"
+                    ), row=1, col=1, secondary_y=False)
+            else:
+                _add_empty_panel_annotation(fig, 1, "No ECS CPU Metrics")
     else:
-        fig.add_annotation(text="No CPU Data", xref="paper", yref="paper",
-                           x=0.5, y=0.75, showarrow=False)
+        _add_empty_panel_annotation(fig, 1, "No CPU Data")
 
     if not metrics_df.empty:
         eng_cpu_df = metric_filter(metrics_df, 'EngineCPUUtilization', 'Average', 'CacheClusterId')
         if not eng_cpu_df.empty:
+            keep_dims = select_mem_dims(
+                eng_cpu_df['Dimensions'], config.get('node_count', 1)
+            )
+            eng_cpu_df = eng_cpu_df[eng_cpu_df['Dimensions'].isin(keep_dims)]
             for dim, group in eng_cpu_df.groupby('Dimensions'):
                 fig.add_trace(go.Scatter(
                     x=_plot_x(group['Timestamp']), y=group['Value'],
                     customdata=_plot_times(group['Timestamp']),
                     name=f"EngineCPU – {shorten_dim(dim, cluster_id)}", mode='lines',
                     line=dict(**LINE_OPTS, color=C_ENGINE_CPU, dash='dot'),
-                    legend="legend",
+                    legend=_legend_id_for_row(1),
                     hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}}%</b><extra></extra>"
-                ), row=1, col=1)
+                ), row=1, col=1, secondary_y=False)
 
-    # ---- Row 2: ECS Network TX + ElastiCache NetworkBytesOut overlay ----
-    if not ecs_df.empty:
-        tx_df = metric_filter(ecs_df, 'NetworkTxBytes', 'Sum')
-        if not tx_df.empty:
-            tx_agg = tx_df.groupby('Timestamp')['Value'].sum().reset_index()
-            tx_agg['Value'] = tx_agg['Value'] / 1024.0
+    if not task_cpu_rows.empty:
+        fig.add_hline(
+            y=85, line_color='#f9ab00', line_dash='dash', line_width=2,
+            annotation_text='85% ECS task CPU threshold', annotation_position='top left',
+            row=1, col=1, secondary_y=False,
+        )
+        fig.add_hline(
+            y=100, line_color='#d93025', line_dash='dot', line_width=2,
+            annotation_text='100% task quota', annotation_position='top right',
+            row=1, col=1, secondary_y=False,
+        )
+
+    task_colors = (
+        '#1a73e8', '#d93025', '#188038', '#9334e6', '#f9ab00', '#00897b',
+        '#5f6368', '#e8710a', '#3949ab', '#c2185b', '#00796b', '#6d4c41',
+    )
+    for az_index, (az, az_rows) in enumerate(az_groups, start=2):
+        for task_id, group in az_rows.groupby('TaskId', sort=True):
+            group = group.sort_values('Timestamp')
+            task_index = task_index_by_id[str(task_id)]
+            task_label = str(task_index)
+            customdata = [
+                [timestamp, task_label]
+                for timestamp in _plot_times(group['Timestamp'])
+            ]
             fig.add_trace(go.Scatter(
-                x=_plot_x(tx_agg['Timestamp']), y=tx_agg['Value'],
-                customdata=_plot_times(tx_agg['Timestamp']),
-                name="Network TX – loadgen", mode='lines',
-                line=dict(**LINE_OPTS, color=C_NET_TX_ECS),
-                legend="legend2",
-                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} KB/min</b><extra></extra>"
-            ), row=2, col=1)
+                x=_plot_x(group['Timestamp']), y=group['Value'],
+                customdata=customdata,
+                name=task_label, mode='lines',
+                line=dict(
+                    **LINE_OPTS,
+                    color=task_colors[((task_index or 1) - 1) % len(task_colors)],
+                ),
+                legend=_legend_id_for_row(az_index),
+                hovertemplate=(
+                    "%{customdata[0]}<br>ECS task #%{customdata[1]}"
+                    "<br><b>%{y:.1f}%</b><extra></extra>"
+                ),
+            ), row=az_index, col=1)
+        fig.add_hline(
+            y=85, line_color='#f9ab00', line_dash='dash', line_width=1,
+            row=az_index, col=1,
+        )
+        fig.add_hline(
+            y=100, line_color='#d93025', line_dash='dot', line_width=1,
+            row=az_index, col=1,
+        )
+
+    # ---- ECS Network TX + ElastiCache NetworkBytesOut overlay ----
+    if not ecs_df.empty:
+        tx_dist = ecs_task_metric_distribution(ecs_df, 'NetworkTxBytes', 'Sum', value_scale=1 / 1024.0)
+        if not tx_dist.empty:
+            tx_custom = _plot_times_with_counts(tx_dist['Timestamp'], tx_dist['source_count'])
+            for column, label, color, dash in (
+                ('sum', 'Network TX total — ECS tasks', C_NET_TX_ECS, 'solid'),
+                ('avg', 'Network TX avg/task', '#4db6ac', 'solid'),
+                ('median', 'Network TX median/task', '#4db6ac', 'dash'),
+                ('min', 'Network TX min task', '#80cbc4', 'dot'),
+                ('max', 'Network TX max task', '#00796b', 'dashdot'),
+            ):
+                fig.add_trace(go.Scatter(
+                    x=_plot_x(tx_dist['Timestamp']), y=tx_dist[column],
+                    customdata=tx_custom,
+                    name=label, mode='lines',
+                    line=dict(**LINE_OPTS, color=color, dash=dash),
+                    legend=_legend_id_for_row(network_row),
+                    hovertemplate=_task_distribution_hover('KB/min'),
+                ), row=network_row, col=1, secondary_y=False)
+            fig.add_trace(go.Scatter(
+                x=_plot_x(tx_dist['Timestamp']), y=tx_dist['source_count'],
+                customdata=_plot_times(tx_dist['Timestamp']),
+                name="Network TX source count", mode='lines',
+                line=dict(**LINE_OPTS, color='#546e7a', dash='dot'),
+                legend=_legend_id_for_row(network_row),
+                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.0f}} sources</b><extra></extra>"
+            ), row=network_row, col=1, secondary_y=True)
         else:
-            fig.add_annotation(text="No Network TX Metrics", xref="paper", yref="paper",
-                               x=0.5, y=0.5, showarrow=False)
+            tx_df = metric_filter(ecs_df, 'NetworkTxBytes', 'Sum')
+            if not tx_df.empty:
+                tx_agg = tx_df.groupby('Timestamp')['Value'].sum().reset_index()
+                tx_agg['Value'] = tx_agg['Value'] / 1024.0
+                fig.add_trace(go.Scatter(
+                    x=_plot_x(tx_agg['Timestamp']), y=tx_agg['Value'],
+                    customdata=_plot_times(tx_agg['Timestamp']),
+                    name="Network TX — ECS tasks", mode='lines',
+                    line=dict(**LINE_OPTS, color=C_NET_TX_ECS),
+                    legend=_legend_id_for_row(network_row),
+                    hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} KB/min</b><extra></extra>"
+                ), row=network_row, col=1, secondary_y=False)
+            else:
+                _add_empty_panel_annotation(fig, network_row, "No Network TX Metrics")
     else:
-        fig.add_annotation(text="No ECS Network TX Data", xref="paper", yref="paper",
-                           x=0.5, y=0.5, showarrow=False)
+        _add_empty_panel_annotation(fig, network_row, "No ECS Network TX Data")
 
     if not metrics_df.empty:
         ec_tx_df = metric_filter(metrics_df, 'NetworkBytesOut', 'Sum', 'CacheClusterId')
@@ -366,9 +623,9 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
                 customdata=_plot_times(ec_tx_agg['Timestamp']),
                 name="Network TX – cache", mode='lines',
                 line=dict(**LINE_OPTS, color=C_NET_TX_CACHE, dash='dot'),
-                legend="legend2",
+                legend=_legend_id_for_row(network_row),
                 hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} KB/min</b><extra></extra>"
-            ), row=2, col=1)
+            ), row=network_row, col=1, secondary_y=False)
 
     # ---- Row 3: ECS Memory (MB) ----
     if not ecs_df.empty:
@@ -382,17 +639,15 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
             fig.add_trace(go.Scatter(
                 x=_plot_x(mem_agg['Timestamp']), y=mem_agg['Value'],
                 customdata=_plot_times(mem_agg['Timestamp']),
-                name="ECS Mem – loadgen", mode='lines',
+                name="ECS task memory", mode='lines',
                 line=dict(**LINE_OPTS, color=C_ECS_MEM),
-                legend="legend3",
+                legend=_legend_id_for_row(ecs_memory_row),
                 hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} MB</b><extra></extra>"
-            ), row=3, col=1)
+            ), row=ecs_memory_row, col=1)
         else:
-            fig.add_annotation(text="No ECS Memory Metrics", xref="paper", yref="paper",
-                               x=0.5, y=0.38, showarrow=False)
+            _add_empty_panel_annotation(fig, ecs_memory_row, "No ECS Memory Metrics")
     else:
-        fig.add_annotation(text="No ECS Memory Data", xref="paper", yref="paper",
-                           x=0.5, y=0.38, showarrow=False)
+        _add_empty_panel_annotation(fig, ecs_memory_row, "No ECS Memory Data")
 
     # ---- Row 4: ElastiCache Memory Usage (%) ----
     if not metrics_df.empty:
@@ -408,84 +663,197 @@ def build_infra_figure(ecs_df, metrics_df, cluster_id, config, x_min=None, x_max
                     customdata=_plot_times(group['Timestamp']),
                     name=f"Mem – {shorten_dim(dim, cluster_id)}", mode='lines',
                     line=dict(**LINE_OPTS, color=MEM_COLORS[i % len(MEM_COLORS)]),
-                    legend="legend4",
+                    legend=_legend_id_for_row(cache_memory_row),
                     hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.2f}}%</b><extra></extra>"
-                ), row=4, col=1)
+                ), row=cache_memory_row, col=1)
         else:
-            fig.add_annotation(text="No Memory Metrics", xref="paper", yref="paper",
-                               x=0.5, y=0.12, showarrow=False)
+            _add_empty_panel_annotation(fig, cache_memory_row, "No Memory Metrics")
     else:
-        fig.add_annotation(text="No CloudWatch Metrics", xref="paper", yref="paper",
-                           x=0.5, y=0.12, showarrow=False)
+        _add_empty_panel_annotation(fig, cache_memory_row, "No CloudWatch Metrics")
+
+    # ---- Final row: ECS task latency from EMF ----
+    _add_ecs_task_latency_traces(
+        fig, ecs_df, ecs_latency_row, legend=_legend_id_for_row(ecs_latency_row)
+    )
 
     # ---- Axes styling ----
-    fig.update_yaxes(title_text="%",      row=1, col=1)
-    fig.update_yaxes(title_text="KB/min", row=2, col=1,
-                     title_font=dict(color=C_NET_TX_ECS), tickfont=dict(color=C_NET_TX_ECS))
-    fig.update_yaxes(title_text="MB",     row=3, col=1,
+    fig.update_yaxes(title_text="%",      row=1, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="sources", row=1, col=1, secondary_y=True, showgrid=False)
+    for az_index in range(2, 2 + az_count):
+        fig.update_yaxes(title_text="%", row=az_index, col=1)
+    fig.update_yaxes(title_text="KB/min", row=network_row, col=1,
+                     title_font=dict(color=C_NET_TX_ECS), tickfont=dict(color=C_NET_TX_ECS),
+                     secondary_y=False)
+    fig.update_yaxes(title_text="sources", row=network_row, col=1, secondary_y=True, showgrid=False)
+    fig.update_yaxes(title_text="MB",     row=ecs_memory_row, col=1,
                      title_font=dict(color=C_ECS_MEM), tickfont=dict(color=C_ECS_MEM))
-    fig.update_yaxes(title_text="%",      row=4, col=1)
-    _set_absolute_xaxes(fig, range(1, 5), x_min, x_max)
+    fig.update_yaxes(title_text="%",      row=cache_memory_row, col=1)
+    fig.update_yaxes(title_text="ms",     row=ecs_latency_row, col=1)
+    _set_absolute_xaxes(fig, range(1, row_count + 1), x_min, x_max)
     fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
+    layout_base = {
+        **LAYOUT_BASE,
+        "margin": {**LAYOUT_BASE["margin"], "r": 30, "b": 70},
+    }
     fig.update_layout(
-        **LAYOUT_BASE, height=1300,
-        legend =dict(**LEGEND_H, x=0.5, y=0.83),
-        legend2=dict(**LEGEND_H, x=0.5, y=0.56),
-        legend3=dict(**LEGEND_H, x=0.5, y=0.27),
-        legend4=dict(**LEGEND_H, x=0.5, y=-0.03),
+        **layout_base,
+        height=1280 + (150 * az_count),
+        showlegend=False,
     )
     return fig
+
+
+def _axis_props_for_single_panel(axis):
+    """Copy axis presentation without combined-subplot placement fields."""
+    props = axis.to_plotly_json()
+    for key in ('anchor', 'domain', 'overlaying', 'position', 'side'):
+        props.pop(key, None)
+    return props
+
+
+def _legend_item(trace):
+    line = getattr(trace, 'line', None)
+    return {
+        'name': str(trace.name or ''),
+        'color': str(getattr(line, 'color', None) or '#5f6368'),
+        'dash': str(getattr(line, 'dash', None) or 'solid'),
+    }
+
+
+def build_infra_panels(
+    ecs_df,
+    metrics_df,
+    cluster_id,
+    config,
+    x_min=None,
+    x_max=None,
+    task_az_map=None,
+    task_index_by_id=None,
+    elasticache_az=None,
+    elasticache_az_source=None,
+):
+    """Return equal-height Infrastructure plots with external HTML legends."""
+    combined = build_infra_figure(
+        ecs_df,
+        metrics_df,
+        cluster_id,
+        config,
+        x_min,
+        x_max,
+        task_az_map=task_az_map,
+        task_index_by_id=task_index_by_id,
+        elasticache_az=elasticache_az,
+        elasticache_az_source=elasticache_az_source,
+    )
+    panels = []
+    row_count = len(combined._grid_ref)
+    titles = [
+        str(annotation.text)
+        for annotation in list(combined.layout.annotations or ())[:row_count]
+    ]
+
+    for row in range(1, row_count + 1):
+        subplot_refs = combined._grid_ref[row - 1][0]
+        primary_ref = subplot_refs[0]
+        secondary_ref = subplot_refs[1] if len(subplot_refs) > 1 else None
+        primary_yref = primary_ref.trace_kwargs['yaxis']
+        secondary_yref = secondary_ref.trace_kwargs['yaxis'] if secondary_ref else None
+        panel = make_subplots(
+            rows=1,
+            cols=1,
+            specs=[[{'secondary_y': secondary_ref is not None}]],
+        )
+        legend_items = []
+
+        for trace in combined.data:
+            trace_yref = trace.yaxis or 'y'
+            if trace_yref not in {primary_yref, secondary_yref}:
+                continue
+            trace_json = trace.to_plotly_json()
+            trace_json.pop('xaxis', None)
+            trace_json.pop('yaxis', None)
+            trace_json.pop('legend', None)
+            trace_json['showlegend'] = False
+            panel_trace = go.Figure(data=[trace_json]).data[0]
+            panel.add_trace(
+                panel_trace,
+                row=1,
+                col=1,
+                secondary_y=secondary_yref is not None and trace_yref == secondary_yref,
+            )
+            legend_items.append(_legend_item(trace))
+
+        source_subplot = combined.get_subplot(row, 1)
+        panel.update_xaxes(**_axis_props_for_single_panel(source_subplot.xaxis), row=1, col=1)
+        panel.update_yaxes(
+            **_axis_props_for_single_panel(source_subplot.yaxis),
+            row=1,
+            col=1,
+            secondary_y=False,
+        )
+        if secondary_ref is not None:
+            source_secondary_axis = combined.layout[secondary_ref.layout_keys[1]]
+            panel.update_yaxes(
+                **_axis_props_for_single_panel(source_secondary_axis),
+                row=1,
+                col=1,
+                secondary_y=True,
+            )
+
+        primary_xref = primary_ref.trace_kwargs['xaxis']
+        for annotation in list(combined.layout.annotations or ())[row_count:]:
+            if annotation.name != EMPTY_STATE_ANNOTATION_NAME:
+                continue
+            xref = str(annotation.xref or '')
+            yref = str(annotation.yref or '')
+            if xref not in {primary_xref, f'{primary_xref} domain'} or yref not in {
+                primary_yref, f'{primary_yref} domain'
+            }:
+                continue
+            annotation_json = annotation.to_plotly_json()
+            annotation_json.update(x=0.5, y=0.5, xref='paper', yref='paper')
+            panel.add_annotation(**annotation_json)
+
+        for shape in combined.layout.shapes or ():
+            if shape.yref != primary_yref:
+                continue
+            annotation_text = None
+            annotation_position = None
+            if row == 1 and float(shape.y0) == 85:
+                annotation_text = '85% ECS task CPU threshold'
+                annotation_position = 'top left'
+            elif row == 1 and float(shape.y0) == 100:
+                annotation_text = '100% task quota'
+                annotation_position = 'top right'
+            panel.add_hline(
+                y=shape.y0,
+                line_color=shape.line.color,
+                line_dash=shape.line.dash,
+                line_width=shape.line.width,
+                annotation_text=annotation_text,
+                annotation_position=annotation_position,
+            )
+
+        panel.update_layout(
+            **{
+                **LAYOUT_BASE,
+                'margin': {**LAYOUT_BASE['margin'], 'r': 30, 't': 10, 'b': 55},
+            },
+            height=320,
+            showlegend=False,
+        )
+        panels.append({
+            'title': titles[row - 1] if row - 1 < len(titles) else '',
+            'figure': panel,
+            'legend_items': legend_items,
+        })
+
+    return panels
 
 
 # ------------------------------------------------------------------ #
 #  GROUP 3 — ElastiCache Deep-Dive figure                              #
 # ------------------------------------------------------------------ #
-
-def build_client_latency_figure(ecs_df, x_min=None, x_max=None):
-    """Build the ECS load-generator EMF client latency percentile figure."""
-    fig = make_subplots(
-        rows=1, cols=1,
-        subplot_titles=("Client Latency",),
-    )
-
-    series = client_latency_series(ecs_df)
-    traces = [
-        ("p50_ms", "p50", C_LAT_P50, "solid"),
-        ("p99_ms", "p99", C_LAT_P99, "solid"),
-        ("p999_ms", "p99.9", C_LAT_P999, "solid"),
-        ("worst_stream_p99_ms", "worst_stream_p99", C_LAT_WORST99, "dash"),
-        ("worst_stream_p999_ms", "worst_stream_p999", C_LAT_WORST999, "dash"),
-    ]
-    shown = False
-    if not series.empty:
-        for column, label, color, dash in traces:
-            points = series[["Timestamp", column]].dropna()
-            if points.empty:
-                continue
-            fig.add_trace(go.Scatter(
-                x=_plot_x(points["Timestamp"]), y=points[column],
-                customdata=_plot_times(points["Timestamp"]),
-                name=label, mode="lines",
-                line=dict(**LINE_OPTS, color=color, dash=dash),
-                legend="legend",
-                hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.3f}} ms</b><extra></extra>",
-            ), row=1, col=1)
-            shown = True
-
-    if not shown:
-        fig.add_annotation(
-            text="No ECS client latency datapoints",
-            xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
-        )
-
-    fig.update_yaxes(title_text="ms", showgrid=True, gridcolor="#f0f0f0", zeroline=False)
-    _set_absolute_xaxes(fig, [1], x_min, x_max)
-    fig.update_layout(
-        **LAYOUT_BASE, height=420,
-        legend=dict(**LEGEND_H, x=0.5, y=-0.18),
-    )
-    return fig
-
 
 def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None, x_min=None, x_max=None):
     """Build a 4-row deep-dive figure for configuration comparison.

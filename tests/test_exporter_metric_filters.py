@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import sys
 import types
 import unittest
@@ -31,6 +32,72 @@ def _load_exporter():
 
 
 class MetricExportFilterTests(unittest.TestCase):
+    def test_task_metric_rows_are_enriched_with_availability_zone(self):
+        exporter = _load_exporter()
+
+        class FakeCloudWatch:
+            def list_metrics(self, **_params):
+                return {
+                    "Metrics": [{
+                        "MetricName": "CpuUtilized",
+                        "Dimensions": [
+                            {"Name": "ClusterName", "Value": "cluster-a"},
+                            {"Name": "TaskId", "Value": "task-a"},
+                        ],
+                    }]
+                }
+
+            def get_metric_statistics(self, **_params):
+                return {"Datapoints": [{
+                    "Timestamp": datetime(2026, 5, 21, tzinfo=timezone.utc),
+                    "Unit": "None",
+                    "Average": 245.0,
+                }]}
+
+        class FakeS3:
+            def put_object(self, **params):
+                self.body = params["Body"]
+
+            def get_object(self, **_params):
+                content = (
+                    '[2026-05-21T00:00:00] [telemetry] '
+                    '{"Type":"Task","TaskId":"task-a","AvailabilityZone":"us-east-1f"}\n'
+                )
+                return {"Body": io.BytesIO(content.encode("utf-8"))}
+
+        original_cloudwatch = exporter.cloudwatch
+        original_s3 = exporter.s3
+        fake_s3 = FakeS3()
+        exporter.cloudwatch = FakeCloudWatch()
+        exporter.s3 = fake_s3
+        try:
+            with mock.patch("builtins.print"):
+                task_metadata = exporter._task_metadata_from_container_insights_object(
+                    "bucket", "container-insights.txt"
+                )
+                exporter.export_metric_sources_to_s3(
+                    [{
+                        "namespace": "ECS/ContainerInsights",
+                        "dimensions": [{"Name": "ClusterName", "Value": "cluster-a"}],
+                        "metric_names": ["CpuUtilized"],
+                        "statistics": ["Average"],
+                    }],
+                    "bucket",
+                    "metrics.csv",
+                    datetime(2026, 5, 21, tzinfo=timezone.utc),
+                    datetime(2026, 5, 21, 0, 1, tzinfo=timezone.utc),
+                    task_metadata=task_metadata,
+                )
+        finally:
+            exporter.cloudwatch = original_cloudwatch
+            exporter.s3 = original_s3
+
+        self.assertIn(
+            "AvailabilityZone=us-east-1f;ClusterName=cluster-a;TaskId=task-a",
+            fake_s3.body,
+        )
+        self.assertEqual(task_metadata, {"task-a": {"AvailabilityZone": "us-east-1f"}})
+
     def test_metric_source_export_skips_unrequested_discovered_metrics(self):
         exporter = _load_exporter()
 

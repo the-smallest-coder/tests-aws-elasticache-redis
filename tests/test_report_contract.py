@@ -71,8 +71,8 @@ class MemtierParserTests(unittest.TestCase):
         parsed = parse_memtier_logs(content)
 
         self.assertEqual(len(parsed), 2)
-        self.assertEqual(parsed["Ops/sec"].tolist(), [100.0, 150.0])
-        self.assertEqual(parsed["Latency (ms)"].tolist(), [1.0, 1.5])
+        self.assertEqual(parsed["Ops/sec"].tolist(), [100.0, 200.0])
+        self.assertEqual(parsed["Latency (ms)"].tolist(), [1.0, 2.0])
 
     def test_final_totals_keep_last_record_when_timestamp_ties(self):
         try:
@@ -108,6 +108,51 @@ class MemtierParserTests(unittest.TestCase):
         self.assertNotIn("first_eviction_ts", stats)
         self.assertEqual(str(stats["first_oom_rejection_ts"]), "2026-05-01 00:00:10")
         self.assertEqual(int(stats["oom_df"]["OOM_events"].sum()), 2)
+
+
+class MinuteArtifactNormalizationTests(unittest.TestCase):
+    """task_count_present is a recent addition to the minute CSV schema
+    (memtier_etl.py). loadgen_analysis.build_loadgen_summary() already
+    treats its absence as "recompute from samples" rather than an error, so
+    normalization must agree: a _memtier.minute.csv from an older reporter
+    image, written before that column existed, must load successfully with
+    the column simply absent -- not raise, and not fill it with NaN (which
+    would satisfy the downstream presence check while feeding it garbage).
+    """
+
+    def test_minute_csv_without_task_count_present_loads_with_column_absent(self):
+        try:
+            from report_generator import _normalize_memtier_minute_artifact
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        content = (
+            "Timestamp,throughput_sum,latency_weighted_avg,throughput_median,"
+            "throughput_avg,throughput_p10,throughput_p90,throughput_min,"
+            "throughput_max,latency_median,latency_avg,latency_p10,latency_p90,"
+            "latency_min,latency_max\n"
+            "2026-05-01T00:00:00Z,900,9,900,900,900,900,900,900,9,9,9,9,9,9\n"
+        )
+
+        df = _normalize_memtier_minute_artifact(content, "legacy_memtier.minute.csv")
+
+        self.assertNotIn("task_count_present", df.columns)
+        self.assertEqual(df["throughput_sum"].tolist(), [900.0])
+
+    def test_minute_csv_missing_a_required_column_still_raises(self):
+        try:
+            from report_generator import _normalize_memtier_minute_artifact
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        content = "Timestamp,throughput_sum\n2026-05-01T00:00:00Z,900\n"
+
+        with self.assertRaises(ValueError):
+            _normalize_memtier_minute_artifact(content, "broken_memtier.minute.csv")
 
 
 class MemtierLatencyMaxTests(unittest.TestCase):
@@ -268,7 +313,81 @@ class EvictionSeriesTests(unittest.TestCase):
 
 
 class CardRenderingTests(unittest.TestCase):
-    def test_first_eviction_card_shows_elapsed_time_from_report_start(self):
+    def test_service_cpu_is_labeled_as_time_series_not_cross_task_distribution(self):
+        try:
+            import pandas as pd
+
+            from cards import stat_cards_html
+            from summary import build_summary
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        ecs = pd.DataFrame([
+            {
+                "Timestamp": pd.Timestamp("2026-05-01T00:00:00"),
+                "Namespace": "AWS/ECS",
+                "MetricName": "CPUUtilization",
+                "Stat": "Average",
+                "Value": 60.0,
+                "Unit": "Percent",
+                "Dimensions": "ClusterName=c;ServiceName=s",
+            },
+            {
+                "Timestamp": pd.Timestamp("2026-05-01T00:01:00"),
+                "Namespace": "AWS/ECS",
+                "MetricName": "CPUUtilization",
+                "Stat": "Average",
+                "Value": 80.0,
+                "Unit": "Percent",
+                "Dimensions": "ClusterName=c;ServiceName=s",
+            },
+        ])
+
+        summary = build_summary(
+            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), ecs,
+            extra_stats={}, config={}, cluster_id="cluster-a", time_range="",
+        )
+        html = stat_cards_html(
+            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), ecs,
+        )
+
+        self.assertEqual(summary["ecs"]["service_cpu_time_avg_pct"], 70.0)
+        self.assertEqual(summary["ecs"]["service_cpu_time_peak_pct"], 80.0)
+        self.assertNotIn("avg_cpu_pct", summary["ecs"])
+        self.assertIn("ECS Service CPU — Time Avg", html)
+        self.assertIn("ECS Service CPU — Time Peak", html)
+
+    def test_within_az_skew_card_renders_without_generator_cpu(self):
+        """generator_cpu_p95_pct comes from Container Insights CPU data;
+        throughput_skew_within_az_max comes from memtier throughput data --
+        independent sources. The skew card must not disappear just because
+        Container Insights CPU is missing for this run.
+        """
+        try:
+            import pandas as pd
+
+            from cards import stat_cards_html
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        empty = pd.DataFrame()
+        html = stat_cards_html(
+            empty, empty, empty, empty,
+            loadgen={
+                "generator_cpu_p95_pct": None,
+                "throughput_skew_within_az_max": 1.42,
+            },
+        )
+
+        self.assertNotIn("ECS Task CPU p95", html)
+        self.assertIn("Within-AZ Skew", html)
+        self.assertIn(">1.42<", html)
+
+    def test_first_eviction_card_shows_absolute_timestamp(self):
         try:
             import pandas as pd
 
@@ -297,8 +416,8 @@ class CardRenderingTests(unittest.TestCase):
         )
 
         self.assertIn("<div class='card-label'>First Eviction</div>", html)
-        self.assertIn("1h 02m 07s", html)
-        self.assertIn("Elapsed time from report start", html)
+        self.assertNotIn("1h 02m 07s", html)
+        self.assertIn("Absolute timestamp of the first positive CloudWatch Evictions datapoint", html)
         self.assertIn("2026-05-01 01:02:07 UTC", html)
 
 
@@ -427,8 +546,45 @@ class LocalGenerateLegacyLogTests(unittest.TestCase):
 
             run_generate_report(str(run_dir), {})
 
-            report_summary = json.loads((run_dir / "results_local.json").read_text(encoding="utf-8"))
+            report_summary = json.loads(
+                (run_dir / "results_local.json").read_text(encoding="utf-8")
+            )
             self.assertFalse(report_summary["benchmark"])
+
+    def test_local_generate_preserves_canonical_report_pair(self):
+        try:
+            from report_generator import run_generate_report
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self._write_empty_metrics(run_dir)
+            stream_dir = run_dir / "logs" / "loadgen" / "memtier" / "memtier"
+            stream_dir.mkdir(parents=True)
+            (stream_dir / "stream-a.txt").write_text(
+                "[2026-05-01T00:00:00] [memtier/stream-a] "
+                "[RUN #1 1%, 1 secs] 100 (avg: 100) ops/sec, "
+                "1KB/sec (avg: 1KB/sec), 1 (avg: 1) msec latency\n",
+                encoding="utf-8",
+            )
+            canonical_json = run_dir / f"results_{run_dir.name}.json"
+            canonical_html = run_dir / f"results_{run_dir.name}.html"
+            canonical_json.write_text("stale canonical json\n", encoding="utf-8")
+            canonical_html.write_text("stale canonical html\n", encoding="utf-8")
+            local_json = run_dir / "results_local.json"
+            local_html = run_dir / "results_local.html"
+            local_json.write_text("stale local json\n", encoding="utf-8")
+            local_html.write_text("stale local html\n", encoding="utf-8")
+
+            run_generate_report(str(run_dir), {})
+
+            self.assertEqual(canonical_json.read_text(encoding="utf-8"), "stale canonical json\n")
+            self.assertEqual(canonical_html.read_text(encoding="utf-8"), "stale canonical html\n")
+            self.assertNotEqual(local_json.read_text(encoding="utf-8"), "stale local json\n")
+            self.assertNotEqual(local_html.read_text(encoding="utf-8"), "stale local html\n")
 
 
 class ReportWindowValidationTests(unittest.TestCase):

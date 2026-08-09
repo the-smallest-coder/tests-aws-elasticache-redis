@@ -52,6 +52,20 @@ variable "node_type" {
   default     = "cache.t4g.micro"
 }
 
+variable "enable_price_lookup" {
+  description = <<-EOT
+    Look up this run's live hourly node price via scripts/fetch_elasticache_price.sh
+    (requires bash, aws, and jq on whatever machine runs Terraform). The script itself
+    always exits 0, but Terraform launching it at all can still fail the plan if bash
+    isn't on PATH -- that's a `data` block, so it's re-evaluated on every plan,
+    including `terraform destroy`. Set to false (e.g. `-var enable_price_lookup=false`)
+    as an escape hatch if that ever blocks a destroy; node_hourly_usd_source in
+    cluster_details.json becomes "disabled" instead of erroring.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "cluster_mode_enabled" {
   description = "Enable Redis/Valkey cluster mode (sharding)"
   type        = bool
@@ -68,6 +82,12 @@ variable "num_cache_nodes" {
     condition     = var.num_cache_nodes >= 1 && var.num_cache_nodes <= 6
     error_message = "Number of cache nodes must be between 1 and 6."
   }
+}
+
+variable "elasticache_availability_zone" {
+  description = "Pin the ElastiCache node to a specific AZ. Empty = let AWS choose. Must be one of the subnet group's AZs."
+  type        = string
+  default     = ""
 }
 
 # Cluster mode settings
@@ -260,7 +280,7 @@ variable "loadgen_memtier_test_time" {
 }
 
 variable "loadgen_memtier_key_pattern" {
-  description = "Key access pattern (R:R = random, S:S = sequential, G:G = gaussian)"
+  description = "memtier key access pattern, including mixed patterns such as S:R"
   type        = string
   default     = "R:R"
 }

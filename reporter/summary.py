@@ -9,6 +9,7 @@ from helpers import (
     first_positive_timestamp,
 )
 from report_common import GENERATOR_SCHEMA_VERSION
+from loadgen_analysis import build_loadgen_summary
 
 
 def _safe(val, decimals=None):
@@ -67,7 +68,8 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
       "latency_server_us": { get_avg, set_avg, string_avg },
       "client_latency": { p50_ms, p99_ms, p999_ms, worst_stream_p99_ms, worst_stream_p999_ms },
       "connections": { avg, max },
-      "ecs": { avg_cpu_pct, max_cpu_pct, peak_mem_mb }
+      "ecs": { service_cpu_time_avg_pct, service_cpu_time_peak_pct, peak_mem_mb, task_count },
+      "loadgen": { per-task CPU p95, per-task throughput medians, per-AZ skew, validity }
     }
     """
     config = config or {}
@@ -82,6 +84,10 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         'engine_type':     config.get('engine_type', ''),
         'engine_version':  config.get('engine_version', ''),
         'node_type':       config.get('node_type', ''),
+        'node_memory_bytes': config.get('node_memory_bytes', ''),
+        'node_hourly_usd': config.get('node_hourly_usd', ''),
+        'node_hourly_usd_source': config.get('node_hourly_usd_source', ''),
+        'node_hourly_usd_reason': config.get('node_hourly_usd_reason', ''),
         'node_count':      config.get('node_count', ''),
         'cluster_mode':    str(config.get('cluster_mode', 'false')).lower(),
         'generator_schema_version': GENERATOR_SCHEMA_VERSION,
@@ -272,12 +278,26 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
     if not ecs_df.empty:
         cpu_df = metric_filter(ecs_df, 'CPUUtilization', 'Average')
         if not cpu_df.empty:
-            ecs['avg_cpu_pct'] = _safe(float(cpu_df['Value'].mean()), 2)
-            ecs['max_cpu_pct'] = _safe(float(cpu_df['Value'].max()), 2)
+            ecs['service_cpu_time_avg_pct'] = _safe(float(cpu_df['Value'].mean()), 2)
+            ecs['service_cpu_time_peak_pct'] = _safe(float(cpu_df['Value'].max()), 2)
 
         mem_d = metric_filter(ecs_df, 'MemoryUtilized', 'Average')
         if not mem_d.empty:
             ecs['peak_mem_mb'] = _safe(float(mem_d['Value'].max()), 1)
+
+    loadgen = build_loadgen_summary(
+        extra_stats.get('memtier_samples_df'),
+        memtier_minute_df,
+        ecs_df,
+        extra_stats.get('container_insights_task_df'),
+        extra_stats.get('container_insights_service_df'),
+        first_message_ts,
+        last_message_ts,
+        measured_elasticache_az=config.get('elasticache_availability_zone'),
+        memtier_totals_df=memtier_totals_df,
+    ) if first_message_ts is not None and last_message_ts is not None else {}
+    if loadgen.get('expected_task_count') is not None:
+        ecs['task_count'] = loadgen['expected_task_count']
 
     return {
         'meta':               meta,
@@ -291,4 +311,5 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         'client_latency':     client_latency,
         'connections':        connections,
         'ecs':                ecs,
+        'loadgen':            loadgen,
     }

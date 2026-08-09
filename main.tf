@@ -27,6 +27,17 @@ locals {
     Engine      = var.engine_type
     ClusterMode = var.cluster_mode_enabled ? "enabled" : "disabled"
   }
+
+  # AZ pinning only applies to the single-node, non-cluster-mode case (see
+  # preferred_cache_cluster_azs below); cluster mode and multi-node runs
+  # fall back to AWS's own placement. Shared with node_details.tf so
+  # cluster_details.json never records an AZ that was requested but not
+  # actually applied.
+  elasticache_pinned_az = (
+    var.cluster_mode_enabled || var.elasticache_availability_zone == "" || var.num_cache_nodes != 1
+    ? null
+    : var.elasticache_availability_zone
+  )
 }
 
 # Subnet group for ElastiCache
@@ -99,8 +110,17 @@ resource "aws_elasticache_replication_group" "main" {
   security_group_ids = [aws_security_group.elasticache.id]
 
   # Availability and failover
-  automatic_failover_enabled = var.automatic_failover_enabled
-  multi_az_enabled           = var.automatic_failover_enabled
+  #
+  # Pin the cache cluster's AZ when requested so which ECS AZ ends up
+  # co-located with the cache node is reproducible across repeated runs of
+  # the same config, rather than left to AWS's per-apply placement (which
+  # can flip between runs and inject AZ-placement noise unrelated to the
+  # node type under test). One entry per cache cluster, so this only
+  # applies to the single-node, non-cluster-mode case; cluster mode and
+  # multi-node runs fall back to AWS's own placement.
+  preferred_cache_cluster_azs = local.elasticache_pinned_az == null ? null : [local.elasticache_pinned_az]
+  automatic_failover_enabled  = var.automatic_failover_enabled
+  multi_az_enabled            = var.automatic_failover_enabled
 
   # Security
   at_rest_encryption_enabled = var.at_rest_encryption_enabled
@@ -138,6 +158,16 @@ resource "aws_elasticache_replication_group" "main" {
     precondition {
       condition     = length(local.cluster_id) <= 40
       error_message = "cluster_id '${local.cluster_id}' exceeds ElastiCache's 40-character replication-group-id limit. Shorten project_name or run_id_discriminator."
+    }
+
+    # local._node_memory_bytes[var.node_type] in ecs.tf raises a bare
+    # "Invalid index" for any unlisted node_type -- deliberately, since a
+    # silent fallback would corrupt the benchmark keyspace (see the comment
+    # there). This precondition runs alongside that raw error and names the
+    # actual supported set so the failure is actionable.
+    precondition {
+      condition     = contains(keys(local._node_memory_bytes), var.node_type)
+      error_message = "node_type '${var.node_type}' is not in the supported catalog. Supported types: ${join(", ", sort(keys(local._node_memory_bytes)))}."
     }
   }
 }
