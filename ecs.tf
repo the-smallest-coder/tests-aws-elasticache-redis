@@ -188,6 +188,12 @@ locals {
   # applied separately by _fill_factor below so the map stays easy to audit
   # against AWS instance specs.
   # Large node rows are transcribed from the user-provided Vantage table.
+  # 12xlarge/16xlarge/24xlarge/10xlarge rows added from AWS's own "Supported
+  # node types" table (docs.aws.amazon.com/AmazonElastiCache -> Supported
+  # node types) so real ElastiCache sizes above each family's original top
+  # entry don't hit the raw "Invalid index" below -- see the precondition on
+  # aws_elasticache_replication_group.main for the friendly version of that
+  # failure.
   # ---------------------------------------------------------------------------
   _node_memory_bytes = {
     # T2 family
@@ -203,61 +209,79 @@ locals {
     "cache.t3.small"  = 1471026298 # 1.37 GiB
     "cache.t3.medium" = 3317862236 # 3.09 GiB
     # C7gn family
-    "cache.c7gn.large"   = 3317862236  # 3.09 GiB
-    "cache.c7gn.xlarge"  = 6850472837  # 6.38 GiB
-    "cache.c7gn.2xlarge" = 13894219202 # 12.94 GiB
-    "cache.c7gn.4xlarge" = 27970974515 # 26.05 GiB
-    "cache.c7gn.8xlarge" = 56113747722 # 52.26 GiB
+    "cache.c7gn.large"    = 3317862236   # 3.09 GiB
+    "cache.c7gn.xlarge"   = 6850472837   # 6.38 GiB
+    "cache.c7gn.2xlarge"  = 13894219202  # 12.94 GiB
+    "cache.c7gn.4xlarge"  = 27970974515  # 26.05 GiB
+    "cache.c7gn.8xlarge"  = 56113747722  # 52.26 GiB
+    "cache.c7gn.12xlarge" = 84353157693  # 78.56 GiB
+    "cache.c7gn.16xlarge" = 113612622397 # 105.81 GiB
     # M4 family
-    "cache.m4.large"   = 6893422510  # 6.42 GiB
-    "cache.m4.xlarge"  = 15333033246 # 14.28 GiB
-    "cache.m4.2xlarge" = 31890132172 # 29.7 GiB
-    "cache.m4.4xlarge" = 65262028062 # 60.78 GiB
+    "cache.m4.large"    = 6893422510   # 6.42 GiB
+    "cache.m4.xlarge"   = 15333033246  # 14.28 GiB
+    "cache.m4.2xlarge"  = 31890132172  # 29.7 GiB
+    "cache.m4.4xlarge"  = 65262028062  # 60.78 GiB
+    "cache.m4.10xlarge" = 166043435663 # 154.64 GiB
     # M5 family
-    "cache.m5.large"   = 6850472837  # 6.38 GiB
-    "cache.m5.xlarge"  = 13883481784 # 12.93 GiB
-    "cache.m5.2xlarge" = 27960237096 # 26.04 GiB
-    "cache.m5.4xlarge" = 56113747722 # 52.26 GiB
+    "cache.m5.large"    = 6850472837   # 6.38 GiB
+    "cache.m5.xlarge"   = 13883481784  # 12.93 GiB
+    "cache.m5.2xlarge"  = 27960237096  # 26.04 GiB
+    "cache.m5.4xlarge"  = 56113747722  # 52.26 GiB
+    "cache.m5.12xlarge" = 168706315387 # 157.12 GiB
+    "cache.m5.24xlarge" = 337498530120 # 314.32 GiB
     # M7g family
-    "cache.m7g.large"   = 6850472837   # 6.38 GiB
-    "cache.m7g.xlarge"  = 13883481784  # 12.93 GiB
-    "cache.m7g.2xlarge" = 27960237096  # 26.04 GiB
-    "cache.m7g.4xlarge" = 56113747722  # 52.26 GiB
-    "cache.m7g.8xlarge" = 111325552312 # 103.68 GiB
+    "cache.m7g.large"    = 6850472837   # 6.38 GiB
+    "cache.m7g.xlarge"   = 13883481784  # 12.93 GiB
+    "cache.m7g.2xlarge"  = 27960237096  # 26.04 GiB
+    "cache.m7g.4xlarge"  = 56113747722  # 52.26 GiB
+    "cache.m7g.8xlarge"  = 111325552312 # 103.68 GiB
+    "cache.m7g.12xlarge" = 168706315387 # 157.12 GiB
+    "cache.m7g.16xlarge" = 225002599219 # 209.55 GiB
     # M6g family
-    "cache.m6g.large"   = 6850472837   # 6.38 GiB
-    "cache.m6g.xlarge"  = 13883481784  # 12.93 GiB
-    "cache.m6g.2xlarge" = 27960237096  # 26.04 GiB
-    "cache.m6g.4xlarge" = 56113747722  # 52.26 GiB
-    "cache.m6g.8xlarge" = 111325552312 # 103.68 GiB
+    "cache.m6g.large"    = 6850472837   # 6.38 GiB
+    "cache.m6g.xlarge"   = 13883481784  # 12.93 GiB
+    "cache.m6g.2xlarge"  = 27960237096  # 26.04 GiB
+    "cache.m6g.4xlarge"  = 56113747722  # 52.26 GiB
+    "cache.m6g.8xlarge"  = 111325552312 # 103.68 GiB
+    "cache.m6g.12xlarge" = 168706315387 # 157.12 GiB
+    "cache.m6g.16xlarge" = 225002599219 # 209.55 GiB
     # R4 family
-    "cache.r4.large"   = 13207024435  # 12.3 GiB
-    "cache.r4.xlarge"  = 26897232691  # 25.05 GiB
-    "cache.r4.2xlarge" = 54191749857  # 50.47 GiB
-    "cache.r4.4xlarge" = 108855946117 # 101.38 GiB
-    "cache.r4.8xlarge" = 218248763146 # 203.26 GiB
+    "cache.r4.large"    = 13207024435  # 12.3 GiB
+    "cache.r4.xlarge"   = 26897232691  # 25.05 GiB
+    "cache.r4.2xlarge"  = 54191749857  # 50.47 GiB
+    "cache.r4.4xlarge"  = 108855946117 # 101.38 GiB
+    "cache.r4.8xlarge"  = 218248763146 # 203.26 GiB
+    "cache.r4.16xlarge" = 437012922368 # 407.0 GiB
     # R5 family
-    "cache.r5.large"   = 14033805639  # 13.07 GiB
-    "cache.r5.xlarge"  = 28260884807  # 26.32 GiB
-    "cache.r5.2xlarge" = 56715043143  # 52.82 GiB
-    "cache.r5.4xlarge" = 113612622397 # 105.81 GiB
+    "cache.r5.large"    = 14033805639  # 13.07 GiB
+    "cache.r5.xlarge"   = 28260884807  # 26.32 GiB
+    "cache.r5.2xlarge"  = 56715043143  # 52.82 GiB
+    "cache.r5.4xlarge"  = 113612622397 # 105.81 GiB
+    "cache.r5.12xlarge" = 341202939412 # 317.77 GiB
+    "cache.r5.24xlarge" = 682481040753 # 635.61 GiB
     # R7g family
-    "cache.r7g.large"   = 14033805639  # 13.07 GiB
-    "cache.r7g.xlarge"  = 28260884807  # 26.32 GiB
-    "cache.r7g.2xlarge" = 56715043143  # 52.82 GiB
-    "cache.r7g.4xlarge" = 113612622397 # 105.81 GiB
-    "cache.r7g.8xlarge" = 225002599219 # 209.55 GiB
+    "cache.r7g.large"    = 14033805639  # 13.07 GiB
+    "cache.r7g.xlarge"   = 28260884807  # 26.32 GiB
+    "cache.r7g.2xlarge"  = 56715043143  # 52.82 GiB
+    "cache.r7g.4xlarge"  = 113612622397 # 105.81 GiB
+    "cache.r7g.8xlarge"  = 225002599219 # 209.55 GiB
+    "cache.r7g.12xlarge" = 341202939412 # 317.77 GiB
+    "cache.r7g.16xlarge" = 449994461020 # 419.09 GiB
     # R6g family
-    "cache.r6g.large"   = 14033805639  # 13.07 GiB
-    "cache.r6g.xlarge"  = 28260884807  # 26.32 GiB
-    "cache.r6g.2xlarge" = 56715043143  # 52.82 GiB
-    "cache.r6g.4xlarge" = 113612622397 # 105.81 GiB
-    "cache.r6g.8xlarge" = 225002599219 # 209.55 GiB
+    "cache.r6g.large"    = 14033805639  # 13.07 GiB
+    "cache.r6g.xlarge"   = 28260884807  # 26.32 GiB
+    "cache.r6g.2xlarge"  = 56715043143  # 52.82 GiB
+    "cache.r6g.4xlarge"  = 113612622397 # 105.81 GiB
+    "cache.r6g.8xlarge"  = 225002599219 # 209.55 GiB
+    "cache.r6g.12xlarge" = 341202939412 # 317.77 GiB
+    "cache.r6g.16xlarge" = 449994461020 # 419.09 GiB
     # R6gd family
-    "cache.r6gd.xlarge"  = 28260884807  # 26.32 GiB
-    "cache.r6gd.2xlarge" = 56715043143  # 52.82 GiB
-    "cache.r6gd.4xlarge" = 113612622397 # 105.81 GiB
-    "cache.r6gd.8xlarge" = 225002599219 # 209.55 GiB
+    "cache.r6gd.xlarge"   = 28260884807  # 26.32 GiB
+    "cache.r6gd.2xlarge"  = 56715043143  # 52.82 GiB
+    "cache.r6gd.4xlarge"  = 113612622397 # 105.81 GiB
+    "cache.r6gd.8xlarge"  = 225002599219 # 209.55 GiB
+    "cache.r6gd.12xlarge" = 341202939412 # 317.77 GiB
+    "cache.r6gd.16xlarge" = 449994461020 # 419.09 GiB
   }
 
   # Live on-demand hourly price for this run's exact node_type / engine_type

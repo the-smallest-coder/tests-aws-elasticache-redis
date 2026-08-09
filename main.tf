@@ -159,5 +159,15 @@ resource "aws_elasticache_replication_group" "main" {
       condition     = length(local.cluster_id) <= 40
       error_message = "cluster_id '${local.cluster_id}' exceeds ElastiCache's 40-character replication-group-id limit. Shorten project_name or run_id_discriminator."
     }
+
+    # local._node_memory_bytes[var.node_type] in ecs.tf raises a bare
+    # "Invalid index" for any unlisted node_type -- deliberately, since a
+    # silent fallback would corrupt the benchmark keyspace (see the comment
+    # there). This precondition runs alongside that raw error and names the
+    # actual supported set so the failure is actionable.
+    precondition {
+      condition     = contains(keys(local._node_memory_bytes), var.node_type)
+      error_message = "node_type '${var.node_type}' is not in the supported catalog. Supported types: ${join(", ", sort(keys(local._node_memory_bytes)))}."
+    }
   }
 }

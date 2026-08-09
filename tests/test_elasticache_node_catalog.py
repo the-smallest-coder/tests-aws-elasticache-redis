@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ECS_TF = ROOT / "ecs.tf"
+MAIN_TF = ROOT / "main.tf"
 
 
 def _local_map_keys(map_name: str) -> set[str]:
@@ -32,6 +33,45 @@ class ElastiCacheNodeCatalogTests(unittest.TestCase):
         memory_keys = _local_map_keys("_node_memory_bytes")
 
         self.assertIn("cache.m5.large", memory_keys)
+
+    def test_memory_catalog_includes_large_node_sizes(self):
+        """The map used to stop at each family's original top entry (e.g.
+        r7g.8xlarge, m5.4xlarge), so a real ElastiCache size above that
+        point hit the raw 'Invalid index' below with no indication of what
+        went wrong. These sizes are real, current-generation ElastiCache
+        node types (docs.aws.amazon.com/AmazonElastiCache 'Supported node
+        types').
+        """
+        memory_keys = _local_map_keys("_node_memory_bytes")
+
+        for node_type in (
+            "cache.r7g.12xlarge",
+            "cache.r7g.16xlarge",
+            "cache.m7g.12xlarge",
+            "cache.m7g.16xlarge",
+            "cache.r6g.12xlarge",
+            "cache.r6g.16xlarge",
+            "cache.c7gn.12xlarge",
+            "cache.c7gn.16xlarge",
+            "cache.m5.12xlarge",
+            "cache.m5.24xlarge",
+        ):
+            self.assertIn(node_type, memory_keys)
+
+    def test_node_type_precondition_names_supported_set(self):
+        """A bare 'Invalid index' names neither the bad value nor what's
+        valid. The replication group's precondition must run alongside it
+        and spell out the actual supported node_type set so the failure is
+        actionable without reading ecs.tf.
+        """
+        main_tf = MAIN_TF.read_text(encoding="utf-8")
+
+        self.assertRegex(
+            main_tf,
+            r"contains\(keys\(local\._node_memory_bytes\),\s*var\.node_type\)",
+        )
+        self.assertIn("Supported types:", main_tf)
+        self.assertIn("sort(keys(local._node_memory_bytes))", main_tf)
 
     def test_node_price_is_fetched_live_not_from_a_hardcoded_table(self):
         """Pricing used to be a hardcoded, single-region, Redis-only USD table
