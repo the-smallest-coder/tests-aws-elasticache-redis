@@ -105,6 +105,35 @@ class SingleReportEscapingTests(unittest.TestCase):
 
         self.assertNotIn("hourly", html)
 
+    def test_cards_module_serves_header_pills_without_pandas_installed(self):
+        """stat_cards_html() imports helpers (which needs pandas) lazily,
+        inside the function body, specifically so header_pills() -- and the
+        cards module itself -- stay usable when pandas isn't installed.
+        Force a fresh import with pandas blocked to lock that in.
+        """
+        import importlib
+
+        saved_modules = {
+            name: sys.modules.get(name)
+            for name in ("cards", "helpers", "formatting", "pandas")
+        }
+        for name in ("cards", "helpers", "formatting"):
+            sys.modules.pop(name, None)
+        sys.modules["pandas"] = None
+
+        try:
+            cards = importlib.import_module("cards")
+            html = cards.header_pills({"engine_type": "redis", "node_count": "3"})
+        finally:
+            for name, module in saved_modules.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+
+        self.assertIn("Engine: <span>redis</span>", html)
+        self.assertIn("Nodes: <span>3</span>", html)
+
     def test_header_pills_escape_the_unavailable_reason_tooltip(self):
         from cards import header_pills
 

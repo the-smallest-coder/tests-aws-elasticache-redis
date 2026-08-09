@@ -45,11 +45,15 @@ def header_pills(config):
         ('Nodes', config.get('node_count'), ''),
         ('Mode', mode_label, ''),
     ]
-    pills = ''.join(
-        f"<div class='pill'{f' title=\"{_html(tooltip)}\"' if tooltip else ''}>"
-        f"{_html(label)}: <span>{_html(val)}</span></div>"
-        for label, val, tooltip in items if val
-    )
+    pill_parts = []
+    for label, val, tooltip in items:
+        if not val:
+            continue
+        title_attr = f' title="{_html(tooltip)}"' if tooltip else ''
+        pill_parts.append(
+            f"<div class='pill'{title_attr}>{_html(label)}: <span>{_html(val)}</span></div>"
+        )
+    pills = ''.join(pill_parts)
     return f"<div class='pills'>{pills}</div>" if pills else ''
 
 
