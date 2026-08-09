@@ -184,16 +184,28 @@ locals {
   memtier_duration_label    = var.loadgen_memtier_test_time > 0 ? "${var.loadgen_memtier_test_time}s" : "until stopped"
 
   # ---------------------------------------------------------------------------
-  # Advertised memory (bytes) per ElastiCache node type. The 85% target is
-  # applied separately by _fill_factor below so the map stays easy to audit
-  # against AWS instance specs.
-  # Large node rows are transcribed from the user-provided Vantage table.
-  # 12xlarge/16xlarge/24xlarge/10xlarge rows added from AWS's own "Supported
-  # node types" table (docs.aws.amazon.com/AmazonElastiCache -> Supported
-  # node types) so real ElastiCache sizes above each family's original top
-  # entry don't hit the raw "Invalid index" below -- see the precondition on
+  # Advertised memory (bytes) per ElastiCache node type, sourced from AWS's
+  # own "Supported node types" table:
+  #   https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/CacheNodes.SupportedTypes.html
+  # (every row below was checked directly against that page, most recently
+  # when the 12xlarge/16xlarge/24xlarge/10xlarge rows were added so real
+  # ElastiCache sizes above each family's original top entry don't hit the
+  # raw "Invalid index" below -- see the precondition on
   # aws_elasticache_replication_group.main for the friendly version of that
-  # failure.
+  # failure). The 85% target is applied separately by _fill_factor below so
+  # the map stays easy to audit against that table.
+  #
+  # Comparability note: before 2026-06-15 (commit 145feec) this map held
+  # coarse rounded advertised-GB figures (e.g. m7g.large = 7 GB, t4g.small =
+  # 1.5 GB, cited to this same AWS page but not transcribed precisely from
+  # it); it now holds AWS's exact decimal-GiB figures (6.38 GiB, 1.37 GiB).
+  # That's strictly more correct, but it also changed memtier_key_maximum
+  # for every node type on any run that let key-maximum auto-size
+  # (var.loadgen_memtier_key_maximum == 0) -- an auto-sized run from before
+  # that commit is NOT keyspace-comparable to one after it, even for the
+  # identical node_type. Each run's actual keyspace is recorded in
+  # cluster_details.json (memtier.key_maximum / memtier.key_maximum_auto);
+  # check that field, not node_type alone, before comparing two reports.
   # ---------------------------------------------------------------------------
   _node_memory_bytes = {
     # T2 family
