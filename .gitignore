@@ -75,3 +75,4 @@ multirun/batches/*.list
 multirun/logs/
 .tf-plugin-cache/
 TECH_DEBT.md
+PLAN_*.md
