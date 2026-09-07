@@ -47,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--node-type", default="", help="e.g. cache.t4g.micro")
     generate.add_argument("--node-count", default="", help="e.g. 1")
     generate.add_argument("--cluster-mode", default="false", help="true or false")
+    generate.add_argument(
+        "--output-dir",
+        default=None,
+        help="Write results_local.{html,json} here instead of run_dir. "
+        "run_dir is otherwise read-only (D9); nothing is written to results/<run-folder>/.",
+    )
     inspect = subparsers.add_parser("inspect", help="Inspect local run readiness and legacy warnings.")
     inspect.add_argument("run_dir", help="Path to a run results directory to inspect.")
     return parser
@@ -732,10 +738,12 @@ def create_report(
     return html_content, summary_json
 
 
-def run_generate_report(run_dir: str, config: dict) -> None:
+def run_generate_report(run_dir: str, config: dict, output_dir: str | None = None) -> None:
     import pandas as pd
 
     run_path = Path(run_dir)
+    out_dir = Path(output_dir) if output_dir else run_path
+    out_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir = run_path / "metrics"
     logs_dir = run_path / "logs"
 
@@ -816,12 +824,14 @@ def run_generate_report(run_dir: str, config: dict) -> None:
             print(f"Warning: failed to enrich summary with cluster_details.json: {exc}")
 
     # Local regeneration must never replace the canonical report downloaded
-    # from AWS for this immutable run.
-    out_path = run_path / "results_local.json"
+    # from AWS for this immutable run, and (D9) never write into run_path
+    # unless the caller explicitly wants that (output_dir defaults to it for
+    # backward compatibility -- pass --output-dir to keep run_dir read-only).
+    out_path = out_dir / "results_local.json"
     out_path.write_text(summary_json, encoding="utf-8")
     print(f"Written: {out_path}")
 
-    html_path = run_path / "results_local.html"
+    html_path = out_dir / "results_local.html"
     html_path.write_text(html_content, encoding="utf-8")
     print(f"Written: {html_path}")
 
@@ -981,7 +991,7 @@ def main() -> None:
             "node_count": args.node_count,
             "cluster_mode": args.cluster_mode,
         }
-        run_generate_report(args.run_dir, config)
+        run_generate_report(args.run_dir, config, output_dir=args.output_dir)
         return
 
     if args.command == "inspect":

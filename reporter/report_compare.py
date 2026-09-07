@@ -47,7 +47,7 @@ METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("benchmark", "Max Latency", ("benchmark", "max_latency_ms"), "ms", 2, "lower", "Worst client-side latency observed during the run."),
     MetricSpec("benchmark", "P95 Latency", ("benchmark", "p95_latency_ms"), "ms", 2, "lower", "95th percentile client-side latency."),
     MetricSpec("benchmark", "P99 Latency", ("benchmark", "p99_latency_ms"), "ms", 2, "lower", "99th percentile client-side latency."),
-    MetricSpec("benchmark", "Avg Bandwidth", ("benchmark", "avg_bandwidth_kbs"), "KB/s", 2, "neutral", "Average network throughput reported by memtier."),
+    MetricSpec("benchmark", "Avg Bandwidth", ("benchmark", "total_bandwidth_kbs"), "KB/s", 2, "neutral", "Sum of network throughput reported by memtier across streams (avg_bandwidth_kbs is a deprecated alias of this same value, D5)."),
     MetricSpec("engine_memory", "Avg Engine CPU", ("engine_cpu", "avg_pct"), "%", 2, "lower", "Average Redis engine CPU utilization.", "points"),
     MetricSpec("engine_memory", "Peak Engine CPU", ("engine_cpu", "max_pct"), "%", 2, "lower", "Highest Redis engine CPU utilization.", "points"),
     MetricSpec("engine_memory", "Avg CPU Credit Balance", ("engine_cpu", "credit_balance_avg"), "credits", 2, "higher", "Average burst credit balance for T-family cache nodes."),
@@ -69,11 +69,31 @@ METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("cache_latency", "String Latency", ("latency_server_us", "string_avg"), "us", 3, "lower", "Average server-side string command latency."),
     MetricSpec("cache_latency", "Avg Connections", ("connections", "avg"), "", 1, "neutral", "Average concurrent connections on the cache node."),
     MetricSpec("cache_latency", "Peak Connections", ("connections", "max"), "", 1, "neutral", "Highest concurrent connection count."),
-    MetricSpec("network_ecs", "ECS Task Latency p50", ("client_latency", "p50_ms"), "ms", 3, "lower", "Mean ECS task EMF p50 latency over the report window."),
-    MetricSpec("network_ecs", "ECS Task Latency p99", ("client_latency", "p99_ms"), "ms", 3, "lower", "Mean ECS task EMF p99 latency over the report window."),
-    MetricSpec("network_ecs", "ECS Task Latency p99.9", ("client_latency", "p999_ms"), "ms", 3, "lower", "Mean ECS task EMF p99.9 latency over the report window."),
-    MetricSpec("network_ecs", "Worst ECS Task Latency p99", ("client_latency", "worst_stream_p99_ms"), "ms", 3, "lower", "Maximum per-task ECS EMF p99 latency."),
-    MetricSpec("network_ecs", "Worst ECS Task Latency p99.9", ("client_latency", "worst_stream_p999_ms"), "ms", 3, "lower", "Maximum per-task ECS EMF p99.9 latency."),
+    MetricSpec(
+        "network_ecs", "ECS Task Latency p50", ("client_latency", "task_median_p50_ms"),
+        "ms", 3, "lower", "Median across each task's final memtier p50 latency total.",
+        legacy_path=("client_latency", "p50_ms"),
+    ),
+    MetricSpec(
+        "network_ecs", "ECS Task Latency p99", ("client_latency", "task_median_p99_ms"),
+        "ms", 3, "lower", "Median across each task's final memtier p99 latency total.",
+        legacy_path=("client_latency", "p99_ms"),
+    ),
+    MetricSpec(
+        "network_ecs", "ECS Task Latency p99.9", ("client_latency", "task_median_p999_ms"),
+        "ms", 3, "lower", "Median across each task's final memtier p99.9 latency total.",
+        legacy_path=("client_latency", "p999_ms"),
+    ),
+    MetricSpec(
+        "network_ecs", "Worst ECS Task Latency p99", ("client_latency", "worst_task_p99_ms"),
+        "ms", 3, "lower", "Maximum across each task's final memtier p99 latency total.",
+        legacy_path=("client_latency", "worst_stream_p99_ms"),
+    ),
+    MetricSpec(
+        "network_ecs", "Worst ECS Task Latency p99.9", ("client_latency", "worst_task_p999_ms"),
+        "ms", 3, "lower", "Maximum across each task's final memtier p99.9 latency total.",
+        legacy_path=("client_latency", "worst_stream_p999_ms"),
+    ),
     MetricSpec(
         "network_ecs", "ECS Service CPU — Time Average", ("ecs", "service_cpu_time_avg_pct"),
         "%", 2, "neutral", "Time average of service-level CPUUtilization; this is not an average across tasks.", "points",
@@ -108,11 +128,31 @@ METRICS: tuple[MetricSpec, ...] = (
         "network_ecs", "Between-AZ Throughput Ratio", ("loadgen", "throughput_skew_between_az_max_to_min"),
         "max/min", 3, "lower", "Max/min across AZ median task throughput. Reported as a cross-AZ result without a pass/fail threshold.",
     ),
-    MetricSpec("network_ecs", "Avg Cache In", ("network", "cache", "avg_in_kbs"), "KB/s", 2, "neutral", "Average inbound network throughput on the cache node."),
-    MetricSpec("network_ecs", "Avg Cache Out", ("network", "cache", "avg_out_kbs"), "KB/s", 2, "neutral", "Average outbound network throughput on the cache node."),
-    MetricSpec("network_ecs", "BW In Throttle Events", ("network", "throttling", "bw_in_exceeded_total"), "", 0, "lower", "Total bandwidth-in throttle events."),
-    MetricSpec("network_ecs", "BW Out Throttle Events", ("network", "throttling", "bw_out_exceeded_total"), "", 0, "lower", "Total bandwidth-out throttle events."),
-    MetricSpec("network_ecs", "PPS Throttle Events", ("network", "throttling", "pps_exceeded_total"), "", 0, "lower", "Total packets-per-second throttle events."),
+    MetricSpec(
+        "network_ecs", "Avg Cache In", ("network", "cache", "in_kib_per_sec"),
+        "KiB/s", 2, "neutral", "Average inbound network throughput on the cache node.",
+        legacy_path=("network", "cache", "avg_in_kbs"),
+    ),
+    MetricSpec(
+        "network_ecs", "Avg Cache Out", ("network", "cache", "out_kib_per_sec"),
+        "KiB/s", 2, "neutral", "Average outbound network throughput on the cache node.",
+        legacy_path=("network", "cache", "avg_out_kbs"),
+    ),
+    MetricSpec(
+        "network_ecs", "BW In Throttle Events", ("network", "throttling", "bw_in_exceeded_count"),
+        "", 0, "lower", "Total bandwidth-in throttle events.",
+        legacy_path=("network", "throttling", "bw_in_exceeded_total"),
+    ),
+    MetricSpec(
+        "network_ecs", "BW Out Throttle Events", ("network", "throttling", "bw_out_exceeded_count"),
+        "", 0, "lower", "Total bandwidth-out throttle events.",
+        legacy_path=("network", "throttling", "bw_out_exceeded_total"),
+    ),
+    MetricSpec(
+        "network_ecs", "PPS Throttle Events", ("network", "throttling", "pps_exceeded_count"),
+        "", 0, "lower", "Total packets-per-second throttle events.",
+        legacy_path=("network", "throttling", "pps_exceeded_total"),
+    ),
     MetricSpec("network_ecs", "Peak ECS Memory", ("ecs", "peak_mem_mb"), "MB", 1, "lower", "Peak ECS task memory usage."),
 )
 
@@ -164,8 +204,22 @@ def metric_rows(baseline: RunData, candidate: RunData) -> list[dict[str, Any]]:
         for run in (baseline, candidate)
     )
     for spec in METRICS:
-        baseline_raw = get_nested(baseline.summary, spec.path)
-        candidate_raw = get_nested(candidate.summary, spec.path)
+        path = spec.path
+        label = spec.label
+        baseline_raw = get_nested(baseline.summary, path)
+        candidate_raw = get_nested(candidate.summary, path)
+        used_legacy = False
+        if spec.legacy_path and (baseline_raw is None or candidate_raw is None):
+            # WP1 D1: a pre-schema-v3 run has only the frozen legacy key. Fall
+            # back to it on BOTH sides so the two runs are compared on the
+            # same field, and flag the row so the reader knows why.
+            legacy_baseline = get_nested(baseline.summary, spec.legacy_path)
+            legacy_candidate = get_nested(candidate.summary, spec.legacy_path)
+            if legacy_baseline is not None or legacy_candidate is not None:
+                path = spec.legacy_path
+                label = f"{spec.label} (legacy)"
+                baseline_raw, candidate_raw = legacy_baseline, legacy_candidate
+                used_legacy = True
         baseline_value = metric_value(spec, baseline_raw)
         candidate_value = metric_value(spec, candidate_raw)
         tone = classify_delta(spec, baseline_value, candidate_value)
@@ -176,16 +230,18 @@ def metric_rows(baseline: RunData, candidate: RunData) -> list[dict[str, Any]]:
             tone = "warning"
         if spec.path and spec.path[0] == "client_latency" and latency_invalid:
             tone = "warning"
+        if used_legacy:
+            tone = "warning"
         rows.append(
             {
                 "section": spec.section,
-                "label": spec.label,
+                "label": label,
                 "baseline": display_value(spec, baseline_raw),
                 "candidate": display_value(spec, candidate_raw),
                 "delta": format_delta(spec, baseline_value, candidate_value),
                 "tone": tone,
                 "description": spec.description,
-                "path": spec.path,
+                "path": path,
             }
         )
     return rows

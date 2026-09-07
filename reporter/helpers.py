@@ -342,17 +342,26 @@ def cache_hit_rate_df(df):
     return merged[['Timestamp', 'Namespace', 'MetricName', 'Stat', 'Value', 'Unit', 'Dimensions']]
 
 
-def cloudwatch_eviction_series(df, cluster_id=None):
-    """Return one CloudWatch Evictions series without mixing aggregate and node rows."""
-    evictions = metric_filter(df, 'Evictions', 'Sum', 'CacheClusterId')
-    if evictions.empty:
-        return evictions
+def select_node_dimension_rows(df, cluster_id=None):
+    """Return per-node rows without mixing the CacheClusterId aggregate with
+    its CacheNodeId duplicates. Extracted from cloudwatch_eviction_series.
 
-    dimensions = evictions['Dimensions'].astype(str)
+    *df* must already be filtered to one MetricName/Stat combination (see
+    ``metric_filter``). AWS/ElastiCache publishes most node-level metrics at
+    both the ``CacheClusterId`` (per-node aggregate) and
+    ``CacheClusterId;CacheNodeId`` (also per-node, same values) dimension
+    levels; summing both double-counts. This covers only that axis --
+    ``NodeGroupId`` is a second, narrower duplicate axis (cluster mode) not
+    yet folded in here (see PLAN_2.md WP1 step 1).
+    """
+    if df.empty:
+        return df
+
+    dimensions = df['Dimensions'].astype(str)
     if cluster_id:
         exact_dimension = f'CacheClusterId={cluster_id}'
         cluster_prefix = f'{exact_dimension}-'
-        candidates = evictions[
+        candidates = df[
             dimensions.eq(exact_dimension)
             | dimensions.str.startswith(f'{exact_dimension};')
             | dimensions.str.startswith(cluster_prefix)
@@ -372,10 +381,16 @@ def cloudwatch_eviction_series(df, cluster_id=None):
         node_rows = candidates[candidate_dims.str.contains(';CacheNodeId=')]
     else:
         aggregate_mask = dimensions.str.match(r'^CacheClusterId=[^;]+$')
-        aggregate = evictions[aggregate_mask]
-        node_rows = evictions[~aggregate_mask]
+        aggregate = df[aggregate_mask]
+        node_rows = df[~aggregate_mask]
 
-    selected = aggregate if not aggregate.empty else node_rows
+    return aggregate if not aggregate.empty else node_rows
+
+
+def cloudwatch_eviction_series(df, cluster_id=None):
+    """Return one CloudWatch Evictions series without mixing aggregate and node rows."""
+    evictions = metric_filter(df, 'Evictions', 'Sum', 'CacheClusterId')
+    selected = select_node_dimension_rows(evictions, cluster_id)
     if selected.empty:
         return selected
 

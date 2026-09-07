@@ -69,6 +69,7 @@ class ClientLatencyReportTests(unittest.TestCase):
                 "p999_ms": 29.0,
                 "worst_stream_p99_ms": 15.0,
                 "worst_stream_p999_ms": 35.0,
+                "percentile_basis": "minute_mean_of_task_percentiles",
             },
         )
 

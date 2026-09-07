@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 
 ECS_ENV_VARS = ("S3_BUCKET", "S3_PREFIX", "REPORT_TIMESTAMP", "CLUSTER_ID")
-GENERATOR_SCHEMA_VERSION = "2026-08-loadgen-quality-v2"
+GENERATOR_SCHEMA_VERSION = "2026-08-metrics-contract-v3"
 Normalizer = Callable[[Any], float | None]
 
 
@@ -38,6 +38,9 @@ class MetricSpec:
     none_label: str = "n/a"
     normalizer: Normalizer | None = None
     warning_above: float | None = None
+    # WP1 D1: the frozen key a pre-schema-v3 run still carries when `path`
+    # (its renamed, unit-correct replacement) is absent on that run.
+    legacy_path: tuple[str, ...] | None = None
 
 
 def get_env_var(name: str) -> str:
