@@ -219,6 +219,30 @@ variable "loadgen_task_count" {
   }
 }
 
+variable "loadgen_image" {
+  description = "memtier_benchmark container image, pinned to a digest so a tag push upstream can't silently change what's under test between two runs."
+  type        = string
+  # Manifest-list (multi-arch) digest, not an arch-specific one: neither this
+  # task definition nor ecs.tf sets a runtime_platform block, so Fargate
+  # picks the platform itself -- an arch-specific pin would lock that choice
+  # silently. Re-fetch when a bump is deliberate:
+  #   TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:redislabs/memtier_benchmark:pull" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  #   curl -sI -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" https://registry-1.docker.io/v2/redislabs/memtier_benchmark/manifests/latest | grep -i docker-content-digest
+  # Fetched 2026-09-07 (was redislabs/memtier_benchmark:latest, unpinned).
+  default = "redislabs/memtier_benchmark@sha256:5f15b74f657fd30ee73453af9caa1781de1614f4d934d46feee711dc19b758af"
+}
+
+variable "reporter_image" {
+  description = "Base image for the reporter ECS task, pinned to a digest for the same reason as loadgen_image. Kept in sync with reporter/Dockerfile's FROM line (tests/test_reporter_dependency_pins.py checks it), which isn't actually used by this task definition today but should track the same base."
+  type        = string
+  # Same manifest-list caveat as loadgen_image above. Re-fetch when a bump is
+  # deliberate:
+  #   TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/python:pull" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  #   curl -sI -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" https://registry-1.docker.io/v2/library/python/manifests/3.11-slim | grep -i docker-content-digest
+  # Fetched 2026-09-07 (was python:3.11-slim, unpinned).
+  default = "python@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534"
+}
+
 variable "loadgen_cpu" {
   description = "Fargate CPU units (256 = 0.25 vCPU, 512 = 0.5 vCPU, 1024 = 1 vCPU)"
   type        = number

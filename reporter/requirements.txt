@@ -1,8 +1,17 @@
-boto3>=1.35.81
-pandas>=2.2.3
-# Pinned exactly, unlike boto3/pandas above: charts.py reads plotly's
-# private subplot internals (fig._grid_ref, trace_kwargs, layout_keys) that
-# aren't part of its public API and can change shape without notice on any
-# release. Verified working against this exact version; bump deliberately
-# and re-verify build_infra_panels, not via a floating >= constraint.
+# All three pinned exactly (WP3, PLAN_2.md): a floating >= meant the ECS
+# task installed whatever was newest at run time, so two runs a week apart
+# could silently execute different reporter dependency versions with no
+# record of which. `pip freeze` at container startup (see reporter.tf)
+# records what actually got installed either way, but pinning here means
+# that record should normally just confirm these exact versions. Keep this
+# file's boto3/pandas versions in sync with the `pip install` line in
+# reporter.tf (tests/test_reporter_dependency_pins.py checks it); bump
+# deliberately.
+boto3==1.35.81
+pandas==2.2.3
+# plotly specifically also needs re-verification on bump, not just a synced
+# pin: charts.py reads its private subplot internals (fig._grid_ref,
+# trace_kwargs, layout_keys) that aren't part of its public API and can
+# change shape without notice on any release. Verified working against this
+# exact version; re-verify build_infra_panels before bumping.
 plotly==6.9.0

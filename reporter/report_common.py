@@ -294,6 +294,18 @@ def enrich_summary_meta(summary: dict[str, Any], cluster_details: dict[str, Any]
     meta["node_count"] = meta.get("node_count") or elasticache.get("num_cache_nodes") or ""
     if not meta.get("cluster_mode"):
         meta["cluster_mode"] = elasticache.get("cluster_mode_enabled")
+
+    # WP3 provenance. engine_version is the *configured* version (set above)
+    # and is never overwritten here -- engine_version_actual is a separate
+    # field because the two can legitimately differ ("7.1" vs "7.1.0").
+    meta["engine_version_actual"] = meta.get("engine_version_actual") or elasticache.get("engine_version_actual") or ""
+    meta["git_sha"] = meta.get("git_sha") or run_info.get("git_sha") or ""
+    meta["loadgen_image"] = meta.get("loadgen_image") or cluster_details.get("ecs", {}).get("loadgen_image") or ""
+    if not meta.get("reporter_packages"):
+        reporter_packages = cluster_details.get("reporter", {}).get("packages")
+        if reporter_packages:
+            meta["reporter_packages"] = reporter_packages
+
     memtier_task_count = memtier.get("task_count")
     if not ecs.get("task_count") and memtier_task_count:
         ecs["task_count"] = memtier_task_count

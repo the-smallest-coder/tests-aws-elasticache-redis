@@ -1,5 +1,7 @@
 """Build a structured summary dict suitable for JSON serialisation and comparison reports."""
 
+import json
+
 from helpers import (
     metric_filter,
     cache_hit_rate_df,
@@ -30,6 +32,21 @@ DEPRECATED_FIELDS = (
     "worst_stream_p999_ms",
     "avg_bandwidth_kbs",
 )
+
+
+def _reporter_packages_dict(value):
+    """config['reporter_packages'] arrives as a JSON string (env var
+    transit, WP3) or occasionally already a dict; normalize to a dict so a
+    malformed/absent value can't raise while building the summary."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def _dedup_metric_rows(df, metric_name, cluster_id, stat='Sum'):
@@ -163,6 +180,12 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         'memtier_window_source': extra_stats.get('memtier_window_source', 'memtier_log_messages'),
         'artifact_source': extra_stats.get('artifact_source', ''),
         'deprecated_fields': list(DEPRECATED_FIELDS),
+        # WP3 provenance. engine_version above stays the *configured* value;
+        # engine_version_actual is what the cluster actually came up as.
+        'engine_version_actual': config.get('engine_version_actual', ''),
+        'git_sha': config.get('git_sha', ''),
+        'loadgen_image': config.get('loadgen_image', ''),
+        'reporter_packages': _reporter_packages_dict(config.get('reporter_packages')),
     }
     first_message_ts = extra_stats.get('first_message_ts')
     last_message_ts = extra_stats.get('last_message_ts')

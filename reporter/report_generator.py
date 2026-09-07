@@ -155,11 +155,19 @@ def _config_from_env() -> dict[str, str]:
         "node_hourly_usd_reason": os.environ.get("NODE_HOURLY_USD_REASON", ""),
         "node_count": os.environ.get("NODE_COUNT", ""),
         "cluster_mode": os.environ.get("CLUSTER_MODE", "false"),
+        # WP3 provenance. git_sha/engine_version_actual/loadgen_image are
+        # apply-time facts that normally arrive via cluster_details.json
+        # instead (env has no equivalent var for them); reporter_packages is
+        # the one env genuinely originates, since pip only runs at container
+        # startup, after cluster_details.json was already written.
+        "reporter_packages": os.environ.get("REPORTER_PACKAGES_JSON", ""),
     }
 
 
 def _config_from_cluster_details(cluster_details: dict) -> dict[str, str]:
     elasticache = cluster_details.get("elasticache", {}) if cluster_details else {}
+    run_info = cluster_details.get("run", {}) if cluster_details else {}
+    ecs_info = cluster_details.get("ecs", {}) if cluster_details else {}
     # Terraform's jsonencode emits explicit JSON null for fields that don't
     # apply to this topology (e.g. num_cache_nodes under cluster mode), which
     # json.loads turns into None. Normalize to "" so _merge_missing_config's
@@ -175,6 +183,16 @@ def _config_from_cluster_details(cluster_details: dict) -> dict[str, str]:
         "elasticache_availability_zone": elasticache.get("availability_zone"),
         "node_count": elasticache.get("num_cache_nodes"),
         "cluster_mode": elasticache.get("cluster_mode_enabled"),
+        # WP3 provenance (D-none; PLAN_2.md WP3). engine_version_configured
+        # above stays what was *requested*; this is what actually came up.
+        "engine_version_actual": elasticache.get("engine_version_actual"),
+        "git_sha": run_info.get("git_sha"),
+        "loadgen_image": ecs_info.get("loadgen_image"),
+        # cluster_details.json never carries this -- it's apply-time, pip
+        # freeze is runtime-only -- kept here only so this function's shape
+        # matches _config_from_env's, and a value from either source merges
+        # the same way.
+        "reporter_packages": (cluster_details or {}).get("reporter", {}).get("packages"),
     }
     return {key: ("" if value is None else value) for key, value in raw.items()}
 

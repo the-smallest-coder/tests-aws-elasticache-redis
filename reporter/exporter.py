@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import html
 import io
@@ -954,6 +955,24 @@ def send_report_ready_email(cluster_id: str, report_uri: str, summary_uri: str, 
     return True
 
 
+_TRACKED_PIP_PACKAGES = ("boto3", "pandas", "plotly")
+
+
+def _parse_pip_freeze(text: str) -> dict[str, str]:
+    """Extract {package: version} for the reporter's pinned dependencies.
+
+    Only the three tracked packages are kept -- `pip freeze` also lists every
+    transitive dependency, which is provenance noise for this purpose (the
+    full text is still preserved as-is in report_status.json.reporter.pip_freeze).
+    """
+    versions: dict[str, str] = {}
+    for line in text.splitlines():
+        name, sep, version = line.strip().partition("==")
+        if sep and name.lower() in _TRACKED_PIP_PACKAGES:
+            versions[name.lower()] = version.strip()
+    return versions
+
+
 def main() -> None:
     cluster_id = os.environ["CLUSTER_ID"]
     elasticache_id = os.environ.get("ELASTICACHE_ID", cluster_id)
@@ -1088,6 +1107,19 @@ def main() -> None:
     os.environ["OUTPUT_PREFIX"] = prefix
     os.environ["SUFFIX"] = timestamp
     os.environ["REPORT_TIMESTAMP"] = timestamp
+
+    # Provenance of the software that actually ran (WP3): pip freeze happens
+    # in reporter.tf's shell script, before this process starts, so it
+    # arrives via env rather than exporter.py having run pip itself.
+    pip_freeze_text = ""
+    pip_freeze_b64 = os.environ.get("PIP_FREEZE_B64", "")
+    if pip_freeze_b64:
+        try:
+            pip_freeze_text = base64.b64decode(pip_freeze_b64).decode("utf-8", "replace")
+        except Exception as exc:
+            print(f"Warning: failed to decode PIP_FREEZE_B64: {exc}")
+    status["reporter"] = {"pip_freeze": pip_freeze_text}
+    os.environ["REPORTER_PACKAGES_JSON"] = json.dumps(_parse_pip_freeze(pip_freeze_text))
 
     # cluster_details.json is written once, at apply time, by node_details.tf.
     # The exporter must never write to that key: doing so would overwrite the
