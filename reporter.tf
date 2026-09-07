@@ -13,6 +13,7 @@ locals {
     "loadgen_analysis.py",
     "exporter.py",
     "memtier_etl.py",
+    "formatting.py",
   ])
   reporter_scripts_prefix = "scripts/${local.cluster_id}/"
 }
@@ -130,6 +131,7 @@ modules = [
     "loadgen_analysis.py",
     "exporter.py",
     "memtier_etl.py",
+    "formatting.py",
 ]
 
 s3 = boto3.client("s3")
