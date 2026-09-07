@@ -82,11 +82,20 @@ def _run_main_with_fakes(fake_s3: FakeS3):
         "files": [],
     }
     exporter._generate_and_upload_memtier_etl = lambda *a, **k: None
-    exporter.export_elasticache_metrics_to_s3 = lambda *a, **k: "s3://test-bucket/metrics.csv"
+    exporter.export_elasticache_metrics_to_s3 = lambda *a, **k: {
+        "uri": "s3://test-bucket/metrics.csv",
+        "discovered": [],
+        "exported": 0,
+        "zero_datapoints": [],
+        "missing_from_discovery": [],
+        "errors": [],
+        "rows_written": 0,
+        "complete": True,
+        "missing": [],
+    }
     exporter.export_logs_to_s3 = lambda *a, **k: None
     exporter._task_metadata_from_container_insights_object = lambda *a, **k: {}
     exporter.export_ecs_metrics_to_s3 = lambda *a, **k: "s3://test-bucket/ecs.csv"
-    exporter._metric_contract_status = lambda *a, **k: {"complete": True}
     exporter.send_report_ready_email = lambda *a, **k: True
     exporter.s3 = fake_s3
 

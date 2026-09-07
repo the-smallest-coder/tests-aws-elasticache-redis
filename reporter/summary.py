@@ -62,6 +62,21 @@ def _network_kib_per_sec(df, metric_name, cluster_id):
     return _safe(float(per_minute.mean()), 2)
 
 
+def _dedup_metric_stat(df, metric_name, cluster_id, stat, agg='mean'):
+    """Deduplicated mean or max of one metric/stat across the whole window (D6, WP2).
+
+    Covers CloudWatch's ordinary Statistics (Average, Maximum, ...) and its
+    ExtendedStatistics percentile rows alike (WP2 requests p99 for every
+    discovered metric) -- both duplicate across the CacheClusterId /
+    CacheNodeId axis the same way, so both need the same dedup.
+    """
+    selected = _dedup_metric_rows(df, metric_name, cluster_id, stat)
+    if selected.empty:
+        return None
+    values = selected['Value']
+    return float(values.mean()) if agg == 'mean' else float(values.max())
+
+
 def _safe(val, decimals=None):
     """Return a JSON-safe scalar, rounding floats when requested."""
     if val is None or (isinstance(val, float) and (val != val)):   # NaN check
@@ -261,6 +276,14 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         if not swap.empty:
             memory['swap_max_bytes'] = _safe(float(swap['Value'].max()), 0)
 
+        # WP2: BytesUsedForCache, newly discovered rather than curated.
+        bytes_avg = _dedup_metric_stat(metrics_df, 'BytesUsedForCache', cluster_id, 'Average', 'mean')
+        if bytes_avg is not None:
+            memory['bytes_used_avg_mb'] = _safe(bytes_avg / (1024 * 1024), 1)
+        bytes_max = _dedup_metric_stat(metrics_df, 'BytesUsedForCache', cluster_id, 'Maximum', 'max')
+        if bytes_max is not None:
+            memory['bytes_used_max_mb'] = _safe(bytes_max / (1024 * 1024), 1)
+
     # ------------------------------------------------------------------ #
     #  network                                                             #
     # ------------------------------------------------------------------ #
@@ -303,6 +326,26 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
             total = _metric_sum(metrics_df, mname, cluster_id)
             network['throttling'][key] = int(total) if total is not None else 0
 
+        # WP2: how close to the instance's network ceiling the run got --
+        # the throttle counters above are all-zero whenever the node never
+        # actually hit the cap, which tells nothing about headroom.
+        for direction, mname in (('out', 'NetworkBaselineUsageOutPercentage'), ('in', 'NetworkBaselineUsageInPercentage')):
+            avg_v = _dedup_metric_stat(metrics_df, mname, cluster_id, 'Average', 'mean')
+            if avg_v is not None:
+                network['cache'][f'baseline_usage_{direction}_avg_pct'] = _safe(avg_v, 2)
+            max_v = _dedup_metric_stat(metrics_df, mname, cluster_id, 'Maximum', 'max')
+            if max_v is not None:
+                network['cache'][f'baseline_usage_{direction}_max_pct'] = _safe(max_v, 2)
+
+        # NetworkMaxBytes{Out,In} are already a bytes/sec rate (not a
+        # per-period Sum), so this is only a unit conversion, same scale as
+        # out_kib_per_sec/in_kib_per_sec above -- named accordingly, not
+        # "_bytes", to avoid reintroducing the WP1 network naming bug.
+        for direction, mname in (('out', 'NetworkMaxBytesOut'), ('in', 'NetworkMaxBytesIn')):
+            peak = _dedup_metric_stat(metrics_df, mname, cluster_id, 'Maximum', 'max')
+            if peak is not None:
+                network['cache'][f'max_{direction}_kib_per_sec'] = _safe(peak / 1024.0, 2)
+
     # ------------------------------------------------------------------ #
     #  latency_server_us (command-level, server-side)                     #
     # ------------------------------------------------------------------ #
@@ -320,6 +363,34 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
             # D5: values are already a correct mean of the per-minute
             # CloudWatch Average; this just states the basis explicitly.
             latency_server_us['percentile_basis'] = 'minute_average'
+
+    # ------------------------------------------------------------------ #
+    #  server_request_latency_us (WP2 -- SuccessfulRead/WriteRequestLatency,   #
+    #  newly discovered; distinct from latency_server_us above, which is       #
+    #  per-command-type minute-average latency, not a percentile)              #
+    # ------------------------------------------------------------------ #
+    server_request_latency_us = {}
+    if not metrics_df.empty:
+        for key, mname, stat, agg in (
+            ('read_avg', 'SuccessfulReadRequestLatency', 'Average', 'mean'),
+            ('read_p99', 'SuccessfulReadRequestLatency', 'p99', 'mean'),
+            ('write_avg', 'SuccessfulWriteRequestLatency', 'Average', 'mean'),
+            ('write_p99', 'SuccessfulWriteRequestLatency', 'p99', 'mean'),
+        ):
+            value = _dedup_metric_stat(metrics_df, mname, cluster_id, stat, agg)
+            if value is not None:
+                server_request_latency_us[key] = _safe(value, 3)
+        if server_request_latency_us:
+            server_request_latency_us['percentile_basis'] = 'cloudwatch_extended_statistic'
+
+    # ------------------------------------------------------------------ #
+    #  errors (WP2 -- ErrorCount, newly discovered)                       #
+    # ------------------------------------------------------------------ #
+    errors = {}
+    if not metrics_df.empty:
+        error_total = _metric_sum(metrics_df, 'ErrorCount', cluster_id)
+        if error_total is not None:
+            errors['error_count_total'] = int(error_total)
 
     # ------------------------------------------------------------------ #
     #  client_latency (ECS load-generator EMF percentiles)                #
@@ -410,8 +481,10 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         'memory':             memory,
         'network':            network,
         'latency_server_us':  latency_server_us,
+        'server_request_latency_us': server_request_latency_us,
         'client_latency':     client_latency,
         'connections':        connections,
         'ecs':                ecs,
+        'errors':             errors,
         'loadgen':            loadgen,
     }
