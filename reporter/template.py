@@ -352,11 +352,62 @@ def _render_sections(sections: list[dict[str, object]]) -> str:
     return "".join(parts)
 
 
+_CONTRACT_REASON_LABELS = {
+    "diagnostic_status_invalid": "loadgen diagnostic status is invalid",
+    "task_count_mismatch": "observed task count does not match the request",
+    "memtier_window_missing": "memtier report window is missing",
+    "truncated_run": "observed window is far shorter than the configured duration",
+    "multiple_intended_dimensions_differ": "more than one intended dimension differs",
+    "engine_version_actual_differs": "actual engine version differs",
+    "control_variables_unknown": "control variables are unknown (thin cluster_details.json)",
+    "control_variable_differs": "a control variable differs",
+    "loadgen_unknown": "loadgen validity is unknown",
+    "diagnostic_warning": "loadgen diagnostic status is a warning",
+    "schema_version_differs": "generator schema version differs",
+    "metric_only_in_legacy_variant": "at least one metric is only available in its legacy form",
+}
+
+
+def _contract_reason_text(reason: dict[str, object]) -> str:
+    label = _CONTRACT_REASON_LABELS.get(str(reason.get("code")), str(reason.get("code", "unknown")))
+    extras = []
+    if reason.get("role"):
+        extras.append(str(reason["role"]))
+    if reason.get("field"):
+        extras.append(str(reason["field"]))
+    if reason.get("fields"):
+        extras.append(", ".join(str(field) for field in reason["fields"]))
+    if reason.get("baseline") is not None and reason.get("candidate") is not None:
+        extras.append(f"{reason['baseline']} vs {reason['candidate']}")
+    return f"{label} ({'; '.join(extras)})" if extras else label
+
+
+def _render_contract(contract: dict[str, object] | None) -> str:
+    if not contract:
+        return ""
+    verdict = str(contract.get("verdict", "unknown"))
+    reasons = contract.get("reasons") or []
+    reasons_html = "".join(f"<li>{escape(_contract_reason_text(reason))}</li>" for reason in reasons)
+    reasons_block = (
+        f"<details class=\"contract-reasons\"><summary>{len(reasons)} reason(s)</summary>"
+        f"<ul>{reasons_html}</ul></details>"
+        if reasons else ""
+    )
+    return f"""
+    <section class="contract contract-{escape(verdict)}">
+      <span class="contract-badge">{escape(verdict.upper())}</span>
+      <span class="contract-label">Comparability contract</span>
+      {reasons_block}
+    </section>
+    """
+
+
 def render_report(payload: dict[str, object]) -> str:
     context_html = "".join(_render_run_context(run) for run in payload["runs"])
     takeaways_html = _render_takeaways(payload["takeaways"])
     topline_html = _render_topline_cards(payload["topline_cards"])
     sections_html = _render_sections(payload["sections"])
+    contract_html = _render_contract(payload.get("contract"))
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -462,6 +513,47 @@ def render_report(payload: dict[str, object]) -> str:
     .card.tone-better::before {{ background: var(--good); }}
     .card.tone-worse::before {{ background: var(--bad); }}
     .card.tone-warning::before {{ background: var(--warn); }}
+    .contract {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      padding: 10px 16px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      margin-bottom: 16px;
+    }}
+    .contract-badge {{
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      color: #fff;
+    }}
+    /* Deliberately its own class, not tone-better/warning/worse (WP4): those
+       mean "a better/worse result", and a green contract badge would read
+       as "better run" rather than "this comparison is trustworthy". */
+    .contract-comparable .contract-badge {{ background: var(--good); }}
+    .contract-conditional .contract-badge {{ background: var(--warn); }}
+    .contract-invalid .contract-badge {{ background: var(--bad); }}
+    .contract-label {{
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .contract-reasons summary {{
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--muted);
+    }}
+    .contract-reasons ul {{
+      margin: 6px 0 0;
+      padding-left: 18px;
+      font-size: 12px;
+      color: var(--ink);
+    }}
     .card-label {{
       color: var(--muted);
       font-size: 11px;
@@ -681,6 +773,7 @@ def render_report(payload: dict[str, object]) -> str:
   </header>
 
   <main class="page">
+    {contract_html}
     {topline_html}
     {takeaways_html}
 

@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from comparison_contract import build_comparison_contract
 from formatting import format_gib, format_usd_hour
 from report_common import (
     MetricSpec,
@@ -525,6 +526,11 @@ def build_compare_payload(baseline: RunData, candidate: RunData) -> dict[str, An
         "takeaways": collect_takeaways(baseline, candidate),
         "runs": [build_run_context(baseline), build_run_context(candidate)],
         "sections": build_sections(rows),
+        # WP4: is this pair comparable at all, separate from how the metrics
+        # in `sections` above happen to differ (report_compare's own
+        # tone-better/worse is about a *result*, never about whether the
+        # comparison itself is trustworthy).
+        "contract": build_comparison_contract(baseline, candidate),
     }
 
 
