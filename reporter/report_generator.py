@@ -168,6 +168,7 @@ def _config_from_cluster_details(cluster_details: dict) -> dict[str, str]:
     elasticache = cluster_details.get("elasticache", {}) if cluster_details else {}
     run_info = cluster_details.get("run", {}) if cluster_details else {}
     ecs_info = cluster_details.get("ecs", {}) if cluster_details else {}
+    memtier = cluster_details.get("memtier", {}) if cluster_details else {}
     # Terraform's jsonencode emits explicit JSON null for fields that don't
     # apply to this topology (e.g. num_cache_nodes under cluster mode), which
     # json.loads turns into None. Normalize to "" so _merge_missing_config's
@@ -193,6 +194,9 @@ def _config_from_cluster_details(cluster_details: dict) -> dict[str, str]:
         # matches _config_from_env's, and a value from either source merges
         # the same way.
         "reporter_packages": (cluster_details or {}).get("reporter", {}).get("packages"),
+        # WP5: the requested memtier task count, for build_loadgen_summary's
+        # requested-vs-observed check. "" in 81 of 82 pre-WP0 runs.
+        "task_count": memtier.get("task_count"),
     }
     return {key: ("" if value is None else value) for key, value in raw.items()}
 

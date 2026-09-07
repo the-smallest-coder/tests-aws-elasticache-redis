@@ -306,9 +306,14 @@ def enrich_summary_meta(summary: dict[str, Any], cluster_details: dict[str, Any]
         if reporter_packages:
             meta["reporter_packages"] = reporter_packages
 
+    # WP5: the requested count now has its own field instead of silently
+    # taking ecs.task_count's place when the observed count is missing --
+    # that used to be harmless only because cluster_details.json was thin
+    # (memtier.task_count always "") in 81 of 82 pre-WP0 runs; after WP0 it
+    # would read as a real observation that never happened.
     memtier_task_count = memtier.get("task_count")
-    if not ecs.get("task_count") and memtier_task_count:
-        ecs["task_count"] = memtier_task_count
+    if memtier_task_count and not ecs.get("requested_task_count"):
+        ecs["requested_task_count"] = memtier_task_count
 
 
 def load_run(role: str, raw_path: str) -> RunData:

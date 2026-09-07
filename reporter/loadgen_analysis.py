@@ -126,6 +126,18 @@ def _task_latency_map(memtier_totals_df: pd.DataFrame) -> dict[str, float]:
     return dict(zip(df["TaskId"], df["p50_latency_ms"]))
 
 
+def _requested_task_count_as_int(requested_task_count) -> int | None:
+    # "" (the value in 81 of 82 pre-WP0 cluster_details.json files) means
+    # missing, not zero -- must not be coerced to 0 and compared as a
+    # legitimate request for zero tasks (test 49).
+    if requested_task_count in (None, ""):
+        return None
+    try:
+        return int(requested_task_count)
+    except (TypeError, ValueError):
+        return None
+
+
 def build_loadgen_summary(
     memtier_samples_df: pd.DataFrame,
     memtier_minute_df: pd.DataFrame,
@@ -136,6 +148,7 @@ def build_loadgen_summary(
     report_end,
     measured_elasticache_az=None,
     memtier_totals_df: pd.DataFrame | None = None,
+    requested_task_count=None,
 ) -> dict:
     """Build load-generator validity metrics using only complete absolute minutes."""
     samples = _clip(memtier_samples_df, report_start, report_end)
@@ -145,7 +158,30 @@ def build_loadgen_summary(
     samples["minute_utc"] = samples["Timestamp"].dt.floor("min")
 
     stream_count = int(samples["TaskId"].nunique())
-    expected_task_count = _running_task_count(ecs_df, ci_service_df, report_start, report_end) or stream_count
+    running_task_count = _running_task_count(ecs_df, ci_service_df, report_start, report_end)
+    if running_task_count is not None:
+        observed_task_count = running_task_count
+        task_count_source = "running_task_count"
+    elif stream_count:
+        observed_task_count = stream_count
+        task_count_source = "memtier_streams"
+    else:
+        observed_task_count = None
+        task_count_source = "unknown"
+    # Kept under its original name (report_compare.METRICS and README both
+    # reference "expected_task_count"); observed_task_count is the same
+    # value under a name that doesn't conflate "expected" with "requested"
+    # -- the confusion WP5 exists to resolve (PLAN_2.md WP5). Unlike
+    # observed_task_count, this preserves the original never-None guarantee
+    # (stream_count is >= 1 whenever samples is non-empty, as it is here) --
+    # code below still divides/compares against it unconditionally.
+    expected_task_count = observed_task_count if observed_task_count is not None else stream_count
+
+    requested_task_count_int = _requested_task_count_as_int(requested_task_count)
+    task_count_matches_request = (
+        None if requested_task_count_int is None or observed_task_count is None
+        else observed_task_count == requested_task_count_int
+    )
 
     if memtier_minute_df is not None and not memtier_minute_df.empty and "task_count_present" in memtier_minute_df:
         minute_counts = memtier_minute_df[["Timestamp", "task_count_present"]].copy()
@@ -296,6 +332,14 @@ def build_loadgen_summary(
         reasons.append("generator_cpu_p95_above_85_pct")
     if within_az_warning:
         reasons.append("throughput_skew_within_az_above_1_3")
+    if task_count_matches_request is False:
+        # WP5 step 0: no run in the available corpus has both a populated
+        # requested count and enough loadgen data to compare (cluster_details.json
+        # was thin in 81 of 82 pre-WP0 runs), so there's no dry-run evidence
+        # this is rare enough to invalidate a run over. Soft gate until a
+        # real post-WP0 series says otherwise (D-none, "invalid" is reserved
+        # for data-integrity failures, not this).
+        reasons.append("task_count_mismatch_with_request")
     unknown_reasons = []
     if missing_az_tasks:
         unknown_reasons.append("availability_zone_missing")
@@ -330,6 +374,10 @@ def build_loadgen_summary(
         "unknown_reasons": unknown_reasons,
         "latency_tail_valid": not generator_limited if has_cpu else None,
         "expected_task_count": expected_task_count,
+        "observed_task_count": observed_task_count,
+        "requested_task_count": requested_task_count_int,
+        "task_count_source": task_count_source,
+        "task_count_matches_request": task_count_matches_request,
         "memtier_stream_count": stream_count,
         "complete_minute_count": int(len(complete_minute_set)),
         "discarded_incomplete_minute_count": int(discarded_mask.sum()),
