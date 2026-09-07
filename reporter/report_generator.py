@@ -154,18 +154,23 @@ def _config_from_env() -> dict[str, str]:
 
 def _config_from_cluster_details(cluster_details: dict) -> dict[str, str]:
     elasticache = cluster_details.get("elasticache", {}) if cluster_details else {}
-    return {
-        "engine_type": elasticache.get("engine", ""),
-        "engine_version": elasticache.get("engine_version_configured", ""),
-        "node_type": elasticache.get("node_type", ""),
-        "node_memory_bytes": elasticache.get("node_memory_bytes", ""),
-        "node_hourly_usd": elasticache.get("node_hourly_usd", ""),
-        "node_hourly_usd_source": elasticache.get("node_hourly_usd_source", ""),
-        "node_hourly_usd_reason": elasticache.get("node_hourly_usd_reason", ""),
-        "elasticache_availability_zone": elasticache.get("availability_zone", ""),
-        "node_count": elasticache.get("num_cache_nodes", ""),
-        "cluster_mode": elasticache.get("cluster_mode_enabled", ""),
+    # Terraform's jsonencode emits explicit JSON null for fields that don't
+    # apply to this topology (e.g. num_cache_nodes under cluster mode), which
+    # json.loads turns into None. Normalize to "" so _merge_missing_config's
+    # "missing means falsy" check treats them the same as an absent field.
+    raw = {
+        "engine_type": elasticache.get("engine"),
+        "engine_version": elasticache.get("engine_version_configured"),
+        "node_type": elasticache.get("node_type"),
+        "node_memory_bytes": elasticache.get("node_memory_bytes"),
+        "node_hourly_usd": elasticache.get("node_hourly_usd"),
+        "node_hourly_usd_source": elasticache.get("node_hourly_usd_source"),
+        "node_hourly_usd_reason": elasticache.get("node_hourly_usd_reason"),
+        "elasticache_availability_zone": elasticache.get("availability_zone"),
+        "node_count": elasticache.get("num_cache_nodes"),
+        "cluster_mode": elasticache.get("cluster_mode_enabled"),
     }
+    return {key: ("" if value is None else value) for key, value in raw.items()}
 
 
 def _merge_missing_config(config: dict | None, extra_config: dict | None) -> dict:
@@ -821,7 +826,7 @@ def run_generate_report(run_dir: str, config: dict) -> None:
     print(f"Written: {html_path}")
 
 
-def run_uploaded_report() -> None:
+def run_uploaded_report() -> dict:
     import boto3
     import pandas as pd
 
@@ -903,12 +908,22 @@ def run_uploaded_report() -> None:
     report_config = _config_from_env()
     try:
         cluster_details = json.loads(read_file_content(cluster_details_uri))
+        # cluster_details.json (Terraform, as-applied) is the base; env vars
+        # only fill fields it lacks. Both are normally sourced from the same
+        # terraform vars, but the artifact is authoritative on conflict.
         report_config = _merge_missing_config(
-            report_config,
             _config_from_cluster_details(cluster_details),
+            report_config,
         )
-    except Exception:
-        pass  # cluster_details.json is optional
+        cluster_details_status = {"present": True}
+    except Exception as exc:
+        # cluster_details.json is written once, at apply time, by
+        # node_details.tf (PLAN_2.md WP0). A live run always produces it, so
+        # its absence here means a failed upload or a broken apply, not an
+        # optional artifact. The gap must stay visible, not fall back to
+        # env-only config in silence.
+        cluster_details_status = {"present": False, "reason": str(exc)}
+        print(f"Warning: cluster_details.json unavailable at {cluster_details_uri}: {exc}")
 
     html_content, summary_json = create_report(
         metrics_df=metrics_df,
@@ -922,12 +937,16 @@ def run_uploaded_report() -> None:
         extra_stats=extra_stats,
     )
 
+    from report_common import enrich_summary_meta
+    summary_obj = json.loads(summary_json)
     if cluster_details:
-        from report_common import enrich_summary_meta
-        summary_obj = json.loads(summary_json)
         enrich_summary_meta(summary_obj, cluster_details)
-        summary_json = json.dumps(summary_obj, indent=2, default=str)
         print(f"Summary enriched from {cluster_details_uri}")
+    else:
+        summary_obj.setdefault("meta", {}).setdefault("warnings", []).append(
+            f"cluster_details.json missing or unreadable: {cluster_details_status['reason']}"
+        )
+    summary_json = json.dumps(summary_obj, indent=2, default=str)
 
     output_key = f"{output_prefix}{timestamp}/results_{suffix}.html"
     output_json_key = re.sub(r"\.html$", ".json", output_key)
@@ -939,6 +958,7 @@ def run_uploaded_report() -> None:
     s3.put_object(Bucket=output_bucket, Key=output_key, Body=html_content, ContentType="text/html")
     print(f"Uploading summary JSON to s3://{output_bucket}/{output_json_key}")
     s3.put_object(Bucket=output_bucket, Key=output_json_key, Body=summary_json, ContentType="application/json")
+    return cluster_details_status
 
 
 def main() -> None:

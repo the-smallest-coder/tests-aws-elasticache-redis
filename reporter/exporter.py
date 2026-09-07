@@ -959,32 +959,11 @@ def main() -> None:
     os.environ["SUFFIX"] = timestamp
     os.environ["REPORT_TIMESTAMP"] = timestamp
 
-    cluster_details = {
-        "run": {"cluster_id": cluster_id, "timestamp": timestamp},
-        "elasticache": {
-            "engine": os.environ.get("ENGINE_TYPE", ""),
-            "engine_version_configured": os.environ.get("ENGINE_VERSION", ""),
-            "node_type": os.environ.get("NODE_TYPE", ""),
-            "node_memory_bytes": os.environ.get("NODE_MEMORY_BYTES", ""),
-            "node_hourly_usd": os.environ.get("NODE_HOURLY_USD", ""),
-            "node_hourly_usd_source": os.environ.get("NODE_HOURLY_USD_SOURCE", ""),
-            "node_hourly_usd_reason": os.environ.get("NODE_HOURLY_USD_REASON", ""),
-            "num_cache_nodes": os.environ.get("NODE_COUNT", ""),
-            "cluster_mode_enabled": os.environ.get("CLUSTER_MODE", "false"),
-        },
-        "memtier": {
-            "task_count": os.environ.get("TASK_COUNT", ""),
-        },
-        "ecs": {
-            "cluster": ecs_cluster,
-            "service": ecs_service,
-        },
-    }
-    cluster_details_key = f"{prefix}{timestamp}/cluster_details.json"
-    _put_json(bucket, cluster_details_key, cluster_details)
-    print(f"Cluster details uploaded: s3://{bucket}/{cluster_details_key}")
-
-    run_uploaded_report()
+    # cluster_details.json is written once, at apply time, by node_details.tf.
+    # The exporter must never write to that key: doing so would overwrite the
+    # rich Terraform artifact with a thin subset of the same fields sourced
+    # from env vars, which is strictly less information. See PLAN_2.md WP0.
+    status["cluster_details"] = run_uploaded_report()
 
     report_uri = f"s3://{bucket}/{prefix}{timestamp}/results_{timestamp}.html"
     summary_uri = f"s3://{bucket}/{prefix}{timestamp}/results_{timestamp}.json"
