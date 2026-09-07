@@ -244,6 +244,19 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         if not items_df.empty:
             cache_efficiency['peak_key_count'] = int(items_df['Value'].max())
 
+        # WP6 step 1: server-side command count, not memtier's own avg_ops --
+        # numerator and denominator for cost-per-op (WP6 step 4) must come
+        # from one source and one window. None when the total is 0, not 0
+        # itself (a real 0-command run and "couldn't measure" must not look
+        # the same to a caller dividing by this).
+        get_total = _metric_sum(metrics_df, 'GetTypeCmds', cluster_id)
+        set_total = _metric_sum(metrics_df, 'SetTypeCmds', cluster_id)
+        if get_total is not None and set_total is not None:
+            total_ops = get_total + set_total
+            cache_efficiency['total_ops'] = int(total_ops) if total_ops > 0 else None
+        if set_total is not None:
+            cache_efficiency['total_writes'] = int(set_total) if set_total > 0 else None
+
     ev_df = cloudwatch_eviction_series(metrics_df, cluster_id)
     cache_efficiency['first_eviction_ts'] = _safe(first_positive_timestamp(ev_df))
 

@@ -786,3 +786,121 @@ def render_report(payload: dict[str, object]) -> str:
 </body>
 </html>
 """
+
+
+# ---------------------------------------------------------------------------
+# Aggregate report renderer (WP6): n repeated runs -> per-metric
+# n/median/mean/CV%/min/max plus cost-per-successful-operation.
+# ---------------------------------------------------------------------------
+
+_AGGREGATE_CSS = """\
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+       background: #eef3f8; color: #17212b; }
+.page { max-width: 1100px; margin: 0 auto; padding: 28px 20px 40px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.sub { color: #5f6b76; font-size: 13px; margin-bottom: 20px; }
+.panel { background: #fff; border: 1px solid #d9e1ea; border-radius: 10px;
+         padding: 18px 20px; margin-bottom: 18px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid #eef1f4; }
+th:first-child, td:first-child { text-align: left; }
+.n-a { color: #5f6b76; }
+.runs-list { font-size: 12px; color: #5f6b76; word-break: break-all; }
+"""
+
+
+def _render_aggregate_metric_rows(rows: list[dict[str, object]]) -> str:
+    parts = []
+    for row in rows:
+        cv = row["cv_pct"]
+        cv_text = f"{cv:.1f}%" if cv is not None else "n/a"
+        unit = f" {row['unit']}" if row.get("unit") else ""
+        parts.append(f"""
+        <tr>
+          <td>{escape(str(row['label']))}</td>
+          <td>{row['n']}</td>
+          <td>{row['median']:.3f}{escape(unit)}</td>
+          <td>{row['mean']:.3f}{escape(unit)}</td>
+          <td>{cv_text}</td>
+          <td>{row['min']:.3f}{escape(unit)}</td>
+          <td>{row['max']:.3f}{escape(unit)}</td>
+        </tr>
+        """)
+    return "".join(parts)
+
+
+def _render_cost_rows(per_run: list[dict[str, object]]) -> str:
+    parts = []
+    for row in per_run:
+        if row["value"] is None:
+            value_html = f"<span class=\"n-a\">n/a ({escape(str(row['reason']))})</span>"
+        else:
+            value_html = f"${row['value']:.6f}"
+            if row.get("errors_unknown"):
+                value_html += " <span class=\"n-a\">(errors_unknown)</span>"
+        parts.append(f"""
+        <tr>
+          <td>{escape(str(row['folder']))}</td>
+          <td>{value_html}</td>
+        </tr>
+        """)
+    return "".join(parts)
+
+
+def render_aggregate_report(payload: dict[str, object]) -> str:
+    metrics_html = _render_aggregate_metric_rows(payload.get("metrics") or [])
+    cost = payload.get("cost_per_successful_operation") or {}
+    cost_rows_html = _render_cost_rows(cost.get("per_run") or [])
+    cost_stats = cost.get("stats")
+    cost_stats_html = ""
+    if cost_stats:
+        cv = cost_stats["cv_pct"]
+        cv_text = f"{cv:.1f}%" if cv is not None else "n/a"
+        cost_stats_html = f"""
+        <p>n={cost_stats['n']} &middot; median ${cost_stats['median']:.6f}
+           &middot; mean ${cost_stats['mean']:.6f} &middot; CV {cv_text}
+           &middot; min ${cost_stats['min']:.6f} &middot; max ${cost_stats['max']:.6f}</p>
+        """
+
+    runs_html = ", ".join(escape(str(folder)) for folder in payload.get("runs") or [])
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{escape(str(payload.get('label', 'Aggregate')))}</title>
+  <style>{_AGGREGATE_CSS}</style>
+</head>
+<body>
+  <div class="page">
+    <h1>Aggregate: {escape(str(payload.get('label', '')))}</h1>
+    <div class="sub">n={payload.get('n')} runs, fingerprint {escape(str(payload.get('fingerprint_id', '')))}</div>
+
+    <section class="panel">
+      <div class="runs-list">{runs_html}</div>
+    </section>
+
+    <section class="panel">
+      <h2>Metrics</h2>
+      <table>
+        <thead>
+          <tr><th>Metric</th><th>n</th><th>Median</th><th>Mean</th><th>CV%</th><th>Min</th><th>Max</th></tr>
+        </thead>
+        <tbody>{metrics_html}</tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Cost per successful operation</h2>
+      <p class="sub">ElastiCache node hourly rate only (D11) -- never Fargate, network, or CloudWatch cost.</p>
+      {cost_stats_html}
+      <table>
+        <thead><tr><th>Run</th><th>USD / successful op</th></tr></thead>
+        <tbody>{cost_rows_html}</tbody>
+      </table>
+    </section>
+  </div>
+</body>
+</html>
+"""

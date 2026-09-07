@@ -66,7 +66,7 @@ def _reason(code: str, **extra: Any) -> dict[str, Any]:
     return {"code": code, **extra}
 
 
-def _coerce_control_value(field: str, value: Any) -> Any:
+def coerce_control_value(field: str, value: Any) -> Any:
     """Normalize a control-variable value before comparing across runs.
 
     Pre-WP0 (thin) artifacts carry strings ("1", "false"); post-WP0 ones
@@ -94,11 +94,11 @@ def _coerce_control_value(field: str, value: Any) -> Any:
         return text
 
 
-def _control_variable_value(run: RunData, section: str, field: str) -> Any:
+def control_variable_value(run: RunData, section: str, field: str) -> Any:
     return get_nested(run.cluster_details or {}, (section, field))
 
 
-def _intended_dimension_value(run: RunData, dimension: str) -> Any:
+def intended_dimension_value(run: RunData, dimension: str) -> Any:
     meta = run.summary.get("meta", {}) if isinstance(run.summary, dict) else {}
     if dimension == "engine":
         return meta.get("engine_type")
@@ -108,8 +108,8 @@ def _intended_dimension_value(run: RunData, dimension: str) -> Any:
 def _intended_dimensions_payload(baseline: RunData, candidate: RunData) -> dict[str, dict[str, Any]]:
     payload = {}
     for dimension in INTENDED_DIMENSIONS:
-        baseline_value = _intended_dimension_value(baseline, dimension)
-        candidate_value = _intended_dimension_value(candidate, dimension)
+        baseline_value = intended_dimension_value(baseline, dimension)
+        candidate_value = intended_dimension_value(candidate, dimension)
         payload[dimension] = {
             "baseline": baseline_value,
             "candidate": candidate_value,
@@ -118,7 +118,7 @@ def _intended_dimensions_payload(baseline: RunData, candidate: RunData) -> dict[
     return payload
 
 
-def _run_window_seconds(run: RunData) -> float | None:
+def run_window_seconds(run: RunData) -> float | None:
     from report_common import _parse_iso_timestamp
 
     meta = run.summary.get("meta", {}) if isinstance(run.summary, dict) else {}
@@ -130,8 +130,8 @@ def _run_window_seconds(run: RunData) -> float | None:
 
 
 def _configured_test_time_seconds(run: RunData) -> float | None:
-    coerced = _coerce_control_value(
-        "test_time_seconds", _control_variable_value(run, "memtier", "test_time_seconds")
+    coerced = coerce_control_value(
+        "test_time_seconds", control_variable_value(run, "memtier", "test_time_seconds")
     )
     return float(coerced) if isinstance(coerced, (int, float)) else None
 
@@ -140,7 +140,7 @@ def _is_truncated_run(run: RunData) -> bool:
     configured = _configured_test_time_seconds(run)
     if not configured or configured <= 0:
         return False
-    observed = _run_window_seconds(run)
+    observed = run_window_seconds(run)
     if observed is None:
         return False  # covered separately by memtier_window_missing
     return observed < configured * TRUNCATED_RUN_WINDOW_RATIO
@@ -183,7 +183,7 @@ def build_comparison_contract(baseline: RunData, candidate: RunData) -> dict[str
             invalid_reasons.append(_reason("diagnostic_status_invalid", role=run.role))
         if _task_count_mismatch(run):
             invalid_reasons.append(_reason("task_count_mismatch", role=run.role))
-        window = _run_window_seconds(run)
+        window = run_window_seconds(run)
         if window is None:
             invalid_reasons.append(_reason("memtier_window_missing", role=run.role))
         elif _is_truncated_run(run):
@@ -212,7 +212,7 @@ def build_comparison_contract(baseline: RunData, candidate: RunData) -> dict[str
             ))
 
     control_known = all(
-        _control_variable_value(run, section, field) is not None
+        control_variable_value(run, section, field) is not None
         for section, field in CONTROL_VARIABLES
         for run in (baseline, candidate)
     )
@@ -220,8 +220,8 @@ def build_comparison_contract(baseline: RunData, candidate: RunData) -> dict[str
         reasons.append(_reason("control_variables_unknown"))
     else:
         for section, field in CONTROL_VARIABLES:
-            baseline_value = _coerce_control_value(field, _control_variable_value(baseline, section, field))
-            candidate_value = _coerce_control_value(field, _control_variable_value(candidate, section, field))
+            baseline_value = coerce_control_value(field, control_variable_value(baseline, section, field))
+            candidate_value = coerce_control_value(field, control_variable_value(candidate, section, field))
             if baseline_value != candidate_value:
                 reasons.append(_reason(
                     "control_variable_differs",

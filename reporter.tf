@@ -14,6 +14,7 @@ locals {
     "exporter.py",
     "memtier_etl.py",
     "formatting.py",
+    "comparison_contract.py",
   ])
   reporter_scripts_prefix = "scripts/${local.cluster_id}/"
 }
@@ -142,6 +143,7 @@ modules = [
     "exporter.py",
     "memtier_etl.py",
     "formatting.py",
+    "comparison_contract.py",
 ]
 
 s3 = boto3.client("s3")

@@ -55,11 +55,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     inspect = subparsers.add_parser("inspect", help="Inspect local run readiness and legacy warnings.")
     inspect.add_argument("run_dir", help="Path to a run results directory to inspect.")
+    aggregate = subparsers.add_parser(
+        "aggregate",
+        help="Group repeated runs by control-variable fingerprint (WP4/WP6) and report "
+        "per-metric n/median/mean/CV%%/min/max plus cost per successful operation.",
+    )
+    aggregate.add_argument("run_dirs", nargs="+", help="Run result directories to group and aggregate.")
+    aggregate.add_argument(
+        "-o",
+        "--output-dir",
+        default=None,
+        help="Directory for aggregate output files. Defaults to results/aggregates/ "
+        "next to the first run_dir's results/ root (D9: never inside a run folder).",
+    )
     return parser
 
 
 def normalize_argv(argv: list[str]) -> list[str]:
-    if argv and argv[0] not in {"compare", "generate", "inspect"} and not argv[0].startswith("-"):
+    if argv and argv[0] not in {"compare", "generate", "inspect", "aggregate"} and not argv[0].startswith("-"):
         return ["compare", *argv]
     return argv
 
@@ -1018,6 +1031,12 @@ def main() -> None:
 
     if args.command == "inspect":
         run_inspect_report(args.run_dir)
+        return
+
+    if args.command == "aggregate":
+        from aggregator import run_aggregate_report
+
+        run_aggregate_report(args.run_dirs, args.output_dir)
         return
 
     parser.print_help()
