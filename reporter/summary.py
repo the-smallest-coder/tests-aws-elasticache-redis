@@ -15,25 +15,6 @@ from report_common import GENERATOR_SCHEMA_VERSION
 from loadgen_analysis import build_loadgen_summary
 
 
-# WP1 D1: fields double-written under a new, unit-correct name whose old key
-# is kept, computed exactly as before, and frozen. avg_bandwidth_kbs is the
-# one exception (D5): its value was always correct, only its name lied, so
-# it is deprecated in place with no new field.
-DEPRECATED_FIELDS = (
-    "avg_in_kbs",
-    "avg_out_kbs",
-    "bw_in_exceeded_total",
-    "bw_out_exceeded_total",
-    "pps_exceeded_total",
-    "p50_ms",
-    "p99_ms",
-    "p999_ms",
-    "worst_stream_p99_ms",
-    "worst_stream_p999_ms",
-    "avg_bandwidth_kbs",
-)
-
-
 def _reporter_packages_dict(value):
     """config['reporter_packages'] arrives as a JSON string (env var
     transit, WP3) or occasionally already a dict; normalize to a dict so a
@@ -139,21 +120,27 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
     {
       "meta": { cluster_id, time_range, engine_type, engine_version, node_type, node_count, cluster_mode },
       "benchmark": { avg_ops, peak_ops, cv_pct, avg_latency_ms, max_latency_ms,
-                     avg_bandwidth_kbs },
+                     total_bandwidth_kbs },
       "cache_efficiency": { avg_hit_rate_pct, total_evictions, min_freeable_memory_mb, peak_key_count,
-                            first_eviction_ts },
+                            first_eviction_ts, total_ops, total_writes },
       "oom": { rejection_count, first_rejection_ts },
       "engine_cpu": { avg_pct, max_pct, credit_balance_avg, credit_usage_avg },
       "memory": { avg_usage_pct, max_usage_pct, headroom_pct, fragmentation_avg },
       "network": {
-          "cache": { avg_out_kbs, avg_in_kbs (legacy, D1), out_kib_per_sec, in_kib_per_sec },
-          "throttling": { bw_in_exceeded_total, bw_out_exceeded_total, pps_exceeded_total (legacy, D1),
-                          bw_in_exceeded_count, bw_out_exceeded_count, pps_exceeded_count }
+          "cache": { out_kib_per_sec, in_kib_per_sec },
+          "throttling": { bw_in_exceeded_count, bw_out_exceeded_count, pps_exceeded_count }
       },
       "latency_server_us": { get_avg, set_avg, string_avg, percentile_basis },
-      "client_latency": { p50_ms, p99_ms, p999_ms, worst_stream_p99_ms, worst_stream_p999_ms (legacy, D1),
-                          task_median_p50_ms, task_median_p99_ms, task_median_p999_ms,
-                          worst_task_p99_ms, worst_task_p999_ms },
+      "client_latency": {
+          # ElastiCache/LoadGenerator EMF, minute-granularity, averaged across
+          # tasks then across minutes -- an average of percentiles, not one:
+          p50_ms, p99_ms, p999_ms, worst_stream_p99_ms, worst_stream_p999_ms, percentile_basis,
+          # memtier's own per-task Totals histogram, one aggregation
+          # (median/max) across tasks -- independent source and method, not
+          # a replacement for the EMF numbers above:
+          task_median_p50_ms, task_median_p99_ms, task_median_p999_ms,
+          worst_task_p99_ms, worst_task_p999_ms, task_percentile_basis,
+      },
       "connections": { avg, max },
       "ecs": { service_cpu_time_avg_pct, service_cpu_time_peak_pct, peak_mem_mb, task_count },
       "loadgen": { per-task CPU p95, per-task throughput medians, per-AZ skew, validity }
@@ -181,7 +168,6 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         'source_mode': extra_stats.get('source_mode', ''),
         'memtier_window_source': extra_stats.get('memtier_window_source', 'memtier_log_messages'),
         'artifact_source': extra_stats.get('artifact_source', ''),
-        'deprecated_fields': list(DEPRECATED_FIELDS),
         # WP3 provenance. engine_version above stays the *configured* value;
         # engine_version_actual is what the cluster actually came up as.
         'engine_version_actual': config.get('engine_version_actual', ''),
@@ -217,7 +203,6 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
 
         total_bandwidth = float(memtier_totals_df['total_bandwidth_kbs'].sum())
         benchmark['total_bandwidth_kbs'] = _safe(total_bandwidth, 2)
-        benchmark['avg_bandwidth_kbs'] = _safe(total_bandwidth, 2)
 
     # ------------------------------------------------------------------ #
     #  cache_efficiency                                                    #
@@ -327,28 +312,11 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
     # ------------------------------------------------------------------ #
     network = {'cache': {}, 'throttling': {}}
     if not metrics_df.empty:
-        # Legacy keys: same old code, unchanged, frozen (D1). They carry the
-        # 120x-too-high value (2x duplicate rows x 60x missing /60) on purpose.
-        out_df = metric_filter(metrics_df, 'NetworkBytesOut', 'Sum', 'CacheClusterId')
-        if not out_df.empty:
-            # sum per minute bucket → mean KB/min
-            agg = out_df.groupby('Timestamp')['Value'].sum() / 1024.0
-            network['cache']['avg_out_kbs'] = _safe(float(agg.mean()), 2)
-
-        in_df = metric_filter(metrics_df, 'NetworkBytesIn', 'Sum', 'CacheClusterId')
-        if not in_df.empty:
-            agg = in_df.groupby('Timestamp')['Value'].sum() / 1024.0
-            network['cache']['avg_in_kbs'] = _safe(float(agg.mean()), 2)
-
-        for key, mname in [
-            ('bw_in_exceeded_total',  'NetworkBandwidthInAllowanceExceeded'),
-            ('bw_out_exceeded_total', 'NetworkBandwidthOutAllowanceExceeded'),
-            ('pps_exceeded_total',    'NetworkPacketsPerSecondAllowanceExceeded'),
-        ]:
-            t_df = metric_filter(metrics_df, mname, 'Sum', 'CacheClusterId')
-            network['throttling'][key] = int(t_df['Value'].sum()) if not t_df.empty else 0
-
-        # New keys: deduplicated and correctly scaled (D1, WP1 step 2).
+        # Deduplicated and correctly scaled (WP1 step 2). NetworkBytesOut/In
+        # are a Sum at Period=60 (bytes accumulated within that 60s bucket),
+        # summed here per minute across dedup'd rows, then /60/1024 for
+        # KiB/s -- see _network_kib_per_sec's own docstring for why an
+        # earlier version of this was 120x too high.
         out_kib = _network_kib_per_sec(metrics_df, 'NetworkBytesOut', cluster_id)
         if out_kib is not None:
             network['cache']['out_kib_per_sec'] = out_kib
@@ -431,13 +399,20 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
             errors['error_count_total'] = int(error_total)
 
     # ------------------------------------------------------------------ #
-    #  client_latency (ECS load-generator EMF percentiles)                #
+    #  client_latency: two independent measurements, not a fallback pair. #
+    #  EMF (this block) comes from CloudWatch Logs ingestion of per-minute #
+    #  per-task percentiles; task_median_*/worst_task_* (below) comes from #
+    #  parsing each task's own final log line. Different collection paths, #
+    #  different failure modes -- one being unavailable says nothing about #
+    #  the other, and they answer different questions (see each block's    #
+    #  own percentile_basis).                                              #
     # ------------------------------------------------------------------ #
     client_latency = {}
     latency_df = client_latency_series(ecs_df)
     if not latency_df.empty:
-        # Legacy keys, frozen (D1): mean of per-minute EMF percentiles across
-        # tasks -- an average of percentiles, which is not itself a percentile.
+        # Mean of per-minute EMF percentiles across tasks -- an average of
+        # percentiles, which is not itself a percentile; percentile_basis
+        # says so explicitly rather than let the field name imply otherwise.
         for key in ('p50_ms', 'p99_ms', 'p999_ms'):
             vals = latency_df[key].dropna()
             if not vals.empty:
@@ -448,11 +423,11 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
                 client_latency[key] = _safe(float(vals.max()), 3)
         client_latency['percentile_basis'] = 'minute_mean_of_task_percentiles'
 
-    # New keys (WP1 step 3): one aggregation (median/max across tasks) of the
-    # already-final per-task memtier Totals, instead of two (mean-of-minutes
-    # then mean/max-across-tasks). Still not a true run-wide percentile --
-    # memtier reports no such thing without an HDR histogram merge (out of
-    # scope, see PLAN_2.md "Извън обхвата") -- hence "task_median", not "run_p*".
+    # One aggregation (median/max across tasks) of the already-final per-task
+    # memtier Totals, instead of two (mean-of-minutes then mean/max-across-
+    # tasks). Still not a true run-wide percentile -- memtier reports no such
+    # thing without an HDR histogram merge (out of scope, see PLAN_2.md
+    # "Извън обхвата") -- hence "task_median", not "run_p*".
     if memtier_totals_df is not None and not memtier_totals_df.empty:
         for new_key, column, agg in (
             ('task_median_p50_ms', 'p50_latency_ms', 'median'),

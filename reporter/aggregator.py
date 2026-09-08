@@ -89,19 +89,6 @@ def _cv_pct(values: list[float]) -> float | None:
     return float(series.std() / mean * 100.0)
 
 
-def _metric_value_with_legacy_fallback(spec, run: RunData) -> float | None:
-    """Same legacy_path fallback report_compare.metric_rows() uses, applied
-    per run instead of per pair: a group spanning the v2/v3 schema line must
-    not silently drop every pre-v3 run's renamed metrics down to n=0 for that
-    field while everything beside it reports the group's full n -- CV across
-    repeats is the entire point of the aggregator (WP6).
-    """
-    value = metric_value(spec, get_nested(run.summary, spec.path))
-    if value is not None or not spec.legacy_path:
-        return value
-    return metric_value(spec, get_nested(run.summary, spec.legacy_path))
-
-
 def metric_stats(runs: list[RunData], metrics: tuple) -> list[dict[str, Any]]:
     """n/median/mean/cv_pct/min/max per report_compare.METRICS entry.
 
@@ -117,7 +104,7 @@ def metric_stats(runs: list[RunData], metrics: tuple) -> list[dict[str, Any]]:
     for spec in metrics:
         values = [
             value for run in runs
-            if (value := _metric_value_with_legacy_fallback(spec, run)) is not None
+            if (value := metric_value(spec, get_nested(run.summary, spec.path))) is not None
         ]
         if not values:
             continue

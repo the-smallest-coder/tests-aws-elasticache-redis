@@ -46,7 +46,7 @@ def _summary(
     engine_version="9.0",
     engine_version_actual="9.0.1",
     status="ok",
-    schema="2026-08-metrics-contract-v3",
+    schema="2026-09-metrics-contract-v4",
     report_start="2026-08-10T12:00:00",
     report_end="2026-08-10T13:00:00",
     task_count_matches_request=True,
@@ -312,17 +312,12 @@ class ComparisonContractTests(unittest.TestCase):
         )
 
 
-class ReportCompareLegacyRenderingRegressionTests(unittest.TestCase):
-    """Findings 6 and 7 from the code review, both in report_compare.py."""
+class ReportCompareIndependentClientLatencyRowsTests(unittest.TestCase):
+    """EMF-based and memtier-Totals-based client latency are two independent
+    measurements (schema v4), not a rename pair -- both get their own row.
+    """
 
-    def test_avg_bandwidth_falls_back_to_its_legacy_key(self):
-        """Finding 6: Avg Bandwidth was repointed at total_bandwidth_kbs with
-        no legacy_path, unlike the other ten repointed specs -- even though
-        avg_bandwidth_kbs is in summary.DEPRECATED_FIELDS and the spec's own
-        description calls it a deprecated alias of the same value. A run
-        that only has avg_bandwidth_kbs (this repo's own current_run/legacy_run
-        fixtures both do) rendered n/a instead of falling back.
-        """
+    def test_emf_and_task_median_p99_are_separate_rows_with_independent_values(self):
         try:
             from report_common import RunData
             from report_compare import metric_rows
@@ -331,49 +326,19 @@ class ReportCompareLegacyRenderingRegressionTests(unittest.TestCase):
 
         baseline = RunData(
             role="Baseline", results_path=Path("results/b/results_b.json"), folder="b",
-            summary={"benchmark": {"avg_bandwidth_kbs": 1096.92}}, cluster_details=None,
+            summary={"client_latency": {"p99_ms": 5.0, "task_median_p99_ms": 4.8}}, cluster_details=None,
         )
         candidate = RunData(
             role="Candidate", results_path=Path("results/c/results_c.json"), folder="c",
-            summary={"benchmark": {"avg_bandwidth_kbs": 1200.0, "total_bandwidth_kbs": 1200.0}},
-            cluster_details=None,
+            summary={"client_latency": {"p99_ms": 5.5, "task_median_p99_ms": 5.1}}, cluster_details=None,
         )
 
         rows = metric_rows(baseline, candidate)
-        row = next(r for r in rows if r["label"].startswith("Avg Bandwidth"))
+        task_median_row = next(r for r in rows if r["label"] == "ECS Task Latency p99")
+        emf_row = next(r for r in rows if r["label"] == "ECS Task Latency p99 (EMF)")
 
-        self.assertEqual(row["label"], "Avg Bandwidth (legacy)")
-        self.assertNotEqual(row["baseline"], "n/a")
-        self.assertIn("1,096.92", row["baseline"])
-
-    def test_legacy_network_rate_value_renders_under_its_own_unit_not_the_new_fields(self):
-        """Finding 7: the fallback swapped `path` but kept the original
-        (new-field) spec for display_value/format_delta, so a legacy
-        avg_in_kbs value -- KB/minute, not KiB/s -- rendered with a "KiB/s"
-        suffix appended to a number that was never measured in that unit.
-        """
-        try:
-            from report_common import RunData
-            from report_compare import metric_rows
-        except ModuleNotFoundError as exc:
-            self.skipTest(f"{exc.name} is not installed in this environment")
-
-        baseline = RunData(
-            role="Baseline", results_path=Path("results/b/results_b.json"), folder="b",
-            summary={"network": {"cache": {"avg_in_kbs": 3074173.62}}}, cluster_details=None,
-        )
-        candidate = RunData(
-            role="Candidate", results_path=Path("results/c/results_c.json"), folder="c",
-            summary={"network": {"cache": {"avg_in_kbs": 3000000.0, "in_kib_per_sec": 25618.11}}},
-            cluster_details=None,
-        )
-
-        rows = metric_rows(baseline, candidate)
-        row = next(r for r in rows if r["label"].startswith("Avg Cache In"))
-
-        self.assertEqual(row["label"], "Avg Cache In (legacy)")
-        self.assertNotIn("KiB/s", row["baseline"])
-        self.assertIn("KB/min", row["baseline"])
+        self.assertIn("4.8", task_median_row["baseline"])
+        self.assertIn("5", emf_row["baseline"])
 
 
 if __name__ == "__main__":

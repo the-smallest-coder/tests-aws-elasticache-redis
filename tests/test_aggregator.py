@@ -127,30 +127,6 @@ class MetricStatsTests(unittest.TestCase):
         self.assertEqual(avg_ops_row["n"], 3)
         self.assertEqual(avg_ops_row["median"], 200.0)
 
-    def test_renamed_metric_falls_back_to_legacy_path_per_run(self):
-        """Regression (code review, finding 8): metric_stats read spec.path
-        only, though it consumes the same METRICS tuple report_compare.py
-        falls back on. A group spanning the v2/v3 schema line reported n=2
-        on renamed metrics (only the post-v3 runs) while n=3 on the metric
-        beside it (avg_ops, never renamed) -- median/mean/CV over a
-        different, unlabeled subset. CV across repeats is WP6's whole point.
-        """
-        metric_stats, METRICS = self._load()
-        # Two runs with the new field, one with only the frozen legacy key.
-        runs = [
-            _run("run-a", {**_summary(avg_ops=100), "client_latency": {"task_median_p99_ms": 5.0}}, _cluster_details()),
-            _run("run-b", {**_summary(avg_ops=200), "client_latency": {"task_median_p99_ms": 7.0}}, _cluster_details()),
-            _run("run-c", {**_summary(avg_ops=300), "client_latency": {"p99_ms": 6.0}}, _cluster_details()),
-        ]
-
-        rows = self._rows(metric_stats, METRICS, runs)
-
-        avg_ops_row = next(row for row in rows if row["path"] == ["benchmark", "avg_ops"])
-        p99_row = next(row for row in rows if row["path"] == ["client_latency", "task_median_p99_ms"])
-        self.assertEqual(avg_ops_row["n"], 3)
-        self.assertEqual(p99_row["n"], 3)
-        self.assertEqual(p99_row["median"], 6.0)
-
     def test_cv_uses_sample_stdev_ddof_1(self):
         metric_stats, METRICS = self._load()
         runs = [

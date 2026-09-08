@@ -11,7 +11,14 @@ from typing import Any, Callable
 
 
 ECS_ENV_VARS = ("S3_BUCKET", "S3_PREFIX", "REPORT_TIMESTAMP", "CLUSTER_ID")
-GENERATOR_SCHEMA_VERSION = "2026-08-metrics-contract-v3"
+# v4: the WP1 D1 legacy-field scaffolding (frozen duplicate keys,
+# meta.deprecated_fields, the legacy_path/legacy_unit fallback machinery) is
+# removed rather than sunset by D1a's original trigger (>=10 v3 runs or
+# 2027-01-01, neither met) -- a human call, not the schema drifting on its
+# own, but a real shape change either way. Bumped so comparison_contract's
+# existing schema_version_differs check (WP4) can flag a comparison spanning
+# this exact boundary, same as it would any other schema change.
+GENERATOR_SCHEMA_VERSION = "2026-09-metrics-contract-v4"
 Normalizer = Callable[[Any], float | None]
 
 
@@ -38,14 +45,6 @@ class MetricSpec:
     none_label: str = "n/a"
     normalizer: Normalizer | None = None
     warning_above: float | None = None
-    # WP1 D1: the frozen key a pre-schema-v3 run still carries when `path`
-    # (its renamed, unit-correct replacement) is absent on that run.
-    legacy_path: tuple[str, ...] | None = None
-    # The unit the legacy_path value is actually denominated in, when it
-    # differs from `unit` (e.g. a renamed field that also fixed a unit bug,
-    # like avg_out_kbs's KB/minute vs out_kib_per_sec's KiB/s). None means
-    # "same as unit" -- most renames didn't change units, only values.
-    legacy_unit: str | None = None
 
 
 def get_env_var(name: str) -> str:

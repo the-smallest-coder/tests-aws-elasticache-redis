@@ -364,7 +364,6 @@ _CONTRACT_REASON_LABELS = {
     "loadgen_unknown": "loadgen validity is unknown",
     "diagnostic_warning": "loadgen diagnostic status is a warning",
     "schema_version_differs": "generator schema version differs",
-    "metric_only_in_legacy_variant": "at least one metric is only available in its legacy form",
 }
 
 

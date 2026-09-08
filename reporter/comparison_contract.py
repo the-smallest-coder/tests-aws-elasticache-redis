@@ -43,21 +43,6 @@ CONTROL_VARIABLES: tuple[tuple[str, str], ...] = (
 # truncate against, so that case is never flagged.
 TRUNCATED_RUN_WINDOW_RATIO = 0.5
 
-def _renamed_metric_path_pairs() -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
-    """The WP1 D1 double-written (new path, legacy path) pairs report_compare.py
-    falls back to. A lazy import, not a module-level one: report_compare.py
-    imports build_comparison_contract from this module at its own module
-    level, so a module-level import back here would be genuinely circular.
-    By the time this function is actually called, both modules have finished
-    loading (the same pattern aggregator.py already uses for the same cycle),
-    so deferring it here instead of hand-copying report_compare.METRICS'
-    legacy_path table is safe -- and means an eleventh renamed metric can't
-    leave this stale.
-    """
-    from report_compare import METRICS
-
-    return [(spec.path, spec.legacy_path) for spec in METRICS if spec.legacy_path]
-
 
 def _reason(code: str, **extra: Any) -> dict[str, Any]:
     return {"code": code, **extra}
@@ -163,15 +148,6 @@ def _task_count_mismatch(run: RunData) -> bool:
     return bool(loadgen) and loadgen.get("task_count_matches_request") is False
 
 
-def _any_metric_uses_legacy_fallback(baseline: RunData, candidate: RunData) -> bool:
-    for new_path, legacy_path in _renamed_metric_path_pairs():
-        if get_nested(baseline.summary, new_path) is not None and get_nested(candidate.summary, new_path) is not None:
-            continue
-        if get_nested(baseline.summary, legacy_path) is not None or get_nested(candidate.summary, legacy_path) is not None:
-            return True
-    return False
-
-
 #: reason codes that force verdict == "invalid" regardless of what else is
 #: in `reasons` -- everything else is "conditional"-tier.
 _INVALID_CODES = frozenset({
@@ -252,9 +228,6 @@ def build_comparison_contract(baseline: RunData, candidate: RunData) -> dict[str
     candidate_schema = get_nested(candidate.summary, ("meta", "generator_schema_version"))
     if baseline_schema != candidate_schema:
         reasons.append(_reason("schema_version_differs", baseline=baseline_schema, candidate=candidate_schema))
-
-    if _any_metric_uses_legacy_fallback(baseline, candidate):
-        reasons.append(_reason("metric_only_in_legacy_variant"))
 
     if any(reason["code"] in _INVALID_CODES for reason in reasons):
         verdict = "invalid"

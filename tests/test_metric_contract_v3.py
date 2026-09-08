@@ -1,14 +1,14 @@
-"""WP1 -- dedup helper, network/latency fixes, deprecation, schema v3.
+"""WP1 -- dedup helper, network/latency fixes, schema v3.
 
-See PLAN_2.md WP1. Legacy keys are frozen (D1): every test that touches one
-must prove the OLD code path is untouched, while the new key gets the fixed
-math.
+See PLAN_2.md WP1. The D1 double-write/freeze scaffolding these tests
+originally also covered (DEPRECATED_FIELDS, legacy_path fallback rendering,
+the D1a sunset test) was removed once the schema-v4 cleanup retired it; see
+that commit for why. What's left here is the dedup helper and the
+network/latency math fixes themselves.
 """
 
-import json
 import sys
 import unittest
-from datetime import date
 from pathlib import Path
 
 
@@ -153,21 +153,7 @@ class NetworkFixTests(unittest.TestCase):
         # 60*1024 bytes over a 60s bucket -> exactly 1024 bytes/sec -> 1 KiB/s.
         self.assertEqual(summary["network"]["cache"]["out_kib_per_sec"], 1.0)
 
-    def test_avg_out_kbs_legacy_value_is_bit_for_bit_unchanged(self):
-        try:
-            summary = self._build_summary([
-                _metric_row("2026-08-10T00:00:00Z", 60 * 1024, "CacheClusterId=cluster-a", "NetworkBytesOut"),
-                _metric_row("2026-08-10T00:00:00Z", 60 * 1024, "CacheClusterId=cluster-a;CacheNodeId=0001", "NetworkBytesOut"),
-            ])
-        except ModuleNotFoundError as exc:
-            _skip_if_no_pandas(self, exc)
-            return
-
-        # Legacy field: same old (buggy) code -- sums both duplicate rows,
-        # divides by 1024 only. 2 * 60*1024 bytes / 1024 = 120 "KB/min".
-        self.assertEqual(summary["network"]["cache"]["avg_out_kbs"], 120.0)
-
-    def test_bw_out_exceeded_count_is_half_of_the_duplicated_legacy_total(self):
+    def test_bw_out_exceeded_count_is_deduplicated_not_double_counted(self):
         try:
             summary = self._build_summary([
                 _metric_row("2026-08-10T00:00:00Z", 9, "CacheClusterId=cluster-a", "NetworkBandwidthOutAllowanceExceeded"),
@@ -177,11 +163,10 @@ class NetworkFixTests(unittest.TestCase):
             _skip_if_no_pandas(self, exc)
             return
 
-        legacy_total = summary["network"]["throttling"]["bw_out_exceeded_total"]
-        new_count = summary["network"]["throttling"]["bw_out_exceeded_count"]
-        self.assertEqual(legacy_total, 18)
-        self.assertEqual(new_count, legacy_total / 2)
-        self.assertEqual(new_count, 9)
+        # Same duplicate-dimension input the 120x network bug came from
+        # (D6): aggregate and CacheNodeId rows carry the same value, only
+        # one should be counted.
+        self.assertEqual(summary["network"]["throttling"]["bw_out_exceeded_count"], 9)
 
 
 class ClientLatencyTaskMedianTests(unittest.TestCase):
@@ -237,107 +222,6 @@ class ClientLatencyTaskMedianTests(unittest.TestCase):
         )
 
         self.assertIsNone(summary["client_latency"].get("task_median_p99_ms"))
-
-
-class DeprecatedFieldsManifestTests(unittest.TestCase):
-    def test_meta_deprecated_fields_lists_exactly_the_eleven_frozen_names(self):
-        try:
-            import pandas as pd
-            from summary import build_summary
-        except ModuleNotFoundError as exc:
-            _skip_if_no_pandas(self, exc)
-            return
-
-        summary = build_summary(
-            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(),
-            extra_stats={}, config={}, cluster_id="cluster-a", time_range="",
-        )
-
-        self.assertEqual(
-            set(summary["meta"]["deprecated_fields"]),
-            {
-                "avg_in_kbs",
-                "avg_out_kbs",
-                "bw_in_exceeded_total",
-                "bw_out_exceeded_total",
-                "pps_exceeded_total",
-                "p50_ms",
-                "p99_ms",
-                "p999_ms",
-                "worst_stream_p99_ms",
-                "worst_stream_p999_ms",
-                "avg_bandwidth_kbs",
-            },
-        )
-        self.assertEqual(len(summary["meta"]["deprecated_fields"]), 11)
-
-
-class ReportCompareLegacyFallbackTests(unittest.TestCase):
-    def test_baseline_missing_new_field_falls_back_to_legacy_with_warning_tone(self):
-        try:
-            from report_common import RunData
-            from report_compare import metric_rows
-        except ModuleNotFoundError as exc:
-            _skip_if_no_pandas(self, exc)
-            return
-
-        baseline = RunData(
-            role="Baseline",
-            results_path=Path("results/baseline/results_baseline.json"),
-            folder="baseline",
-            summary={"client_latency": {"p99_ms": 5.0}},
-            cluster_details=None,
-        )
-        candidate = RunData(
-            role="Candidate",
-            results_path=Path("results/candidate/results_candidate.json"),
-            folder="candidate",
-            summary={"client_latency": {"p99_ms": 5.5, "task_median_p99_ms": 4.8}},
-            cluster_details=None,
-        )
-
-        rows = metric_rows(baseline, candidate)
-        row = next(r for r in rows if r["label"].startswith("ECS Task Latency p99") and "p99.9" not in r["label"])
-
-        self.assertEqual(row["label"], "ECS Task Latency p99 (legacy)")
-        self.assertEqual(row["tone"], "warning")
-        self.assertEqual(row["path"], ("client_latency", "p99_ms"))
-
-
-class D1aLegacyKeyExpiryTests(unittest.TestCase):
-    """Test 18: D1a's sunset clause must be enforced by a test, not a comment."""
-
-    def test_legacy_keys_are_due_for_removal_once_v3_has_enough_runs_or_the_date_passes(self):
-        try:
-            from report_common import GENERATOR_SCHEMA_VERSION
-        except ModuleNotFoundError as exc:
-            _skip_if_no_pandas(self, exc)
-            return
-
-        results_root = ROOT / "results"
-        v3_count = 0
-        if results_root.is_dir():
-            for entry in results_root.iterdir():
-                if not entry.is_dir():
-                    continue
-                for json_path in entry.glob("results_*.json"):
-                    if json_path.name == "results_local.json":
-                        continue
-                    try:
-                        data = json.loads(json_path.read_text(encoding="utf-8"))
-                    except (OSError, ValueError):
-                        continue
-                    if isinstance(data, dict) and data.get("meta", {}).get("generator_schema_version") == GENERATOR_SCHEMA_VERSION:
-                        v3_count += 1
-
-        cutoff = date(2027, 1, 1)
-        today = date.today()
-        if v3_count >= 10 or today >= cutoff:
-            self.fail(
-                "legacy keys are due for removal: "
-                f"{v3_count} schema-v3 canonical report(s) in results/ (threshold 10); "
-                f"today is {today}, cutoff is {cutoff} (D1a)"
-            )
 
 
 if __name__ == "__main__":
