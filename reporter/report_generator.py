@@ -50,8 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument(
         "--output-dir",
         default=None,
-        help="Write results_local.{html,json} here instead of run_dir. "
-        "run_dir is otherwise read-only (D9); nothing is written to results/<run-folder>/.",
+        help="Write results_local.{html,json} here instead of run_dir. Default is run_dir "
+        "itself, for backward compatibility; pass this against a real results/<run-folder>/ "
+        "you want to keep read-only (D9) -- e.g. a copy made for verification, per PLAN_2.md, "
+        "already gets this for free since the copy isn't the tracked run.",
     )
     inspect = subparsers.add_parser("inspect", help="Inspect local run readiness and legacy warnings.")
     inspect.add_argument("run_dir", help="Path to a run results directory to inspect.")
@@ -859,9 +861,10 @@ def run_generate_report(run_dir: str, config: dict, output_dir: str | None = Non
             print(f"Warning: failed to enrich summary with cluster_details.json: {exc}")
 
     # Local regeneration must never replace the canonical report downloaded
-    # from AWS for this immutable run, and (D9) never write into run_path
-    # unless the caller explicitly wants that (output_dir defaults to it for
-    # backward compatibility -- pass --output-dir to keep run_dir read-only).
+    # from AWS for this immutable run. Writes into run_path itself by
+    # default (backward compatible with existing callers and PLAN_2.md's own
+    # verification recipe, which runs this against a throwaway copy) -- D9
+    # read-only-run-dir only holds when the caller passes --output-dir.
     out_path = out_dir / "results_local.json"
     out_path.write_text(summary_json, encoding="utf-8")
     print(f"Written: {out_path}")
@@ -984,12 +987,17 @@ def run_uploaded_report() -> dict:
 
     from report_common import enrich_summary_meta
     summary_obj = json.loads(summary_json)
-    if cluster_details:
+    # Branch on the status flag, not cluster_details' own truthiness: a
+    # successfully-parsed-but-empty body ({}, null, []) is "present" (no
+    # exception was raised) yet falsy, which used to take this else branch
+    # and crash on cluster_details_status['reason'] -- a key that only
+    # exists on the failure path.
+    if cluster_details_status["present"]:
         enrich_summary_meta(summary_obj, cluster_details)
         print(f"Summary enriched from {cluster_details_uri}")
     else:
         summary_obj.setdefault("meta", {}).setdefault("warnings", []).append(
-            f"cluster_details.json missing or unreadable: {cluster_details_status['reason']}"
+            f"cluster_details.json missing or unreadable: {cluster_details_status.get('reason', 'unknown')}"
         )
     summary_json = json.dumps(summary_obj, indent=2, default=str)
 

@@ -149,7 +149,7 @@ def stat_cards_html(
         mem_used_df = metric_filter(ecs_df, 'MemoryUtilized', 'Average')
         if not mem_used_df.empty:
             peak_mem_mb = mem_used_df['Value'].max()
-            reserved_df = ecs_df[ecs_df['MetricName'] == 'MemoryReserved']
+            reserved_df = metric_filter(ecs_df, 'MemoryReserved', 'Average')
             reserved_mb = reserved_df['Value'].max() if not reserved_df.empty else None
             tip = f"Peak ECS task container memory. Reserved: {reserved_mb:.0f} MB." if reserved_mb else 'Peak ECS task container memory.'
             cards.append(('ECS Mem Peak', f"{peak_mem_mb:.0f}", 'MB', '#0097a7', tip))

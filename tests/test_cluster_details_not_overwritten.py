@@ -73,7 +73,20 @@ RICH_ARTIFACT = json.dumps({
 }).encode("utf-8")
 
 
-def _run_main_with_fakes(fake_s3: FakeS3):
+DEFAULT_ELASTICACHE_MANIFEST = {
+    "uri": "s3://test-bucket/metrics.csv",
+    "discovered": ["CacheHits"],
+    "exported": 1,
+    "zero_datapoints": [],
+    "missing_from_discovery": [],
+    "errors": [],
+    "rows_written": 10,
+    "complete": True,
+    "missing": [],
+}
+
+
+def _run_main_with_fakes(fake_s3: FakeS3, elasticache_manifest: dict | None = None):
     exporter = _load_exporter()
     exporter.export_loadgen_logs_to_s3 = lambda *a, **k: {
         "complete": True,
@@ -82,17 +95,9 @@ def _run_main_with_fakes(fake_s3: FakeS3):
         "files": [],
     }
     exporter._generate_and_upload_memtier_etl = lambda *a, **k: None
-    exporter.export_elasticache_metrics_to_s3 = lambda *a, **k: {
-        "uri": "s3://test-bucket/metrics.csv",
-        "discovered": [],
-        "exported": 0,
-        "zero_datapoints": [],
-        "missing_from_discovery": [],
-        "errors": [],
-        "rows_written": 0,
-        "complete": True,
-        "missing": [],
-    }
+    exporter.export_elasticache_metrics_to_s3 = lambda *a, **k: (
+        elasticache_manifest if elasticache_manifest is not None else dict(DEFAULT_ELASTICACHE_MANIFEST)
+    )
     exporter.export_logs_to_s3 = lambda *a, **k: None
     exporter._task_metadata_from_container_insights_object = lambda *a, **k: {}
     exporter.export_ecs_metrics_to_s3 = lambda *a, **k: "s3://test-bucket/ecs.csv"
@@ -245,6 +250,117 @@ class TaskCountEnvVarNotIntroducedTests(unittest.TestCase):
     def test_reporter_tf_does_not_define_a_task_count_env_var(self):
         reporter_tf = (ROOT / "reporter.tf").read_text(encoding="utf-8")
         self.assertNotIn('"TASK_COUNT"', reporter_tf)
+
+
+class PresentButEmptyClusterDetailsTests(unittest.TestCase):
+    """Regression (code review, post-WP0-6): a cluster_details.json that
+    parses successfully but is falsy ({}, null, []) used to raise KeyError
+    on cluster_details_status['reason'] -- that key only exists on the
+    except/failure branch, but the code branched on cluster_details' own
+    truthiness, which is False for a present-but-empty body too.
+    """
+
+    def test_empty_object_cluster_details_does_not_raise(self):
+        try:
+            import report_generator
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"{exc.name} is not installed in this environment")
+        try:
+            import pandas as pd
+        except ModuleNotFoundError:
+            self.skipTest("pandas is not installed in this environment")
+
+        cluster_details_uri = (
+            f"s3://{ENV['S3_BUCKET']}/{ENV['S3_PREFIX']}{ENV['REPORT_TIMESTAMP']}/cluster_details.json"
+        )
+
+        def fake_read_file_content(uri):
+            if uri == cluster_details_uri:
+                return "{}"  # parses fine, but is falsy
+            return ""
+
+        fake_s3 = FakeS3()
+        fake_boto3 = types.ModuleType("boto3")
+        fake_boto3.client = mock.Mock(return_value=fake_s3)
+
+        originals = {
+            name: getattr(report_generator, name)
+            for name in (
+                "read_file_content",
+                "parse_metrics_csv",
+                "_warn_if_cache_hit_rate_missing",
+                "_read_uploaded_log_contents",
+                "_parse_memtier_log_entries",
+                "_read_uploaded_container_insights_contents",
+                "_parse_container_insights_entries",
+                "_read_uploaded_memtier_artifact_contents",
+                "_load_memtier_artifacts",
+                "create_report",
+            )
+        }
+        report_generator.read_file_content = fake_read_file_content
+        report_generator.parse_metrics_csv = lambda content: pd.DataFrame()
+        report_generator._warn_if_cache_hit_rate_missing = lambda *a, **k: None
+        report_generator._read_uploaded_log_contents = lambda prefix: [("s3://bucket/loadgen.log", "log")]
+        report_generator._parse_memtier_log_entries = lambda entries: (
+            pd.DataFrame(),
+            {
+                "first_message_ts": datetime(2026, 8, 10, 12, 50, tzinfo=timezone.utc),
+                "last_message_ts": datetime(2026, 8, 10, 13, 50, tzinfo=timezone.utc),
+            },
+        )
+        report_generator._read_uploaded_container_insights_contents = lambda prefix: []
+        report_generator._parse_container_insights_entries = lambda entries: (None, None)
+        report_generator._read_uploaded_memtier_artifact_contents = lambda prefix: [("s3://bucket/a.totals.json", "{}")]
+        report_generator._load_memtier_artifacts = lambda entries: (None, None)
+        report_generator.create_report = lambda **kwargs: ("<html></html>", json.dumps({"meta": {}}))
+
+        try:
+            with mock.patch.dict("sys.modules", {"boto3": fake_boto3}):
+                with mock.patch.dict("os.environ", ENV, clear=False):
+                    result = report_generator.run_uploaded_report()  # must not raise KeyError
+        finally:
+            for name, value in originals.items():
+                setattr(report_generator, name, value)
+
+        self.assertEqual(result["present"], True)
+        json_key = f"{ENV['S3_PREFIX']}{ENV['REPORT_TIMESTAMP']}/results_{ENV['REPORT_TIMESTAMP']}.json"
+        self.assertIn(json_key, fake_s3.storage)
+
+
+class MetricsHardAbortGateTests(unittest.TestCase):
+    """Regression (code review): the hard RuntimeError abort in main() used
+    to be tied to the wide, topology-conditional completeness check
+    (elasticache_manifest["complete"], ~30 names including 4 unconfirmed for
+    redis). One optional metric absent for an unrelated reason (ListMetrics
+    propagation lag, an engine that doesn't publish it) would abort report
+    generation entirely, after the cluster is already torn down. The gate
+    must instead be narrow: did the export come back with real rows at all.
+    """
+
+    def test_incomplete_wide_contract_with_real_rows_does_not_abort(self):
+        fake_s3 = FakeS3(initial={CLUSTER_DETAILS_KEY: RICH_ARTIFACT})
+        manifest = dict(DEFAULT_ELASTICACHE_MANIFEST)
+        manifest["complete"] = False
+        manifest["missing"] = ["CPUCreditBalance", "CPUCreditUsage"]
+        manifest["missing_from_discovery"] = ["CPUCreditBalance", "CPUCreditUsage"]
+        manifest["rows_written"] = 500
+
+        _run_main_with_fakes(fake_s3, elasticache_manifest=manifest)  # must not raise
+
+        status = json.loads(fake_s3.storage[f"{ENV['S3_PREFIX']}{ENV['REPORT_TIMESTAMP']}/report_status.json"])
+        self.assertTrue(status["complete"])
+        self.assertTrue(status["checks"]["metrics"]["complete"])
+        self.assertFalse(status["metric_export"]["complete"])  # wide check stays visible, just not a gate
+
+    def test_zero_rows_written_still_aborts(self):
+        fake_s3 = FakeS3(initial={CLUSTER_DETAILS_KEY: RICH_ARTIFACT})
+        manifest = dict(DEFAULT_ELASTICACHE_MANIFEST)
+        manifest["rows_written"] = 0
+        manifest["exported"] = 0
+
+        with self.assertRaises(RuntimeError):
+            _run_main_with_fakes(fake_s3, elasticache_manifest=manifest)
 
 
 if __name__ == "__main__":

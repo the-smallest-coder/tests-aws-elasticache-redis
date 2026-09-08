@@ -649,5 +649,31 @@ class SummaryWp2FieldDedupTests(unittest.TestCase):
         self.assertEqual(summary["server_request_latency_us"], {})
 
 
+class DedupMetricStatValidationTests(unittest.TestCase):
+    """Regression (code review, finding 11): _dedup_metric_stat's agg branch
+    was `mean() if agg == 'mean' else max()` -- any other value (a typo,
+    a future agg='sum') silently returned the peak under an "avg" name in
+    server_request_latency_us.*_avg / baseline_usage_*_avg_pct.
+    """
+
+    def test_unsupported_agg_raises_instead_of_silently_returning_max(self):
+        try:
+            import pandas as pd
+            from summary import _dedup_metric_stat
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        df = pd.DataFrame([{
+            "Timestamp": pd.Timestamp("2026-08-10T00:00:00"), "Namespace": "AWS/ElastiCache",
+            "MetricName": "SuccessfulReadRequestLatency", "Stat": "Average", "Value": 5.0,
+            "Unit": "Microseconds", "Dimensions": "CacheClusterId=cluster-a",
+        }])
+
+        with self.assertRaises(ValueError):
+            _dedup_metric_stat(df, "SuccessfulReadRequestLatency", "cluster-a", "Average", agg="avg")
+
+
 if __name__ == "__main__":
     unittest.main()

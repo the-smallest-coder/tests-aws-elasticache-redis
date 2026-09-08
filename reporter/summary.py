@@ -87,6 +87,8 @@ def _dedup_metric_stat(df, metric_name, cluster_id, stat, agg='mean'):
     discovered metric) -- both duplicate across the CacheClusterId /
     CacheNodeId axis the same way, so both need the same dedup.
     """
+    if agg not in ('mean', 'max'):
+        raise ValueError(f"_dedup_metric_stat: unsupported agg {agg!r}, expected 'mean' or 'max'")
     selected = _dedup_metric_rows(df, metric_name, cluster_id, stat)
     if selected.empty:
         return None

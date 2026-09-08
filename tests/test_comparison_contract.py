@@ -253,6 +253,128 @@ class ComparisonContractTests(unittest.TestCase):
         self.assertIn("contract-invalid", html)
         self.assertIn("INVALID", html)
 
+    def test_invalid_verdict_still_reports_control_diffs_and_other_reasons(self):
+        """Regression (code review): invalid used to short-circuit and
+        return before computing any conditional-tier reason, so control_diffs
+        was always [] and every other finding was silently dropped -- a
+        reader debugging "why invalid" lost "and what else differs" in the
+        same view. All reasons are always computed now; verdict is just the
+        most severe classification present.
+        """
+        build = self._load()
+        baseline = _run(
+            "Baseline",
+            _summary(status="invalid", task_count_matches_request=None),
+            _control_cluster_details(**{"memtier.pipeline": 8}),
+        )
+        candidate = _run(
+            "Candidate", _summary(), _control_cluster_details(**{"memtier.pipeline": 16}),
+        )
+
+        contract = build(baseline, candidate)
+
+        self.assertEqual(contract["verdict"], "invalid")
+        self.assertTrue(any(r["code"] == "diagnostic_status_invalid" for r in contract["reasons"]))
+        diff = next(r for r in contract["reasons"] if r["code"] == "control_variable_differs")
+        self.assertEqual(diff["field"], "memtier.pipeline")
+        self.assertIn(diff, contract["control_diffs"])
+
+    def test_int_and_float_control_values_do_not_register_as_a_diff(self):
+        """Regression (code review): coerce_control_value returned int for
+        "1" but float for JSON 1.0; 1 == 1.0 so the direct comparison here
+        was fine, but repr(1) != repr(1.0), which broke aggregator.py's
+        repr()-based fingerprint hash for otherwise-identical runs.
+        """
+        build = self._load()
+        baseline = _run(
+            "Baseline", _summary(), _control_cluster_details(**{"elasticache.num_cache_nodes": 1}),
+        )
+        candidate = _run(
+            "Candidate", _summary(), _control_cluster_details(**{"elasticache.num_cache_nodes": 1.0}),
+        )
+
+        contract = build(baseline, candidate)
+
+        self.assertEqual(contract["verdict"], "comparable")
+
+    def test_coerce_control_value_normalizes_whole_number_float_to_int(self):
+        try:
+            from comparison_contract import coerce_control_value
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"{exc.name} is not installed in this environment")
+
+        self.assertEqual(coerce_control_value("num_cache_nodes", 1.0), 1)
+        self.assertEqual(coerce_control_value("num_cache_nodes", 1), 1)
+        self.assertEqual(coerce_control_value("num_cache_nodes", "1"), 1)
+        self.assertEqual(
+            repr(coerce_control_value("num_cache_nodes", 1.0)),
+            repr(coerce_control_value("num_cache_nodes", "1")),
+        )
+
+
+class ReportCompareLegacyRenderingRegressionTests(unittest.TestCase):
+    """Findings 6 and 7 from the code review, both in report_compare.py."""
+
+    def test_avg_bandwidth_falls_back_to_its_legacy_key(self):
+        """Finding 6: Avg Bandwidth was repointed at total_bandwidth_kbs with
+        no legacy_path, unlike the other ten repointed specs -- even though
+        avg_bandwidth_kbs is in summary.DEPRECATED_FIELDS and the spec's own
+        description calls it a deprecated alias of the same value. A run
+        that only has avg_bandwidth_kbs (this repo's own current_run/legacy_run
+        fixtures both do) rendered n/a instead of falling back.
+        """
+        try:
+            from report_common import RunData
+            from report_compare import metric_rows
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"{exc.name} is not installed in this environment")
+
+        baseline = RunData(
+            role="Baseline", results_path=Path("results/b/results_b.json"), folder="b",
+            summary={"benchmark": {"avg_bandwidth_kbs": 1096.92}}, cluster_details=None,
+        )
+        candidate = RunData(
+            role="Candidate", results_path=Path("results/c/results_c.json"), folder="c",
+            summary={"benchmark": {"avg_bandwidth_kbs": 1200.0, "total_bandwidth_kbs": 1200.0}},
+            cluster_details=None,
+        )
+
+        rows = metric_rows(baseline, candidate)
+        row = next(r for r in rows if r["label"].startswith("Avg Bandwidth"))
+
+        self.assertEqual(row["label"], "Avg Bandwidth (legacy)")
+        self.assertNotEqual(row["baseline"], "n/a")
+        self.assertIn("1,096.92", row["baseline"])
+
+    def test_legacy_network_rate_value_renders_under_its_own_unit_not_the_new_fields(self):
+        """Finding 7: the fallback swapped `path` but kept the original
+        (new-field) spec for display_value/format_delta, so a legacy
+        avg_in_kbs value -- KB/minute, not KiB/s -- rendered with a "KiB/s"
+        suffix appended to a number that was never measured in that unit.
+        """
+        try:
+            from report_common import RunData
+            from report_compare import metric_rows
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"{exc.name} is not installed in this environment")
+
+        baseline = RunData(
+            role="Baseline", results_path=Path("results/b/results_b.json"), folder="b",
+            summary={"network": {"cache": {"avg_in_kbs": 3074173.62}}}, cluster_details=None,
+        )
+        candidate = RunData(
+            role="Candidate", results_path=Path("results/c/results_c.json"), folder="c",
+            summary={"network": {"cache": {"avg_in_kbs": 3000000.0, "in_kib_per_sec": 25618.11}}},
+            cluster_details=None,
+        )
+
+        rows = metric_rows(baseline, candidate)
+        row = next(r for r in rows if r["label"].startswith("Avg Cache In"))
+
+        self.assertEqual(row["label"], "Avg Cache In (legacy)")
+        self.assertNotIn("KiB/s", row["baseline"])
+        self.assertIn("KB/min", row["baseline"])
+
 
 if __name__ == "__main__":
     unittest.main()

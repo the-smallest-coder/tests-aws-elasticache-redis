@@ -41,6 +41,11 @@ class MetricSpec:
     # WP1 D1: the frozen key a pre-schema-v3 run still carries when `path`
     # (its renamed, unit-correct replacement) is absent on that run.
     legacy_path: tuple[str, ...] | None = None
+    # The unit the legacy_path value is actually denominated in, when it
+    # differs from `unit` (e.g. a renamed field that also fixed a unit bug,
+    # like avg_out_kbs's KB/minute vs out_kib_per_sec's KiB/s). None means
+    # "same as unit" -- most renames didn't change units, only values.
+    legacy_unit: str | None = None
 
 
 def get_env_var(name: str) -> str:

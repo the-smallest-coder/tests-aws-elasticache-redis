@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import math
 from pathlib import Path
 from typing import Any
@@ -48,7 +49,12 @@ METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("benchmark", "Max Latency", ("benchmark", "max_latency_ms"), "ms", 2, "lower", "Worst client-side latency observed during the run."),
     MetricSpec("benchmark", "P95 Latency", ("benchmark", "p95_latency_ms"), "ms", 2, "lower", "95th percentile client-side latency."),
     MetricSpec("benchmark", "P99 Latency", ("benchmark", "p99_latency_ms"), "ms", 2, "lower", "99th percentile client-side latency."),
-    MetricSpec("benchmark", "Avg Bandwidth", ("benchmark", "total_bandwidth_kbs"), "KB/s", 2, "neutral", "Sum of network throughput reported by memtier across streams (avg_bandwidth_kbs is a deprecated alias of this same value, D5)."),
+    MetricSpec(
+        "benchmark", "Avg Bandwidth", ("benchmark", "total_bandwidth_kbs"),
+        "KB/s", 2, "neutral", "Sum of network throughput reported by memtier across streams "
+        "(avg_bandwidth_kbs is a deprecated alias of this same value, D5).",
+        legacy_path=("benchmark", "avg_bandwidth_kbs"),
+    ),
     MetricSpec("engine_memory", "Avg Engine CPU", ("engine_cpu", "avg_pct"), "%", 2, "lower", "Average Redis engine CPU utilization.", "points"),
     MetricSpec("engine_memory", "Peak Engine CPU", ("engine_cpu", "max_pct"), "%", 2, "lower", "Highest Redis engine CPU utilization.", "points"),
     MetricSpec("engine_memory", "Avg CPU Credit Balance", ("engine_cpu", "credit_balance_avg"), "credits", 2, "higher", "Average burst credit balance for T-family cache nodes."),
@@ -132,12 +138,12 @@ METRICS: tuple[MetricSpec, ...] = (
     MetricSpec(
         "network_ecs", "Avg Cache In", ("network", "cache", "in_kib_per_sec"),
         "KiB/s", 2, "neutral", "Average inbound network throughput on the cache node.",
-        legacy_path=("network", "cache", "avg_in_kbs"),
+        legacy_path=("network", "cache", "avg_in_kbs"), legacy_unit="KB/min",
     ),
     MetricSpec(
         "network_ecs", "Avg Cache Out", ("network", "cache", "out_kib_per_sec"),
         "KiB/s", 2, "neutral", "Average outbound network throughput on the cache node.",
-        legacy_path=("network", "cache", "avg_out_kbs"),
+        legacy_path=("network", "cache", "avg_out_kbs"), legacy_unit="KB/min",
     ),
     MetricSpec(
         "network_ecs", "BW In Throttle Events", ("network", "throttling", "bw_in_exceeded_count"),
@@ -221,6 +227,14 @@ def metric_rows(baseline: RunData, candidate: RunData) -> list[dict[str, Any]]:
                 label = f"{spec.label} (legacy)"
                 baseline_raw, candidate_raw = legacy_baseline, legacy_candidate
                 used_legacy = True
+        # Rendering must use the legacy value's own unit, not the new field's:
+        # a couple of these renames fixed a unit bug along with the value
+        # (avg_in_kbs/avg_out_kbs are KB/minute, not out_kib_per_sec's KiB/s),
+        # so displaying the legacy number under the new label's unit would
+        # print a number in a unit it was never actually measured in.
+        display_spec = (
+            dataclasses.replace(spec, unit=spec.legacy_unit) if used_legacy and spec.legacy_unit else spec
+        )
         baseline_value = metric_value(spec, baseline_raw)
         candidate_value = metric_value(spec, candidate_raw)
         tone = classify_delta(spec, baseline_value, candidate_value)
@@ -237,9 +251,9 @@ def metric_rows(baseline: RunData, candidate: RunData) -> list[dict[str, Any]]:
             {
                 "section": spec.section,
                 "label": label,
-                "baseline": display_value(spec, baseline_raw),
-                "candidate": display_value(spec, candidate_raw),
-                "delta": format_delta(spec, baseline_value, candidate_value),
+                "baseline": display_value(display_spec, baseline_raw),
+                "candidate": display_value(display_spec, candidate_raw),
+                "delta": format_delta(display_spec, baseline_value, candidate_value),
                 "tone": tone,
                 "description": spec.description,
                 "path": path,

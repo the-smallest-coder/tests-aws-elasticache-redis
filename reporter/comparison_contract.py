@@ -43,23 +43,20 @@ CONTROL_VARIABLES: tuple[tuple[str, str], ...] = (
 # truncate against, so that case is never flagged.
 TRUNCATED_RUN_WINDOW_RATIO = 0.5
 
-# The WP1 D1 double-written (new path, legacy path) pairs report_compare.py
-# falls back to (see report_compare.METRICS' legacy_path=). Duplicated here
-# in summary form rather than imported from report_compare, which imports
-# build_comparison_contract from this module -- importing METRICS back would
-# make the two modules circular.
-RENAMED_METRIC_PATH_PAIRS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
-    (("client_latency", "task_median_p50_ms"), ("client_latency", "p50_ms")),
-    (("client_latency", "task_median_p99_ms"), ("client_latency", "p99_ms")),
-    (("client_latency", "task_median_p999_ms"), ("client_latency", "p999_ms")),
-    (("client_latency", "worst_task_p99_ms"), ("client_latency", "worst_stream_p99_ms")),
-    (("client_latency", "worst_task_p999_ms"), ("client_latency", "worst_stream_p999_ms")),
-    (("network", "cache", "in_kib_per_sec"), ("network", "cache", "avg_in_kbs")),
-    (("network", "cache", "out_kib_per_sec"), ("network", "cache", "avg_out_kbs")),
-    (("network", "throttling", "bw_in_exceeded_count"), ("network", "throttling", "bw_in_exceeded_total")),
-    (("network", "throttling", "bw_out_exceeded_count"), ("network", "throttling", "bw_out_exceeded_total")),
-    (("network", "throttling", "pps_exceeded_count"), ("network", "throttling", "pps_exceeded_total")),
-)
+def _renamed_metric_path_pairs() -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
+    """The WP1 D1 double-written (new path, legacy path) pairs report_compare.py
+    falls back to. A lazy import, not a module-level one: report_compare.py
+    imports build_comparison_contract from this module at its own module
+    level, so a module-level import back here would be genuinely circular.
+    By the time this function is actually called, both modules have finished
+    loading (the same pattern aggregator.py already uses for the same cycle),
+    so deferring it here instead of hand-copying report_compare.METRICS'
+    legacy_path table is safe -- and means an eleventh renamed metric can't
+    leave this stale.
+    """
+    from report_compare import METRICS
+
+    return [(spec.path, spec.legacy_path) for spec in METRICS if spec.legacy_path]
 
 
 def _reason(code: str, **extra: Any) -> dict[str, Any]:
@@ -71,7 +68,12 @@ def coerce_control_value(field: str, value: Any) -> Any:
 
     Pre-WP0 (thin) artifacts carry strings ("1", "false"); post-WP0 ones
     carry native JSON types (1, false). Without this, "1" != 1 would report
-    a control_variable_differs that isn't real (PLAN_2.md WP4).
+    a control_variable_differs that isn't real (PLAN_2.md WP4). Numeric
+    values are further collapsed to int when they carry no fraction (1 and
+    1.0 must produce the same value): both aggregator.py's fingerprint and
+    this module's own control_variable_differs check compare/hash the
+    result, and int(1) == float(1.0) is not enough when the two feed
+    repr()-based hashing rather than ==.
     """
     if value is None:
         return None
@@ -80,7 +82,7 @@ def coerce_control_value(field: str, value: Any) -> Any:
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
-        return value
+        return int(value) if isinstance(value, float) and value.is_integer() else value
     text = str(value).strip()
     if text == "":
         return None
@@ -89,7 +91,8 @@ def coerce_control_value(field: str, value: Any) -> Any:
     except ValueError:
         pass
     try:
-        return float(text)
+        as_float = float(text)
+        return int(as_float) if as_float.is_integer() else as_float
     except ValueError:
         return text
 
@@ -161,7 +164,7 @@ def _task_count_mismatch(run: RunData) -> bool:
 
 
 def _any_metric_uses_legacy_fallback(baseline: RunData, candidate: RunData) -> bool:
-    for new_path, legacy_path in RENAMED_METRIC_PATH_PAIRS:
+    for new_path, legacy_path in _renamed_metric_path_pairs():
         if get_nested(baseline.summary, new_path) is not None and get_nested(candidate.summary, new_path) is not None:
             continue
         if get_nested(baseline.summary, legacy_path) is not None or get_nested(candidate.summary, legacy_path) is not None:
@@ -169,36 +172,42 @@ def _any_metric_uses_legacy_fallback(baseline: RunData, candidate: RunData) -> b
     return False
 
 
+#: reason codes that force verdict == "invalid" regardless of what else is
+#: in `reasons` -- everything else is "conditional"-tier.
+_INVALID_CODES = frozenset({
+    "diagnostic_status_invalid", "task_count_mismatch", "memtier_window_missing", "truncated_run",
+})
+
+
 def build_comparison_contract(baseline: RunData, candidate: RunData) -> dict[str, Any]:
     """-> {"verdict": "comparable"|"conditional"|"invalid", "reasons": [...],
            "intended_dimensions": {...}, "control_diffs": [...]}
+
+    All reasons are always computed, regardless of verdict: an invalid pair
+    still shows its control-variable diffs and every other conditional-tier
+    finding alongside the invalid one(s). The verdict is the single most
+    severe classification present, not a short-circuit that hides the rest
+    of the picture -- a reader debugging "why is this invalid" also wants
+    "and what else differs" in the same view.
     """
     intended = _intended_dimensions_payload(baseline, candidate)
-
-    # invalid: a defect in one run's own data. Nothing about the *other*
-    # run, and no amount of re-pairing, can fix these.
-    invalid_reasons: list[dict[str, Any]] = []
-    for run in (baseline, candidate):
-        if _loadgen_status(run) == "invalid":
-            invalid_reasons.append(_reason("diagnostic_status_invalid", role=run.role))
-        if _task_count_mismatch(run):
-            invalid_reasons.append(_reason("task_count_mismatch", role=run.role))
-        window = run_window_seconds(run)
-        if window is None:
-            invalid_reasons.append(_reason("memtier_window_missing", role=run.role))
-        elif _is_truncated_run(run):
-            invalid_reasons.append(_reason("truncated_run", role=run.role))
-
-    if invalid_reasons:
-        return {
-            "verdict": "invalid",
-            "reasons": invalid_reasons,
-            "intended_dimensions": intended,
-            "control_diffs": [],
-        }
-
     reasons: list[dict[str, Any]] = []
 
+    # invalid-tier: a defect in one run's own data. Nothing about the
+    # *other* run, and no amount of re-pairing, can fix these.
+    for run in (baseline, candidate):
+        if _loadgen_status(run) == "invalid":
+            reasons.append(_reason("diagnostic_status_invalid", role=run.role))
+        if _task_count_mismatch(run):
+            reasons.append(_reason("task_count_mismatch", role=run.role))
+        window = run_window_seconds(run)
+        if window is None:
+            reasons.append(_reason("memtier_window_missing", role=run.role))
+        elif _is_truncated_run(run):
+            reasons.append(_reason("truncated_run", role=run.role))
+
+    # conditional-tier: computed unconditionally (see docstring), even when
+    # an invalid-tier reason above already decides the verdict.
     differing_dimensions = [dim for dim, info in intended.items() if info["differs"]]
     if len(differing_dimensions) >= 2:
         reasons.append(_reason("multiple_intended_dimensions_differ", fields=differing_dimensions))
@@ -247,8 +256,15 @@ def build_comparison_contract(baseline: RunData, candidate: RunData) -> dict[str
     if _any_metric_uses_legacy_fallback(baseline, candidate):
         reasons.append(_reason("metric_only_in_legacy_variant"))
 
+    if any(reason["code"] in _INVALID_CODES for reason in reasons):
+        verdict = "invalid"
+    elif reasons:
+        verdict = "conditional"
+    else:
+        verdict = "comparable"
+
     return {
-        "verdict": "conditional" if reasons else "comparable",
+        "verdict": verdict,
         "reasons": reasons,
         "intended_dimensions": intended,
         "control_diffs": [r for r in reasons if r["code"] == "control_variable_differs"],

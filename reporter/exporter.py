@@ -1032,10 +1032,42 @@ def main() -> None:
         print(f"Warning: cluster_details.json unavailable for metric contract sizing: {exc}")
         cluster_details = None
 
+    # Timed narrowly around just this call: rows_written below is this
+    # manifest's count specifically, and the log/ECS exports that follow
+    # have nothing to do with either number (a slow Container Insights log
+    # read must not read as a metric-export slowdown, or vice versa).
     metric_export_start = time.monotonic()
     elasticache_manifest = export_elasticache_metrics_to_s3(
         elasticache_id, bucket, metrics_key, start_time, end_time, cluster_details=cluster_details
     )
+    metric_export_duration_seconds = time.monotonic() - metric_export_start
+
+    status["metric_export"] = elasticache_manifest
+    # Not a cost figure (D11): the export step's own runtime, recorded so a
+    # growing metric set that stops finishing before the cluster is torn
+    # down becomes visible instead of silently losing data (WP2 exit
+    # condition 5).
+    status["metric_export_timing"] = {
+        "duration_seconds": round(metric_export_duration_seconds, 3),
+        "rows_written": elasticache_manifest.get("rows_written"),
+    }
+    # checks.metrics deliberately does NOT gate on elasticache_manifest's own
+    # "complete" (discovered ⊇ the conditional D8 contract): that check is
+    # topology-wide (~30 names) and meant for human review after the fact
+    # (WP2 exit condition: "missing_from_discovery is empty, OR every name
+    # in it is explained") -- not a runtime gate. A single optional metric
+    # absent for an unrelated reason (ListMetrics propagation lag on a
+    # freshly created cluster, an engine that doesn't publish one of the
+    # four newly-added names) must not abort report generation entirely at
+    # the worst possible time: after the cluster is already gone. The gate
+    # that actually blocks report generation stays narrow and genuinely
+    # about data presence: did the export come back with real rows at all.
+    status["checks"]["metrics"] = {
+        "complete": elasticache_manifest.get("rows_written", 0) > 0,
+        "rows_written": elasticache_manifest.get("rows_written", 0),
+        "errors": elasticache_manifest.get("errors", []),
+    }
+
     export_logs_to_s3(
         os.environ.get("CONTAINER_INSIGHTS_LOG_GROUP"),
         bucket,
@@ -1053,18 +1085,6 @@ def main() -> None:
         end_time,
         task_metadata=task_metadata,
     )
-    metric_export_duration_seconds = time.monotonic() - metric_export_start
-
-    status["checks"]["metrics"] = elasticache_manifest
-    status["metric_export"] = elasticache_manifest
-    # Not a cost figure (D11): the export step's own runtime, recorded so a
-    # growing metric set that stops finishing before the cluster is torn
-    # down becomes visible instead of silently losing data (WP2 exit
-    # condition 5).
-    status["metric_export_timing"] = {
-        "duration_seconds": round(metric_export_duration_seconds, 3),
-        "rows_written": elasticache_manifest.get("rows_written"),
-    }
 
     export_logs_to_s3(
         os.environ.get("ELASTICACHE_LOG_GROUP"),
