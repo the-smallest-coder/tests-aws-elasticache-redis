@@ -236,10 +236,14 @@ def _list_metrics(namespace: str, filter_dimensions=None, metric_name_filter=Non
 
 
 def _metric_source_stats(source: dict) -> tuple[list[str], list[str]]:
-    return (
-        list(source.get("statistics") or STATISTICS),
-        list(source.get("extended_statistics") or DEFAULT_EXTENDED_STATISTICS),
-    )
+    # "in"/indexing, not `.get(...) or default`: a source that explicitly
+    # asks for statistics: [] (ClientLatency -- percentiles only, no regular
+    # stats) means none, not "not specified" -- `or` can't tell an explicit
+    # empty list from an absent key, and silently replacing [] with the
+    # 5-stat default defeats the exclusion.
+    statistics = source["statistics"] if "statistics" in source else STATISTICS
+    extended_statistics = source["extended_statistics"] if "extended_statistics" in source else DEFAULT_EXTENDED_STATISTICS
+    return list(statistics), list(extended_statistics)
 
 
 def _is_true(value) -> bool:
@@ -389,6 +393,12 @@ def export_metric_sources_to_s3(
     series_with_data = 0
     zero_datapoint_names: set[str] = set()
     errors: list[dict] = []
+    # Diagnostic only (never gates completeness -- see the value_failures
+    # comment on export_elasticache_metrics_to_s3's return below): whether
+    # the cluster's actual read/write activity metrics carry any signal,
+    # tracked from datapoints already being written into the CSV anyway.
+    cache_ops_sum = 0.0
+    curr_items_max = 0.0
 
     for (namespace, metric_name, _dims_key), (dimensions, statistics, extended_statistics) in metric_map.items():
         dimensions_str = _dimensions_to_str(dimensions)
@@ -435,6 +445,10 @@ def export_metric_sources_to_s3(
                 if stat in datapoint:
                     writer.writerow([ts, namespace, metric_name, stat, datapoint[stat], unit, output_dimensions_str])
                     rows_written += 1
+                    if metric_name in ("CacheHits", "CacheMisses") and stat == "Sum":
+                        cache_ops_sum += datapoint[stat]
+                    elif metric_name == "CurrItems" and stat == "Maximum":
+                        curr_items_max = max(curr_items_max, datapoint[stat])
             for stat in extended_statistics:
                 values = datapoint.get("ExtendedStatistics", {})
                 if stat in values:
@@ -449,6 +463,8 @@ def export_metric_sources_to_s3(
         "zero_datapoints": sorted(zero_datapoint_names),
         "errors": errors,
         "rows_written": rows_written,
+        "cache_ops_sum": cache_ops_sum,
+        "curr_items_max": curr_items_max,
     }
     return f"s3://{bucket}/{key}", stats
 
@@ -490,6 +506,20 @@ def export_elasticache_metrics_to_s3(
     print(f"ElastiCache metric sources: {[s['dimensions'] for s in sources]}")
     uri, stats = export_metric_sources_to_s3(sources, bucket, key, start_time, end_time)
     contract_status = _metric_contract_status(stats["discovered"], cluster_details)
+    # Informational only, like missing_from_discovery above -- never folded
+    # into status["checks"]["metrics"]["complete"] (main() only gates on
+    # rows_written > 0). A hard gate here would reintroduce the exact defect
+    # that check was removed for: a genuinely zero-read or zero-write run
+    # (e.g. the write-only fill workload in TODO.md) would trip it despite a
+    # fully successful export. It exists so a human reviewing
+    # report_status.json can tell "exported fine, cluster just had no real
+    # activity" apart from "exported fine, but the metrics that matter came
+    # back empty" -- rows_written > 0 alone can't distinguish those.
+    value_failures = []
+    if stats["cache_ops_sum"] <= 0:
+        value_failures.append("CacheHits/CacheMisses have no positive Sum datapoints")
+    if stats["curr_items_max"] <= 0:
+        value_failures.append("CurrItems has no positive Maximum datapoints")
     return {
         "uri": uri,
         "discovered": stats["discovered"],
@@ -498,6 +528,7 @@ def export_elasticache_metrics_to_s3(
         "missing_from_discovery": contract_status["missing"],
         "errors": stats["errors"],
         "rows_written": stats["rows_written"],
+        "value_failures": value_failures,
         "complete": contract_status["complete"],
         # Backward-compatible alias: status["checks"]["metrics"]["missing"]
         # predates this manifest and is the same list under a shorter name.

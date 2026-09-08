@@ -233,6 +233,11 @@ class MetricExportFilterTests(unittest.TestCase):
             exporter.s3 = original_s3
 
         self.assertEqual(fake_cloudwatch.request["ExtendedStatistics"], ["p50", "p99", "p99.9"])
+        # Regression: statistics: [] means none, not "unspecified" -- a
+        # `.get(...) or STATISTICS`-style fallback can't tell an explicit
+        # empty list from an absent key and would silently request all 5
+        # regular statistics alongside the percentiles.
+        self.assertNotIn("Statistics", fake_cloudwatch.request)
         printed = "\n".join(str(call.args[0]) for call in fake_print.call_args_list if call.args)
         self.assertIn("ECS client latency metric discovery", printed)
         self.assertIn("Namespace=ElastiCache/LoadGenerator", printed)
@@ -535,6 +540,84 @@ class MetricExportManifestTests(unittest.TestCase):
 
         self.assertEqual(stats["errors"], [])
         self.assertEqual(stats["zero_datapoints"], ["TrafficManagementActive"])
+
+
+class ActivityValueCheckTests(unittest.TestCase):
+    """Never made it into the 15-finding review: the discovery-based
+    completeness gate (WP2) only checks that CacheHits/CacheMisses/CurrItems
+    were *published*, not that they carry any real signal -- a run could
+    discover all three names yet have zero actual reads/writes recorded
+    against them. Restored as an informational value_failures list on the
+    manifest (see the comment on export_elasticache_metrics_to_s3), never as
+    a gate: a genuinely zero-activity run (e.g. TODO.md's write-only fill
+    workload) must still produce a report.
+    """
+
+    @staticmethod
+    def _run(exporter, metrics, datapoints_by_name):
+        class FakeElastiCache:
+            def describe_replication_groups(self, **_params):
+                raise Exception("not available in this fake")
+
+        class FakeCloudWatch:
+            def list_metrics(self, **_params):
+                return {"Metrics": metrics}
+
+            def get_metric_statistics(self, **params):
+                return {"Datapoints": datapoints_by_name.get(params["MetricName"], [])}
+
+        class FakeS3:
+            def put_object(self, **_params):
+                return {}
+
+        exporter.elasticache = FakeElastiCache()
+        exporter.cloudwatch = FakeCloudWatch()
+        exporter.s3 = FakeS3()
+        with mock.patch("builtins.print"):
+            return exporter.export_elasticache_metrics_to_s3(
+                "cluster-a", "bucket", "metrics.csv",
+                datetime(2026, 8, 10, tzinfo=timezone.utc), datetime(2026, 8, 10, 1, tzinfo=timezone.utc),
+            )
+
+    def test_empty_core_activity_metrics_are_flagged_but_do_not_fail_the_export(self):
+        exporter = _load_exporter()
+        metrics = [
+            {"MetricName": "Evictions", "Dimensions": [{"Name": "CacheClusterId", "Value": "cluster-a-001"}]},
+        ]
+
+        manifest = self._run(exporter, metrics, {
+            "Evictions": [{"Timestamp": datetime(2026, 8, 10, tzinfo=timezone.utc), "Unit": "Count", "Sum": 3.0}],
+        })
+
+        self.assertEqual(
+            manifest["value_failures"],
+            [
+                "CacheHits/CacheMisses have no positive Sum datapoints",
+                "CurrItems has no positive Maximum datapoints",
+            ],
+        )
+        # The point of this whole design: a real data-quality signal must
+        # never flip status["checks"]["metrics"]["complete"] to False on its
+        # own -- only rows_written > 0 (exercised via manifest["rows_written"]
+        # here) is allowed to do that.
+        self.assertEqual(manifest["rows_written"], 1)
+
+    def test_positive_core_activity_metrics_clear_the_flag(self):
+        exporter = _load_exporter()
+        metrics = [
+            {"MetricName": "CacheHits", "Dimensions": [{"Name": "CacheClusterId", "Value": "cluster-a-001"}]},
+            {"MetricName": "CacheMisses", "Dimensions": [{"Name": "CacheClusterId", "Value": "cluster-a-001"}]},
+            {"MetricName": "CurrItems", "Dimensions": [{"Name": "CacheClusterId", "Value": "cluster-a-001"}]},
+        ]
+        ts = datetime(2026, 8, 10, tzinfo=timezone.utc)
+
+        manifest = self._run(exporter, metrics, {
+            "CacheHits": [{"Timestamp": ts, "Unit": "Count", "Sum": 100.0}],
+            "CacheMisses": [{"Timestamp": ts, "Unit": "Count", "Sum": 20.0}],
+            "CurrItems": [{"Timestamp": ts, "Unit": "Count", "Maximum": 50.0}],
+        })
+
+        self.assertEqual(manifest["value_failures"], [])
 
 
 class ConditionalContractTests(unittest.TestCase):
