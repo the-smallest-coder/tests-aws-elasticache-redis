@@ -334,7 +334,7 @@ class ReportCompareIndependentClientLatencyRowsTests(unittest.TestCase):
         )
 
         rows = metric_rows(baseline, candidate)
-        task_median_row = next(r for r in rows if r["label"] == "ECS Task Latency p99")
+        task_median_row = next(r for r in rows if r["label"] == "ECS Task Latency p99 (Totals)")
         emf_row = next(r for r in rows if r["label"] == "ECS Task Latency p99 (EMF)")
 
         self.assertIn("4.8", task_median_row["baseline"])

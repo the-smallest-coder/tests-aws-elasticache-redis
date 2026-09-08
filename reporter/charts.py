@@ -299,8 +299,8 @@ def _add_ecs_task_latency_traces(fig, ecs_df, row, legend="legend5"):
         ("p50_ms", "ECS task p50", C_LAT_P50, "solid"),
         ("p99_ms", "ECS task p99", C_LAT_P99, "solid"),
         ("p999_ms", "ECS task p99.9", C_LAT_P999, "solid"),
-        ("worst_stream_p99_ms", "Worst ECS task p99", C_LAT_WORST99, "dash"),
-        ("worst_stream_p999_ms", "Worst ECS task p99.9", C_LAT_WORST999, "dash"),
+        ("worst_p99_ms", "Worst ECS task p99", C_LAT_WORST99, "dash"),
+        ("worst_p999_ms", "Worst ECS task p99.9", C_LAT_WORST999, "dash"),
     )
     shown = False
     if not series.empty:

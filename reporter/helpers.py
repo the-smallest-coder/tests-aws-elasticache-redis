@@ -104,8 +104,8 @@ def client_latency_series(df):
         'p50_ms',
         'p99_ms',
         'p999_ms',
-        'worst_stream_p99_ms',
-        'worst_stream_p999_ms',
+        'worst_p99_ms',
+        'worst_p999_ms',
     ]
     if df.empty:
         return pd.DataFrame(columns=columns)
@@ -135,7 +135,7 @@ def client_latency_series(df):
         .max()
         .pivot(index='Timestamp', columns='Stat', values='Value')
         .reset_index()
-        .rename(columns={'p99': 'worst_stream_p99_ms', 'p99.9': 'worst_stream_p999_ms'})
+        .rename(columns={'p99': 'worst_p99_ms', 'p99.9': 'worst_p999_ms'})
     )
     merged = aggregate.merge(worst, on='Timestamp', how='outer').sort_values('Timestamp')
     for column in columns:

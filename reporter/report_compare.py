@@ -79,23 +79,23 @@ METRICS: tuple[MetricSpec, ...] = (
     # collection paths and different failure modes -- one being unavailable
     # says nothing about the other.
     MetricSpec(
-        "network_ecs", "ECS Task Latency p50", ("client_latency", "task_median_p50_ms"),
+        "network_ecs", "ECS Task Latency p50 (Totals)", ("client_latency", "task_median_p50_ms"),
         "ms", 3, "lower", "Median across each task's final memtier p50 latency total.",
     ),
     MetricSpec(
-        "network_ecs", "ECS Task Latency p99", ("client_latency", "task_median_p99_ms"),
+        "network_ecs", "ECS Task Latency p99 (Totals)", ("client_latency", "task_median_p99_ms"),
         "ms", 3, "lower", "Median across each task's final memtier p99 latency total.",
     ),
     MetricSpec(
-        "network_ecs", "ECS Task Latency p99.9", ("client_latency", "task_median_p999_ms"),
+        "network_ecs", "ECS Task Latency p99.9 (Totals)", ("client_latency", "task_median_p999_ms"),
         "ms", 3, "lower", "Median across each task's final memtier p99.9 latency total.",
     ),
     MetricSpec(
-        "network_ecs", "Worst ECS Task Latency p99", ("client_latency", "worst_task_p99_ms"),
+        "network_ecs", "Worst ECS Task Latency p99 (Totals)", ("client_latency", "worst_task_p99_ms"),
         "ms", 3, "lower", "Maximum across each task's final memtier p99 latency total.",
     ),
     MetricSpec(
-        "network_ecs", "Worst ECS Task Latency p99.9", ("client_latency", "worst_task_p999_ms"),
+        "network_ecs", "Worst ECS Task Latency p99.9 (Totals)", ("client_latency", "worst_task_p999_ms"),
         "ms", 3, "lower", "Maximum across each task's final memtier p99.9 latency total.",
     ),
     MetricSpec(
@@ -114,11 +114,11 @@ METRICS: tuple[MetricSpec, ...] = (
         "average of percentiles, not one; independent collection path from the memtier-Totals row above.",
     ),
     MetricSpec(
-        "network_ecs", "Worst ECS Task Latency p99 (EMF)", ("client_latency", "worst_stream_p99_ms"),
+        "network_ecs", "Worst ECS Task Latency p99 (EMF)", ("client_latency", "worst_p99_ms"),
         "ms", 3, "lower", "Maximum per-minute CloudWatch EMF p99 latency across tasks.",
     ),
     MetricSpec(
-        "network_ecs", "Worst ECS Task Latency p99.9 (EMF)", ("client_latency", "worst_stream_p999_ms"),
+        "network_ecs", "Worst ECS Task Latency p99.9 (EMF)", ("client_latency", "worst_p999_ms"),
         "ms", 3, "lower", "Maximum per-minute CloudWatch EMF p99.9 latency across tasks.",
     ),
     MetricSpec(

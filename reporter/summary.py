@@ -134,7 +134,7 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
       "client_latency": {
           # ElastiCache/LoadGenerator EMF, minute-granularity, averaged across
           # tasks then across minutes -- an average of percentiles, not one:
-          p50_ms, p99_ms, p999_ms, worst_stream_p99_ms, worst_stream_p999_ms, percentile_basis,
+          p50_ms, p99_ms, p999_ms, worst_p99_ms, worst_p999_ms, percentile_basis,
           # memtier's own per-task Totals histogram, one aggregation
           # (median/max) across tasks -- independent source and method, not
           # a replacement for the EMF numbers above:
@@ -417,7 +417,7 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
             vals = latency_df[key].dropna()
             if not vals.empty:
                 client_latency[key] = _safe(float(vals.mean()), 3)
-        for key in ('worst_stream_p99_ms', 'worst_stream_p999_ms'):
+        for key in ('worst_p99_ms', 'worst_p999_ms'):
             vals = latency_df[key].dropna()
             if not vals.empty:
                 client_latency[key] = _safe(float(vals.max()), 3)
