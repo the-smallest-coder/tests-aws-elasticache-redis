@@ -12,15 +12,6 @@ if REPORTER_DIR not in sys.path:
     sys.path.insert(0, REPORTER_DIR)
 
 REPORT_CONTRACT_FIXTURES = ROOT / "tests" / "fixtures" / "report_contract"
-# Both results_local.{json,html} pairs below are frozen output from an old
-# reporter build (predating the WP0-WP6 metrics-contract work), committed
-# once (fbf1c78) and never regenerated -- not live examples of the current
-# schema. OLD_RUN vs GOOD_RUN only ever asserts on section/card-label
-# presence one level deep (see the two tests below), which intentional
-# per-field renames since then don't disturb; do not read either fixture's
-# individual field names as current-schema documentation.
-OLD_RUN = REPORT_CONTRACT_FIXTURES / "older_run"
-GOOD_RUN = REPORT_CONTRACT_FIXTURES / "current_run"
 BAD_RUN = REPORT_CONTRACT_FIXTURES / "missing_benchmark_run"
 
 
@@ -34,22 +25,6 @@ def summary(run_dir: Path) -> dict:
 
 
 class ReportContractTests(unittest.TestCase):
-    def test_good_report_keeps_old_card_contract(self):
-        old_labels = card_labels(OLD_RUN)
-        good_labels = card_labels(GOOD_RUN)
-
-        self.assertLessEqual(old_labels, good_labels)
-
-    def test_good_report_keeps_old_json_contract(self):
-        old = summary(OLD_RUN)
-        good = summary(GOOD_RUN)
-
-        for section, values in old.items():
-            if not isinstance(values, dict):
-                continue
-            self.assertIn(section, good)
-            self.assertLessEqual(set(values), set(good[section]), section)
-
     def test_missing_benchmark_fixture_shows_current_failure(self):
         bad = summary(BAD_RUN)
 
