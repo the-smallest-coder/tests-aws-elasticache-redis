@@ -391,6 +391,7 @@ def export_metric_sources_to_s3(
 
     rows_written = 0
     series_with_data = 0
+    exported_names: set[str] = set()
     zero_datapoint_names: set[str] = set()
     errors: list[dict] = []
     # Diagnostic only (never gates completeness -- see the value_failures
@@ -437,6 +438,7 @@ def export_metric_sources_to_s3(
             zero_datapoint_names.add(metric_name)
             continue
         series_with_data += 1
+        exported_names.add(metric_name)
 
         for datapoint in sorted(datapoints, key=lambda d: d["Timestamp"]):
             ts = datapoint["Timestamp"].isoformat()
@@ -460,6 +462,7 @@ def export_metric_sources_to_s3(
     stats = {
         "discovered": sorted(discovered_names),
         "exported": series_with_data,
+        "exported_names": sorted(exported_names),
         "zero_datapoints": sorted(zero_datapoint_names),
         "errors": errors,
         "rows_written": rows_written,
@@ -524,6 +527,7 @@ def export_elasticache_metrics_to_s3(
         "uri": uri,
         "discovered": stats["discovered"],
         "exported": stats["exported"],
+        "exported_names": stats["exported_names"],
         "zero_datapoints": stats["zero_datapoints"],
         "missing_from_discovery": contract_status["missing"],
         "errors": stats["errors"],

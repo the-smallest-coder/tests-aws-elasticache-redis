@@ -541,6 +541,47 @@ class MetricExportManifestTests(unittest.TestCase):
         self.assertEqual(stats["errors"], [])
         self.assertEqual(stats["zero_datapoints"], ["TrafficManagementActive"])
 
+    def test_exported_names_tracks_which_metrics_actually_produced_data(self):
+        """WP2 exit criterion 3 ("every discovered metric is either in
+        exported or in zero_datapoints, nothing vanishes silently") wasn't
+        actually checkable from the manifest: `exported` is a series count,
+        not a set of names, so there was no way to tell *which* discovered
+        metrics it covers. `exported_names` closes that gap.
+        """
+        exporter = _load_exporter()
+
+        class FakeCloudWatch:
+            def list_metrics(self, **_params):
+                return {"Metrics": [
+                    {"MetricName": "CurrItems", "Dimensions": [{"Name": "CacheClusterId", "Value": "cluster-a"}]},
+                    {"MetricName": "TrafficManagementActive", "Dimensions": [{"Name": "CacheClusterId", "Value": "cluster-a"}]},
+                ]}
+
+            def get_metric_statistics(self, **params):
+                if params["MetricName"] == "CurrItems":
+                    return {"Datapoints": [{
+                        "Timestamp": datetime(2026, 8, 10, tzinfo=timezone.utc), "Unit": "Count", "Maximum": 5.0,
+                    }]}
+                return {"Datapoints": []}
+
+        class FakeS3:
+            def put_object(self, **_params):
+                return {}
+
+        exporter.cloudwatch = FakeCloudWatch()
+        exporter.s3 = FakeS3()
+        with mock.patch("builtins.print"):
+            _uri, stats = exporter.export_metric_sources_to_s3(
+                [{"namespace": "AWS/ElastiCache", "dimensions": [{"Name": "CacheClusterId", "Value": "cluster-a"}]}],
+                "bucket", "metrics.csv",
+                datetime(2026, 8, 10, tzinfo=timezone.utc), datetime(2026, 8, 10, 1, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(stats["exported_names"], ["CurrItems"])
+        self.assertEqual(stats["zero_datapoints"], ["TrafficManagementActive"])
+        vanished = set(stats["discovered"]) - set(stats["exported_names"]) - set(stats["zero_datapoints"])
+        self.assertEqual(vanished, set())
+
 
 class ActivityValueCheckTests(unittest.TestCase):
     """Never made it into the 15-finding review: the discovery-based
