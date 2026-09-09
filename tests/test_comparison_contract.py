@@ -133,6 +133,52 @@ class ComparisonContractTests(unittest.TestCase):
         self.assertEqual(contract["verdict"], "invalid")
         self.assertTrue(any(r["code"] == "diagnostic_status_invalid" for r in contract["reasons"]))
 
+    def test_run_until_stopped_sentinel_does_not_false_positive_as_truncated(self):
+        """Regression: ecs.tf's loadgen_memtier_test_time == 0 default (run
+        until the shutdown Lambda ends it) is written to cluster_details.json
+        as test_time_seconds = 2147483647, not 0 -- memtier's --test-time
+        needs a positive integer. _is_truncated_run used to check
+        test_time_seconds == 0, a value this rig can never actually produce,
+        so truncated_run fired on every real comparison regardless of how
+        long the run actually ran. duration_label == "until stopped" is the
+        real signal.
+        """
+        build = self._load()
+        overrides = {"memtier.test_time_seconds": 2147483647, "memtier.duration_label": "until stopped"}
+        baseline = _run(
+            "Baseline",
+            _summary(report_start="2026-08-10T12:00:00", report_end="2026-08-10T13:00:00"),
+            _control_cluster_details(**overrides),
+        )
+        candidate = _run(
+            "Candidate",
+            _summary(node_type="cache.m5.large", report_start="2026-08-10T12:00:00", report_end="2026-08-10T13:00:00"),
+            _control_cluster_details(**overrides),
+        )
+
+        contract = build(baseline, candidate)
+
+        self.assertEqual(contract["verdict"], "comparable")
+        self.assertEqual(contract["reasons"], [])
+
+    def test_short_observed_window_against_a_real_configured_duration_is_still_truncated(self):
+        """The until-stopped exemption must not swallow real truncation
+        detection: a run configured for a fixed duration that ends far short
+        of it (crash, early kill, task replaced mid-run) still has to fire.
+        """
+        build = self._load()
+        baseline = _run(
+            "Baseline",
+            _summary(report_start="2026-08-10T12:00:00", report_end="2026-08-10T12:10:00"),
+            _control_cluster_details(**{"memtier.test_time_seconds": 3600}),
+        )
+        candidate = _run("Candidate", _summary(), _control_cluster_details())
+
+        contract = build(baseline, candidate)
+
+        self.assertEqual(contract["verdict"], "invalid")
+        self.assertTrue(any(r["code"] == "truncated_run" and r["role"] == "Baseline" for r in contract["reasons"]))
+
     def test_matching_configured_engine_version_with_differing_actual_is_conditional(self):
         build = self._load()
         baseline = _run(

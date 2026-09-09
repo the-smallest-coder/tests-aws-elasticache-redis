@@ -38,9 +38,14 @@ CONTROL_VARIABLES: tuple[tuple[str, str], ...] = (
 # test_time_seconds is a truncated run (crash, early kill, task replaced
 # mid-run) -- not normal jitter. The 81-run corpus's max natural jitter
 # between nominally identical 60-minute runs is 5.3% (PLAN_2.md WP4), an
-# order of magnitude inside this margin. test_time_seconds == 0 means "run
-# until ECS stops the task" (ecs.tf); there is no configured duration to
-# truncate against, so that case is never flagged.
+# order of magnitude inside this margin. "Run until ECS stops the task"
+# (loadgen_memtier_test_time == 0, ecs.tf's default) has no configured
+# duration to truncate against, so that case must never be flagged -- but
+# test_time_seconds itself can't signal it: memtier's --test-time needs a
+# positive integer, so ecs.tf:194 substitutes 2147483647, not 0, and that
+# is what every artifact this rig produces under the default actually
+# carries. duration_label (node_details.tf:89) is explicit about the same
+# thing instead of relying on a magic number in test_time_seconds.
 TRUNCATED_RUN_WINDOW_RATIO = 0.5
 
 
@@ -124,7 +129,18 @@ def _configured_test_time_seconds(run: RunData) -> float | None:
     return float(coerced) if isinstance(coerced, (int, float)) else None
 
 
+def _runs_until_stopped(run: RunData) -> bool:
+    """True when memtier was configured to run until the ECS shutdown Lambda
+    ends it, not for a fixed duration -- see the TRUNCATED_RUN_WINDOW_RATIO
+    comment above for why test_time_seconds alone can't tell this apart from
+    a genuine ~68-year configured run.
+    """
+    return control_variable_value(run, "memtier", "duration_label") == "until stopped"
+
+
 def _is_truncated_run(run: RunData) -> bool:
+    if _runs_until_stopped(run):
+        return False
     configured = _configured_test_time_seconds(run)
     if not configured or configured <= 0:
         return False
