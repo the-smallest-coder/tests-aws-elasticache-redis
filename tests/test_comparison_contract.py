@@ -265,6 +265,25 @@ class ComparisonContractTests(unittest.TestCase):
         self.assertEqual(contract["verdict"], "conditional")
         self.assertTrue(any(r["code"] == "control_variables_unknown" for r in contract["reasons"]))
 
+    def test_empty_string_control_field_is_unknown_not_silently_matching(self):
+        """Regression: control_known used to check the raw value
+        (control_variable_value(...) is not None), but "" is not None even
+        though coerce_control_value("") == None -- a run with a present-but-
+        empty control field (not a missing key -- the thin-artifact case
+        above) slipped past the knownness gate, then both sides coerced to
+        None and compared equal, so it silently produced neither
+        control_variables_unknown nor control_variable_differs.
+        """
+        build = self._load()
+        baseline = _run("Baseline", _summary(), _control_cluster_details(**{"memtier.pipeline": ""}))
+        candidate = _run("Candidate", _summary(), _control_cluster_details(**{"memtier.pipeline": ""}))
+
+        contract = build(baseline, candidate)
+
+        self.assertEqual(contract["verdict"], "conditional")
+        self.assertTrue(any(r["code"] == "control_variables_unknown" for r in contract["reasons"]))
+        self.assertFalse(any(r["code"] == "control_variable_differs" for r in contract["reasons"]))
+
     def test_different_schema_version_is_conditional_not_invalid(self):
         build = self._load()
         baseline = _run("Baseline", _summary(schema="2026-05-loadgen-quality-v1"), _control_cluster_details())

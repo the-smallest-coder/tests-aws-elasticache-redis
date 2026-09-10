@@ -213,7 +213,7 @@ def build_comparison_contract(baseline: RunData, candidate: RunData) -> dict[str
             ))
 
     control_known = all(
-        control_variable_value(run, section, field) is not None
+        coerce_control_value(field, control_variable_value(run, section, field)) is not None
         for section, field in CONTROL_VARIABLES
         for run in (baseline, candidate)
     )
