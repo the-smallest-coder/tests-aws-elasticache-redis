@@ -41,8 +41,8 @@ terraform destroy
 
 1. **Provisions** ElastiCache (Redis/Valkey) + ECS load generators
 2. **Runs** memtier_benchmark for configurable duration (default: 1 hour)
-3. **Exports** metrics (CSV) + logs (text) to S3
-4. **Cleans up** by stopping ECS and deleting the ElastiCache replication group
+3. **Shuts down** by stopping ECS and deleting the ElastiCache replication group
+4. **Verifies** both are gone, then **exports** metrics (CSV) + logs (text) to S3 and generates the report
 
 ---
 
@@ -65,7 +65,9 @@ flowchart TB
     
     subgraph AWS_Services["AWS Services"]
         EventBridge["EventBridge<br/>Scheduler"]
-        Lambda["Lambda<br/>Shutdown"]
+        Lambda_Shutdown["Lambda<br/>Shutdown"]
+        Lambda_Verify["Lambda<br/>Verify Shutdown"]
+        Reporter["ECS Task<br/>Reporter"]
         CloudWatch["CloudWatch<br/>Logs & Metrics"]
         S3["S3<br/>Exports"]
     end
@@ -75,9 +77,13 @@ flowchart TB
     SG_EC -.->|allows from SG_ECS| Redis
     ECS_Tasks -->|logs| CloudWatch
     Redis -->|metrics| CloudWatch
-    EventBridge -->|triggers| Lambda
-    Lambda -->|reads| CloudWatch
-    Lambda -->|exports| S3
+    EventBridge -->|triggers| Lambda_Shutdown
+    EventBridge -->|"triggers (later)"| Lambda_Verify
+    Lambda_Shutdown -->|stops| ECS_Tasks
+    Lambda_Shutdown -->|deletes| Redis
+    Lambda_Verify -->|"confirms gone,<br/>then launches"| Reporter
+    Reporter -->|reads| CloudWatch
+    Reporter -->|exports| S3
 ```
 
 ---
@@ -98,14 +104,24 @@ flowchart LR
     end
     
     subgraph Stop["After Duration"]
-        T1[EventBridge] -->|triggers| T2[Lambda]
-        T2 -->|export logs| T3[S3]
-        T2 -->|export metrics| T3
+        T1[EventBridge] -->|triggers| T2[Shutdown Lambda]
         T2 -->|stop| T4[ECS Service]
         T2 -->|delete| T5[ElastiCache]
     end
     
-    Start --> Run --> Stop
+    subgraph Verify["After Verify Delay"]
+        V1[EventBridge] -->|triggers| V2[Verify Lambda]
+        V2 -->|confirms gone| T4
+        V2 -->|confirms gone| T5
+        V2 -->|launches| V3[Reporter ECS Task]
+    end
+    
+    subgraph Export["Reporter Task"]
+        V3 -->|export logs| E1[S3]
+        V3 -->|export metrics| E1
+    end
+    
+    Start --> Run --> Stop --> Verify --> Export
 ```
 
 ---

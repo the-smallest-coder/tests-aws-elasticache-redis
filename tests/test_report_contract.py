@@ -12,8 +12,6 @@ if REPORTER_DIR not in sys.path:
     sys.path.insert(0, REPORTER_DIR)
 
 REPORT_CONTRACT_FIXTURES = ROOT / "tests" / "fixtures" / "report_contract"
-OLD_RUN = REPORT_CONTRACT_FIXTURES / "legacy_run"
-GOOD_RUN = REPORT_CONTRACT_FIXTURES / "current_run"
 BAD_RUN = REPORT_CONTRACT_FIXTURES / "missing_benchmark_run"
 
 
@@ -27,22 +25,6 @@ def summary(run_dir: Path) -> dict:
 
 
 class ReportContractTests(unittest.TestCase):
-    def test_good_report_keeps_old_card_contract(self):
-        old_labels = card_labels(OLD_RUN)
-        good_labels = card_labels(GOOD_RUN)
-
-        self.assertLessEqual(old_labels, good_labels)
-
-    def test_good_report_keeps_old_json_contract(self):
-        old = summary(OLD_RUN)
-        good = summary(GOOD_RUN)
-
-        for section, values in old.items():
-            if not isinstance(values, dict):
-                continue
-            self.assertIn(section, good)
-            self.assertLessEqual(set(values), set(good[section]), section)
-
     def test_missing_benchmark_fixture_shows_current_failure(self):
         bad = summary(BAD_RUN)
 
@@ -358,6 +340,48 @@ class CardRenderingTests(unittest.TestCase):
         self.assertNotIn("avg_cpu_pct", summary["ecs"])
         self.assertIn("ECS Service CPU — Time Avg", html)
         self.assertIn("ECS Service CPU — Time Peak", html)
+
+    def test_ecs_mem_peak_reserved_tooltip_uses_average_not_a_mixed_stat_max(self):
+        """Regression: reserved_df in cards.py used to select MemoryReserved
+        rows with no Stat filter. Dead code before WP2 (MemoryReserved was
+        never in REQUIRED_ECS_METRICS, so no rows existed at all); live after
+        WP2 drops the metric_names discovery filter, at which point .max()
+        across all 5 STATISTICS + p99 picks whichever stat has the largest
+        raw value -- typically Sum -- instead of a single task's reservation.
+        """
+        try:
+            import pandas as pd
+
+            from cards import stat_cards_html
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        def _row(metric_name, stat, value):
+            return {
+                "Timestamp": pd.Timestamp("2026-05-01T00:00:00"),
+                "Namespace": "AWS/ECS",
+                "MetricName": metric_name,
+                "Stat": stat,
+                "Value": value,
+                "Unit": "Megabytes",
+                "Dimensions": "ClusterName=c;ServiceName=s",
+            }
+
+        # 4 tasks x 2048 MB reserved each: Average/Maximum per task is 2048,
+        # but Sum across 4 concurrent tasks in the same minute is 8192.
+        ecs = pd.DataFrame([
+            _row("MemoryUtilized", "Average", 1500.0),
+            _row("MemoryReserved", "Average", 2048.0),
+            _row("MemoryReserved", "Maximum", 2048.0),
+            _row("MemoryReserved", "Sum", 8192.0),
+        ])
+
+        html = stat_cards_html(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), ecs)
+
+        self.assertIn("Reserved: 2048 MB", html)
+        self.assertNotIn("Reserved: 8192 MB", html)
 
     def test_within_az_skew_card_renders_without_generator_cpu(self):
         """generator_cpu_p95_pct comes from Container Insights CPU data;

@@ -4,7 +4,6 @@
 
 - Add `BytesUsedForCache`, `TrafficManagementActive`, `SuccessfulReadRequestLatency`, `SuccessfulWriteRequestLatency`, `ErrorCount`, `NetworkMaxBytesIn`, and `NetworkMaxBytesOut`.
 - Add host CPU summary: `host_cpu.avg_pct`, `host_cpu.max_pct`, `host_cpu.p95_pct`, `host_cpu_vs_single_thread_threshold_pct`.
-- Add true client latency summary from memtier totals: `client_latency.p50_ms`, `client_latency.p99_ms`, `client_latency.p999_ms`, `client_latency.worst_stream_p99_ms`, `client_latency.worst_stream_p999_ms`.
 - Add memory summary: `memory.bytes_used_max_mb`, `memory.bytes_per_key_at_peak`, `memory.memory_amplification`, `memory.estimated_maxmemory_mb`, `memory_pressure_sample_pct`.
 - Add normalized eviction and miss summary: `evictions_per_million_ops`, `evictions_per_10k_writes`, `cache_misses_per_million_ops`, `first_eviction_ts`.
 - Add traffic management summary: `traffic_management.ever_active`, `traffic_management.active_sample_count`.

@@ -60,15 +60,16 @@ class ClientLatencyReportTests(unittest.TestCase):
 
         self.assertEqual(series["p50_ms"].tolist(), [2.0, 5.0])
         self.assertEqual(series["p99_ms"].tolist(), [10.0, 15.0])
-        self.assertEqual(series["worst_stream_p99_ms"].tolist(), [12.0, 15.0])
+        self.assertEqual(series["worst_p99_ms"].tolist(), [12.0, 15.0])
         self.assertEqual(
             report_summary["client_latency"],
             {
                 "p50_ms": 3.5,
                 "p99_ms": 12.5,
                 "p999_ms": 29.0,
-                "worst_stream_p99_ms": 15.0,
-                "worst_stream_p999_ms": 35.0,
+                "worst_p99_ms": 15.0,
+                "worst_p999_ms": 35.0,
+                "percentile_basis": "minute_mean_of_task_percentiles",
             },
         )
 

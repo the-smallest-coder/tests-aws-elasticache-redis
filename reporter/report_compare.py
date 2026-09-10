@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from comparison_contract import build_comparison_contract
 from formatting import format_gib, format_usd_hour
 from report_common import (
     MetricSpec,
@@ -47,7 +48,10 @@ METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("benchmark", "Max Latency", ("benchmark", "max_latency_ms"), "ms", 2, "lower", "Worst client-side latency observed during the run."),
     MetricSpec("benchmark", "P95 Latency", ("benchmark", "p95_latency_ms"), "ms", 2, "lower", "95th percentile client-side latency."),
     MetricSpec("benchmark", "P99 Latency", ("benchmark", "p99_latency_ms"), "ms", 2, "lower", "99th percentile client-side latency."),
-    MetricSpec("benchmark", "Avg Bandwidth", ("benchmark", "avg_bandwidth_kbs"), "KB/s", 2, "neutral", "Average network throughput reported by memtier."),
+    MetricSpec(
+        "benchmark", "Avg Bandwidth", ("benchmark", "total_bandwidth_kbs"),
+        "KB/s", 2, "neutral", "Sum of network throughput reported by memtier across streams.",
+    ),
     MetricSpec("engine_memory", "Avg Engine CPU", ("engine_cpu", "avg_pct"), "%", 2, "lower", "Average Redis engine CPU utilization.", "points"),
     MetricSpec("engine_memory", "Peak Engine CPU", ("engine_cpu", "max_pct"), "%", 2, "lower", "Highest Redis engine CPU utilization.", "points"),
     MetricSpec("engine_memory", "Avg CPU Credit Balance", ("engine_cpu", "credit_balance_avg"), "credits", 2, "higher", "Average burst credit balance for T-family cache nodes."),
@@ -69,11 +73,54 @@ METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("cache_latency", "String Latency", ("latency_server_us", "string_avg"), "us", 3, "lower", "Average server-side string command latency."),
     MetricSpec("cache_latency", "Avg Connections", ("connections", "avg"), "", 1, "neutral", "Average concurrent connections on the cache node."),
     MetricSpec("cache_latency", "Peak Connections", ("connections", "max"), "", 1, "neutral", "Highest concurrent connection count."),
-    MetricSpec("network_ecs", "ECS Task Latency p50", ("client_latency", "p50_ms"), "ms", 3, "lower", "Mean ECS task EMF p50 latency over the report window."),
-    MetricSpec("network_ecs", "ECS Task Latency p99", ("client_latency", "p99_ms"), "ms", 3, "lower", "Mean ECS task EMF p99 latency over the report window."),
-    MetricSpec("network_ecs", "ECS Task Latency p99.9", ("client_latency", "p999_ms"), "ms", 3, "lower", "Mean ECS task EMF p99.9 latency over the report window."),
-    MetricSpec("network_ecs", "Worst ECS Task Latency p99", ("client_latency", "worst_stream_p99_ms"), "ms", 3, "lower", "Maximum per-task ECS EMF p99 latency."),
-    MetricSpec("network_ecs", "Worst ECS Task Latency p99.9", ("client_latency", "worst_stream_p999_ms"), "ms", 3, "lower", "Maximum per-task ECS EMF p99.9 latency."),
+    # Two independent measurements, not a rename pair (see summary.py's
+    # client_latency comment): memtier-Totals-based (task_median_*/worst_task_*)
+    # and CloudWatch-EMF-based (p50_ms/p99_ms/etc., further below). Different
+    # collection paths and different failure modes -- one being unavailable
+    # says nothing about the other.
+    MetricSpec(
+        "network_ecs", "ECS Task Latency p50 (Totals)", ("client_latency", "task_median_p50_ms"),
+        "ms", 3, "lower", "Median across each task's final memtier p50 latency total.",
+    ),
+    MetricSpec(
+        "network_ecs", "ECS Task Latency p99 (Totals)", ("client_latency", "task_median_p99_ms"),
+        "ms", 3, "lower", "Median across each task's final memtier p99 latency total.",
+    ),
+    MetricSpec(
+        "network_ecs", "ECS Task Latency p99.9 (Totals)", ("client_latency", "task_median_p999_ms"),
+        "ms", 3, "lower", "Median across each task's final memtier p99.9 latency total.",
+    ),
+    MetricSpec(
+        "network_ecs", "Worst ECS Task Latency p99 (Totals)", ("client_latency", "worst_task_p99_ms"),
+        "ms", 3, "lower", "Maximum across each task's final memtier p99 latency total.",
+    ),
+    MetricSpec(
+        "network_ecs", "Worst ECS Task Latency p99.9 (Totals)", ("client_latency", "worst_task_p999_ms"),
+        "ms", 3, "lower", "Maximum across each task's final memtier p99.9 latency total.",
+    ),
+    MetricSpec(
+        "network_ecs", "ECS Task Latency p50 (EMF)", ("client_latency", "p50_ms"),
+        "ms", 3, "lower", "Mean of per-minute CloudWatch EMF p50 latency across tasks -- an "
+        "average of percentiles, not one; independent collection path from the memtier-Totals row above.",
+    ),
+    MetricSpec(
+        "network_ecs", "ECS Task Latency p99 (EMF)", ("client_latency", "p99_ms"),
+        "ms", 3, "lower", "Mean of per-minute CloudWatch EMF p99 latency across tasks -- an "
+        "average of percentiles, not one; independent collection path from the memtier-Totals row above.",
+    ),
+    MetricSpec(
+        "network_ecs", "ECS Task Latency p99.9 (EMF)", ("client_latency", "p999_ms"),
+        "ms", 3, "lower", "Mean of per-minute CloudWatch EMF p99.9 latency across tasks -- an "
+        "average of percentiles, not one; independent collection path from the memtier-Totals row above.",
+    ),
+    MetricSpec(
+        "network_ecs", "Worst ECS Task Latency p99 (EMF)", ("client_latency", "worst_p99_ms"),
+        "ms", 3, "lower", "Maximum per-minute CloudWatch EMF p99 latency across tasks.",
+    ),
+    MetricSpec(
+        "network_ecs", "Worst ECS Task Latency p99.9 (EMF)", ("client_latency", "worst_p999_ms"),
+        "ms", 3, "lower", "Maximum per-minute CloudWatch EMF p99.9 latency across tasks.",
+    ),
     MetricSpec(
         "network_ecs", "ECS Service CPU — Time Average", ("ecs", "service_cpu_time_avg_pct"),
         "%", 2, "neutral", "Time average of service-level CPUUtilization; this is not an average across tasks.", "points",
@@ -108,11 +155,26 @@ METRICS: tuple[MetricSpec, ...] = (
         "network_ecs", "Between-AZ Throughput Ratio", ("loadgen", "throughput_skew_between_az_max_to_min"),
         "max/min", 3, "lower", "Max/min across AZ median task throughput. Reported as a cross-AZ result without a pass/fail threshold.",
     ),
-    MetricSpec("network_ecs", "Avg Cache In", ("network", "cache", "avg_in_kbs"), "KB/s", 2, "neutral", "Average inbound network throughput on the cache node."),
-    MetricSpec("network_ecs", "Avg Cache Out", ("network", "cache", "avg_out_kbs"), "KB/s", 2, "neutral", "Average outbound network throughput on the cache node."),
-    MetricSpec("network_ecs", "BW In Throttle Events", ("network", "throttling", "bw_in_exceeded_total"), "", 0, "lower", "Total bandwidth-in throttle events."),
-    MetricSpec("network_ecs", "BW Out Throttle Events", ("network", "throttling", "bw_out_exceeded_total"), "", 0, "lower", "Total bandwidth-out throttle events."),
-    MetricSpec("network_ecs", "PPS Throttle Events", ("network", "throttling", "pps_exceeded_total"), "", 0, "lower", "Total packets-per-second throttle events."),
+    MetricSpec(
+        "network_ecs", "Avg Cache In", ("network", "cache", "in_kib_per_sec"),
+        "KiB/s", 2, "neutral", "Average inbound network throughput on the cache node.",
+    ),
+    MetricSpec(
+        "network_ecs", "Avg Cache Out", ("network", "cache", "out_kib_per_sec"),
+        "KiB/s", 2, "neutral", "Average outbound network throughput on the cache node.",
+    ),
+    MetricSpec(
+        "network_ecs", "BW In Throttle Events", ("network", "throttling", "bw_in_exceeded_count"),
+        "", 0, "lower", "Total bandwidth-in throttle events.",
+    ),
+    MetricSpec(
+        "network_ecs", "BW Out Throttle Events", ("network", "throttling", "bw_out_exceeded_count"),
+        "", 0, "lower", "Total bandwidth-out throttle events.",
+    ),
+    MetricSpec(
+        "network_ecs", "PPS Throttle Events", ("network", "throttling", "pps_exceeded_count"),
+        "", 0, "lower", "Total packets-per-second throttle events.",
+    ),
     MetricSpec("network_ecs", "Peak ECS Memory", ("ecs", "peak_mem_mb"), "MB", 1, "lower", "Peak ECS task memory usage."),
 )
 
@@ -469,6 +531,11 @@ def build_compare_payload(baseline: RunData, candidate: RunData) -> dict[str, An
         "takeaways": collect_takeaways(baseline, candidate),
         "runs": [build_run_context(baseline), build_run_context(candidate)],
         "sections": build_sections(rows),
+        # WP4: is this pair comparable at all, separate from how the metrics
+        # in `sections` above happen to differ (report_compare's own
+        # tone-better/worse is about a *result*, never about whether the
+        # comparison itself is trustworthy).
+        "contract": build_comparison_contract(baseline, candidate),
     }
 
 

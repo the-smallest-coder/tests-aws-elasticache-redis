@@ -47,13 +47,34 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--node-type", default="", help="e.g. cache.t4g.micro")
     generate.add_argument("--node-count", default="", help="e.g. 1")
     generate.add_argument("--cluster-mode", default="false", help="true or false")
+    generate.add_argument(
+        "--output-dir",
+        default=None,
+        help="Write results_local.{html,json} here instead of run_dir. Default is run_dir "
+        "itself, for backward compatibility; pass this against a real results/<run-folder>/ "
+        "you want to keep read-only (D9) -- e.g. a copy made for verification, per PLAN_2.md, "
+        "already gets this for free since the copy isn't the tracked run.",
+    )
     inspect = subparsers.add_parser("inspect", help="Inspect local run readiness and legacy warnings.")
     inspect.add_argument("run_dir", help="Path to a run results directory to inspect.")
+    aggregate = subparsers.add_parser(
+        "aggregate",
+        help="Group repeated runs by control-variable fingerprint (WP4/WP6) and report "
+        "per-metric n/median/mean/CV%%/min/max plus cost per successful operation.",
+    )
+    aggregate.add_argument("run_dirs", nargs="+", help="Run result directories to group and aggregate.")
+    aggregate.add_argument(
+        "-o",
+        "--output-dir",
+        default=None,
+        help="Directory for aggregate output files. Defaults to results/aggregates/ "
+        "next to the first run_dir's results/ root (D9: never inside a run folder).",
+    )
     return parser
 
 
 def normalize_argv(argv: list[str]) -> list[str]:
-    if argv and argv[0] not in {"compare", "generate", "inspect"} and not argv[0].startswith("-"):
+    if argv and argv[0] not in {"compare", "generate", "inspect", "aggregate"} and not argv[0].startswith("-"):
         return ["compare", *argv]
     return argv
 
@@ -149,23 +170,50 @@ def _config_from_env() -> dict[str, str]:
         "node_hourly_usd_reason": os.environ.get("NODE_HOURLY_USD_REASON", ""),
         "node_count": os.environ.get("NODE_COUNT", ""),
         "cluster_mode": os.environ.get("CLUSTER_MODE", "false"),
+        # WP3 provenance. git_sha/engine_version_actual/loadgen_image are
+        # apply-time facts that normally arrive via cluster_details.json
+        # instead (env has no equivalent var for them); reporter_packages is
+        # the one env genuinely originates, since pip only runs at container
+        # startup, after cluster_details.json was already written.
+        "reporter_packages": os.environ.get("REPORTER_PACKAGES_JSON", ""),
     }
 
 
 def _config_from_cluster_details(cluster_details: dict) -> dict[str, str]:
     elasticache = cluster_details.get("elasticache", {}) if cluster_details else {}
-    return {
-        "engine_type": elasticache.get("engine", ""),
-        "engine_version": elasticache.get("engine_version_configured", ""),
-        "node_type": elasticache.get("node_type", ""),
-        "node_memory_bytes": elasticache.get("node_memory_bytes", ""),
-        "node_hourly_usd": elasticache.get("node_hourly_usd", ""),
-        "node_hourly_usd_source": elasticache.get("node_hourly_usd_source", ""),
-        "node_hourly_usd_reason": elasticache.get("node_hourly_usd_reason", ""),
-        "elasticache_availability_zone": elasticache.get("availability_zone", ""),
-        "node_count": elasticache.get("num_cache_nodes", ""),
-        "cluster_mode": elasticache.get("cluster_mode_enabled", ""),
+    run_info = cluster_details.get("run", {}) if cluster_details else {}
+    ecs_info = cluster_details.get("ecs", {}) if cluster_details else {}
+    memtier = cluster_details.get("memtier", {}) if cluster_details else {}
+    # Terraform's jsonencode emits explicit JSON null for fields that don't
+    # apply to this topology (e.g. num_cache_nodes under cluster mode), which
+    # json.loads turns into None. Normalize to "" so _merge_missing_config's
+    # "missing means falsy" check treats them the same as an absent field.
+    raw = {
+        "engine_type": elasticache.get("engine"),
+        "engine_version": elasticache.get("engine_version_configured"),
+        "node_type": elasticache.get("node_type"),
+        "node_memory_bytes": elasticache.get("node_memory_bytes"),
+        "node_hourly_usd": elasticache.get("node_hourly_usd"),
+        "node_hourly_usd_source": elasticache.get("node_hourly_usd_source"),
+        "node_hourly_usd_reason": elasticache.get("node_hourly_usd_reason"),
+        "elasticache_availability_zone": elasticache.get("availability_zone"),
+        "node_count": elasticache.get("num_cache_nodes"),
+        "cluster_mode": elasticache.get("cluster_mode_enabled"),
+        # WP3 provenance (D-none; PLAN_2.md WP3). engine_version_configured
+        # above stays what was *requested*; this is what actually came up.
+        "engine_version_actual": elasticache.get("engine_version_actual"),
+        "git_sha": run_info.get("git_sha"),
+        "loadgen_image": ecs_info.get("loadgen_image"),
+        # cluster_details.json never carries this -- it's apply-time, pip
+        # freeze is runtime-only -- kept here only so this function's shape
+        # matches _config_from_env's, and a value from either source merges
+        # the same way.
+        "reporter_packages": (cluster_details or {}).get("reporter", {}).get("packages"),
+        # WP5: the requested memtier task count, for build_loadgen_summary's
+        # requested-vs-observed check. "" in 81 of 82 pre-WP0 runs.
+        "task_count": memtier.get("task_count"),
     }
+    return {key: ("" if value is None else value) for key, value in raw.items()}
 
 
 def _merge_missing_config(config: dict | None, extra_config: dict | None) -> dict:
@@ -727,10 +775,12 @@ def create_report(
     return html_content, summary_json
 
 
-def run_generate_report(run_dir: str, config: dict) -> None:
+def run_generate_report(run_dir: str, config: dict, output_dir: str | None = None) -> None:
     import pandas as pd
 
     run_path = Path(run_dir)
+    out_dir = Path(output_dir) if output_dir else run_path
+    out_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir = run_path / "metrics"
     logs_dir = run_path / "logs"
 
@@ -811,17 +861,20 @@ def run_generate_report(run_dir: str, config: dict) -> None:
             print(f"Warning: failed to enrich summary with cluster_details.json: {exc}")
 
     # Local regeneration must never replace the canonical report downloaded
-    # from AWS for this immutable run.
-    out_path = run_path / "results_local.json"
+    # from AWS for this immutable run. Writes into run_path itself by
+    # default (backward compatible with existing callers and PLAN_2.md's own
+    # verification recipe, which runs this against a throwaway copy) -- D9
+    # read-only-run-dir only holds when the caller passes --output-dir.
+    out_path = out_dir / "results_local.json"
     out_path.write_text(summary_json, encoding="utf-8")
     print(f"Written: {out_path}")
 
-    html_path = run_path / "results_local.html"
+    html_path = out_dir / "results_local.html"
     html_path.write_text(html_content, encoding="utf-8")
     print(f"Written: {html_path}")
 
 
-def run_uploaded_report() -> None:
+def run_uploaded_report() -> dict:
     import boto3
     import pandas as pd
 
@@ -903,12 +956,22 @@ def run_uploaded_report() -> None:
     report_config = _config_from_env()
     try:
         cluster_details = json.loads(read_file_content(cluster_details_uri))
+        # cluster_details.json (Terraform, as-applied) is the base; env vars
+        # only fill fields it lacks. Both are normally sourced from the same
+        # terraform vars, but the artifact is authoritative on conflict.
         report_config = _merge_missing_config(
-            report_config,
             _config_from_cluster_details(cluster_details),
+            report_config,
         )
-    except Exception:
-        pass  # cluster_details.json is optional
+        cluster_details_status = {"present": True}
+    except Exception as exc:
+        # cluster_details.json is written once, at apply time, by
+        # node_details.tf (PLAN_2.md WP0). A live run always produces it, so
+        # its absence here means a failed upload or a broken apply, not an
+        # optional artifact. The gap must stay visible, not fall back to
+        # env-only config in silence.
+        cluster_details_status = {"present": False, "reason": str(exc)}
+        print(f"Warning: cluster_details.json unavailable at {cluster_details_uri}: {exc}")
 
     html_content, summary_json = create_report(
         metrics_df=metrics_df,
@@ -922,12 +985,21 @@ def run_uploaded_report() -> None:
         extra_stats=extra_stats,
     )
 
-    if cluster_details:
-        from report_common import enrich_summary_meta
-        summary_obj = json.loads(summary_json)
+    from report_common import enrich_summary_meta
+    summary_obj = json.loads(summary_json)
+    # Branch on the status flag, not cluster_details' own truthiness: a
+    # successfully-parsed-but-empty body ({}, null, []) is "present" (no
+    # exception was raised) yet falsy, which used to take this else branch
+    # and crash on cluster_details_status['reason'] -- a key that only
+    # exists on the failure path.
+    if cluster_details_status["present"]:
         enrich_summary_meta(summary_obj, cluster_details)
-        summary_json = json.dumps(summary_obj, indent=2, default=str)
         print(f"Summary enriched from {cluster_details_uri}")
+    else:
+        summary_obj.setdefault("meta", {}).setdefault("warnings", []).append(
+            f"cluster_details.json missing or unreadable: {cluster_details_status.get('reason', 'unknown')}"
+        )
+    summary_json = json.dumps(summary_obj, indent=2, default=str)
 
     output_key = f"{output_prefix}{timestamp}/results_{suffix}.html"
     output_json_key = re.sub(r"\.html$", ".json", output_key)
@@ -939,6 +1011,7 @@ def run_uploaded_report() -> None:
     s3.put_object(Bucket=output_bucket, Key=output_key, Body=html_content, ContentType="text/html")
     print(f"Uploading summary JSON to s3://{output_bucket}/{output_json_key}")
     s3.put_object(Bucket=output_bucket, Key=output_json_key, Body=summary_json, ContentType="application/json")
+    return cluster_details_status
 
 
 def main() -> None:
@@ -961,11 +1034,17 @@ def main() -> None:
             "node_count": args.node_count,
             "cluster_mode": args.cluster_mode,
         }
-        run_generate_report(args.run_dir, config)
+        run_generate_report(args.run_dir, config, output_dir=args.output_dir)
         return
 
     if args.command == "inspect":
         run_inspect_report(args.run_dir)
+        return
+
+    if args.command == "aggregate":
+        from aggregator import run_aggregate_report
+
+        run_aggregate_report(args.run_dirs, args.output_dir)
         return
 
     parser.print_help()

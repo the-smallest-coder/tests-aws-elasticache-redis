@@ -11,7 +11,14 @@ from typing import Any, Callable
 
 
 ECS_ENV_VARS = ("S3_BUCKET", "S3_PREFIX", "REPORT_TIMESTAMP", "CLUSTER_ID")
-GENERATOR_SCHEMA_VERSION = "2026-08-loadgen-quality-v2"
+# v4: the WP1 D1 legacy-field scaffolding (frozen duplicate keys,
+# meta.deprecated_fields, the legacy_path/legacy_unit fallback machinery) is
+# removed rather than sunset by D1a's original trigger (>=10 v3 runs or
+# 2027-01-01, neither met) -- a human call, not the schema drifting on its
+# own, but a real shape change either way. Bumped so comparison_contract's
+# existing schema_version_differs check (WP4) can flag a comparison spanning
+# this exact boundary, same as it would any other schema change.
+GENERATOR_SCHEMA_VERSION = "2026-09-metrics-contract-v4"
 Normalizer = Callable[[Any], float | None]
 
 
@@ -291,9 +298,26 @@ def enrich_summary_meta(summary: dict[str, Any], cluster_details: dict[str, Any]
     meta["node_count"] = meta.get("node_count") or elasticache.get("num_cache_nodes") or ""
     if not meta.get("cluster_mode"):
         meta["cluster_mode"] = elasticache.get("cluster_mode_enabled")
+
+    # WP3 provenance. engine_version is the *configured* version (set above)
+    # and is never overwritten here -- engine_version_actual is a separate
+    # field because the two can legitimately differ ("7.1" vs "7.1.0").
+    meta["engine_version_actual"] = meta.get("engine_version_actual") or elasticache.get("engine_version_actual") or ""
+    meta["git_sha"] = meta.get("git_sha") or run_info.get("git_sha") or ""
+    meta["loadgen_image"] = meta.get("loadgen_image") or cluster_details.get("ecs", {}).get("loadgen_image") or ""
+    if not meta.get("reporter_packages"):
+        reporter_packages = cluster_details.get("reporter", {}).get("packages")
+        if reporter_packages:
+            meta["reporter_packages"] = reporter_packages
+
+    # WP5: the requested count now has its own field instead of silently
+    # taking ecs.task_count's place when the observed count is missing --
+    # that used to be harmless only because cluster_details.json was thin
+    # (memtier.task_count always "") in 81 of 82 pre-WP0 runs; after WP0 it
+    # would read as a real observation that never happened.
     memtier_task_count = memtier.get("task_count")
-    if not ecs.get("task_count") and memtier_task_count:
-        ecs["task_count"] = memtier_task_count
+    if memtier_task_count and not ecs.get("requested_task_count"):
+        ecs["requested_task_count"] = memtier_task_count
 
 
 def load_run(role: str, raw_path: str) -> RunData:

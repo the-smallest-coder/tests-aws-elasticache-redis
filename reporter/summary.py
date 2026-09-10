@@ -1,15 +1,80 @@
 """Build a structured summary dict suitable for JSON serialisation and comparison reports."""
 
+import json
+
 from helpers import (
     metric_filter,
     cache_hit_rate_df,
     client_latency_series,
     select_mem_dims,
+    select_node_dimension_rows,
     cloudwatch_eviction_series,
     first_positive_timestamp,
 )
 from report_common import GENERATOR_SCHEMA_VERSION
 from loadgen_analysis import build_loadgen_summary
+
+
+def _reporter_packages_dict(value):
+    """config['reporter_packages'] arrives as a JSON string (env var
+    transit, WP3) or occasionally already a dict; normalize to a dict so a
+    malformed/absent value can't raise while building the summary."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _dedup_metric_rows(df, metric_name, cluster_id, stat='Sum'):
+    """Rows for one metric/stat, deduplicated across the CacheClusterId /
+    CacheNodeId dimension axis (D6). Every field below that sums or counts
+    metrics_df rows goes through this, not a raw metric_filter() call."""
+    sub = metric_filter(df, metric_name, stat, 'CacheClusterId')
+    return select_node_dimension_rows(sub, cluster_id)
+
+
+def _metric_sum(df, metric_name, cluster_id, stat='Sum'):
+    """Total of one metric across its whole window, deduplicated (D6)."""
+    selected = _dedup_metric_rows(df, metric_name, cluster_id, stat)
+    return float(selected['Value'].sum()) if not selected.empty else None
+
+
+def _network_kib_per_sec(df, metric_name, cluster_id):
+    """Mean KiB/s across the run: dedup, sum per minute bucket, /60/1024, then mean.
+
+    NetworkBytesOut/In are a Sum at Period=60 -- bytes accumulated *within*
+    that 60s bucket, not a byte count that only needs a KiB conversion. The
+    previous code divided by 1024 alone (KiB, correctly named) but not by 60,
+    so every value was 60x too high; it also summed cluster- and node-level
+    duplicate rows first, doubling that again. See PLAN_2.md WP1 step 2.
+    """
+    selected = _dedup_metric_rows(df, metric_name, cluster_id)
+    if selected.empty:
+        return None
+    per_minute = selected.groupby('Timestamp')['Value'].sum() / 60.0 / 1024.0
+    return _safe(float(per_minute.mean()), 2)
+
+
+def _dedup_metric_stat(df, metric_name, cluster_id, stat, agg='mean'):
+    """Deduplicated mean or max of one metric/stat across the whole window (D6, WP2).
+
+    Covers CloudWatch's ordinary Statistics (Average, Maximum, ...) and its
+    ExtendedStatistics percentile rows alike (WP2 requests p99 for every
+    discovered metric) -- both duplicate across the CacheClusterId /
+    CacheNodeId axis the same way, so both need the same dedup.
+    """
+    if agg not in ('mean', 'max'):
+        raise ValueError(f"_dedup_metric_stat: unsupported agg {agg!r}, expected 'mean' or 'max'")
+    selected = _dedup_metric_rows(df, metric_name, cluster_id, stat)
+    if selected.empty:
+        return None
+    values = selected['Value']
+    return float(values.mean()) if agg == 'mean' else float(values.max())
 
 
 def _safe(val, decimals=None):
@@ -55,18 +120,27 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
     {
       "meta": { cluster_id, time_range, engine_type, engine_version, node_type, node_count, cluster_mode },
       "benchmark": { avg_ops, peak_ops, cv_pct, avg_latency_ms, max_latency_ms,
-                     avg_bandwidth_kbs },
+                     total_bandwidth_kbs },
       "cache_efficiency": { avg_hit_rate_pct, total_evictions, min_freeable_memory_mb, peak_key_count,
-                            first_eviction_ts },
+                            first_eviction_ts, total_ops, total_writes },
       "oom": { rejection_count, first_rejection_ts },
       "engine_cpu": { avg_pct, max_pct, credit_balance_avg, credit_usage_avg },
       "memory": { avg_usage_pct, max_usage_pct, headroom_pct, fragmentation_avg },
       "network": {
-          "cache": { avg_out_kbs, avg_in_kbs },
-          "throttling": { bw_in_exceeded_total, bw_out_exceeded_total, pps_exceeded_total }
+          "cache": { out_kib_per_sec, in_kib_per_sec },
+          "throttling": { bw_in_exceeded_count, bw_out_exceeded_count, pps_exceeded_count }
       },
-      "latency_server_us": { get_avg, set_avg, string_avg },
-      "client_latency": { p50_ms, p99_ms, p999_ms, worst_stream_p99_ms, worst_stream_p999_ms },
+      "latency_server_us": { get_avg, set_avg, string_avg, percentile_basis },
+      "client_latency": {
+          # ElastiCache/LoadGenerator EMF, minute-granularity, averaged across
+          # tasks then across minutes -- an average of percentiles, not one:
+          p50_ms, p99_ms, p999_ms, worst_p99_ms, worst_p999_ms, percentile_basis,
+          # memtier's own per-task Totals histogram, one aggregation
+          # (median/max) across tasks -- independent source and method, not
+          # a replacement for the EMF numbers above:
+          task_median_p50_ms, task_median_p99_ms, task_median_p999_ms,
+          worst_task_p99_ms, worst_task_p999_ms, task_percentile_basis,
+      },
       "connections": { avg, max },
       "ecs": { service_cpu_time_avg_pct, service_cpu_time_peak_pct, peak_mem_mb, task_count },
       "loadgen": { per-task CPU p95, per-task throughput medians, per-AZ skew, validity }
@@ -94,6 +168,12 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         'source_mode': extra_stats.get('source_mode', ''),
         'memtier_window_source': extra_stats.get('memtier_window_source', 'memtier_log_messages'),
         'artifact_source': extra_stats.get('artifact_source', ''),
+        # WP3 provenance. engine_version above stays the *configured* value;
+        # engine_version_actual is what the cluster actually came up as.
+        'engine_version_actual': config.get('engine_version_actual', ''),
+        'git_sha': config.get('git_sha', ''),
+        'loadgen_image': config.get('loadgen_image', ''),
+        'reporter_packages': _reporter_packages_dict(config.get('reporter_packages')),
     }
     first_message_ts = extra_stats.get('first_message_ts')
     last_message_ts = extra_stats.get('last_message_ts')
@@ -123,7 +203,6 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
 
         total_bandwidth = float(memtier_totals_df['total_bandwidth_kbs'].sum())
         benchmark['total_bandwidth_kbs'] = _safe(total_bandwidth, 2)
-        benchmark['avg_bandwidth_kbs'] = _safe(total_bandwidth, 2)
 
     # ------------------------------------------------------------------ #
     #  cache_efficiency                                                    #
@@ -151,6 +230,19 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         items_df = metric_filter(metrics_df, 'CurrItems', 'Maximum', 'CacheClusterId')
         if not items_df.empty:
             cache_efficiency['peak_key_count'] = int(items_df['Value'].max())
+
+        # WP6 step 1: server-side command count, not memtier's own avg_ops --
+        # numerator and denominator for cost-per-op (WP6 step 4) must come
+        # from one source and one window. None when the total is 0, not 0
+        # itself (a real 0-command run and "couldn't measure" must not look
+        # the same to a caller dividing by this).
+        get_total = _metric_sum(metrics_df, 'GetTypeCmds', cluster_id)
+        set_total = _metric_sum(metrics_df, 'SetTypeCmds', cluster_id)
+        if get_total is not None and set_total is not None:
+            total_ops = get_total + set_total
+            cache_efficiency['total_ops'] = int(total_ops) if total_ops > 0 else None
+        if set_total is not None:
+            cache_efficiency['total_writes'] = int(set_total) if set_total > 0 else None
 
     ev_df = cloudwatch_eviction_series(metrics_df, cluster_id)
     cache_efficiency['first_eviction_ts'] = _safe(first_positive_timestamp(ev_df))
@@ -207,29 +299,58 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         if not swap.empty:
             memory['swap_max_bytes'] = _safe(float(swap['Value'].max()), 0)
 
+        # WP2: BytesUsedForCache, newly discovered rather than curated.
+        bytes_avg = _dedup_metric_stat(metrics_df, 'BytesUsedForCache', cluster_id, 'Average', 'mean')
+        if bytes_avg is not None:
+            memory['bytes_used_avg_mb'] = _safe(bytes_avg / (1024 * 1024), 1)
+        bytes_max = _dedup_metric_stat(metrics_df, 'BytesUsedForCache', cluster_id, 'Maximum', 'max')
+        if bytes_max is not None:
+            memory['bytes_used_max_mb'] = _safe(bytes_max / (1024 * 1024), 1)
+
     # ------------------------------------------------------------------ #
     #  network                                                             #
     # ------------------------------------------------------------------ #
     network = {'cache': {}, 'throttling': {}}
     if not metrics_df.empty:
-        out_df = metric_filter(metrics_df, 'NetworkBytesOut', 'Sum', 'CacheClusterId')
-        if not out_df.empty:
-            # sum per minute bucket → mean KB/min
-            agg = out_df.groupby('Timestamp')['Value'].sum() / 1024.0
-            network['cache']['avg_out_kbs'] = _safe(float(agg.mean()), 2)
-
-        in_df = metric_filter(metrics_df, 'NetworkBytesIn', 'Sum', 'CacheClusterId')
-        if not in_df.empty:
-            agg = in_df.groupby('Timestamp')['Value'].sum() / 1024.0
-            network['cache']['avg_in_kbs'] = _safe(float(agg.mean()), 2)
+        # Deduplicated and correctly scaled (WP1 step 2). NetworkBytesOut/In
+        # are a Sum at Period=60 (bytes accumulated within that 60s bucket),
+        # summed here per minute across dedup'd rows, then /60/1024 for
+        # KiB/s -- see _network_kib_per_sec's own docstring for why an
+        # earlier version of this was 120x too high.
+        out_kib = _network_kib_per_sec(metrics_df, 'NetworkBytesOut', cluster_id)
+        if out_kib is not None:
+            network['cache']['out_kib_per_sec'] = out_kib
+        in_kib = _network_kib_per_sec(metrics_df, 'NetworkBytesIn', cluster_id)
+        if in_kib is not None:
+            network['cache']['in_kib_per_sec'] = in_kib
 
         for key, mname in [
-            ('bw_in_exceeded_total',  'NetworkBandwidthInAllowanceExceeded'),
-            ('bw_out_exceeded_total', 'NetworkBandwidthOutAllowanceExceeded'),
-            ('pps_exceeded_total',    'NetworkPacketsPerSecondAllowanceExceeded'),
+            ('bw_in_exceeded_count',  'NetworkBandwidthInAllowanceExceeded'),
+            ('bw_out_exceeded_count', 'NetworkBandwidthOutAllowanceExceeded'),
+            ('pps_exceeded_count',    'NetworkPacketsPerSecondAllowanceExceeded'),
         ]:
-            t_df = metric_filter(metrics_df, mname, 'Sum', 'CacheClusterId')
-            network['throttling'][key] = int(t_df['Value'].sum()) if not t_df.empty else 0
+            total = _metric_sum(metrics_df, mname, cluster_id)
+            network['throttling'][key] = int(total) if total is not None else 0
+
+        # WP2: how close to the instance's network ceiling the run got --
+        # the throttle counters above are all-zero whenever the node never
+        # actually hit the cap, which tells nothing about headroom.
+        for direction, mname in (('out', 'NetworkBaselineUsageOutPercentage'), ('in', 'NetworkBaselineUsageInPercentage')):
+            avg_v = _dedup_metric_stat(metrics_df, mname, cluster_id, 'Average', 'mean')
+            if avg_v is not None:
+                network['cache'][f'baseline_usage_{direction}_avg_pct'] = _safe(avg_v, 2)
+            max_v = _dedup_metric_stat(metrics_df, mname, cluster_id, 'Maximum', 'max')
+            if max_v is not None:
+                network['cache'][f'baseline_usage_{direction}_max_pct'] = _safe(max_v, 2)
+
+        # NetworkMaxBytes{Out,In} are already a bytes/sec rate (not a
+        # per-period Sum), so this is only a unit conversion, same scale as
+        # out_kib_per_sec/in_kib_per_sec above -- named accordingly, not
+        # "_bytes", to avoid reintroducing the WP1 network naming bug.
+        for direction, mname in (('out', 'NetworkMaxBytesOut'), ('in', 'NetworkMaxBytesIn')):
+            peak = _dedup_metric_stat(metrics_df, mname, cluster_id, 'Maximum', 'max')
+            if peak is not None:
+                network['cache'][f'max_{direction}_kib_per_sec'] = _safe(peak / 1024.0, 2)
 
     # ------------------------------------------------------------------ #
     #  latency_server_us (command-level, server-side)                     #
@@ -244,21 +365,86 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
             agg = _metric_agg(metrics_df, mname, 'Average', 'CacheClusterId')
             if agg:
                 latency_server_us[key] = agg['avg']
+        if latency_server_us:
+            # D5: values are already a correct mean of the per-minute
+            # CloudWatch Average; this just states the basis explicitly.
+            latency_server_us['percentile_basis'] = 'minute_average'
 
     # ------------------------------------------------------------------ #
-    #  client_latency (ECS load-generator EMF percentiles)                #
+    #  server_request_latency_us (WP2 -- SuccessfulRead/WriteRequestLatency,   #
+    #  newly discovered; distinct from latency_server_us above, which is       #
+    #  per-command-type minute-average latency, not a percentile)              #
+    # ------------------------------------------------------------------ #
+    server_request_latency_us = {}
+    if not metrics_df.empty:
+        for key, mname, stat, agg in (
+            ('read_avg', 'SuccessfulReadRequestLatency', 'Average', 'mean'),
+            ('read_p99', 'SuccessfulReadRequestLatency', 'p99', 'mean'),
+            ('write_avg', 'SuccessfulWriteRequestLatency', 'Average', 'mean'),
+            ('write_p99', 'SuccessfulWriteRequestLatency', 'p99', 'mean'),
+        ):
+            value = _dedup_metric_stat(metrics_df, mname, cluster_id, stat, agg)
+            if value is not None:
+                server_request_latency_us[key] = _safe(value, 3)
+        if server_request_latency_us:
+            server_request_latency_us['percentile_basis'] = 'cloudwatch_extended_statistic'
+
+    # ------------------------------------------------------------------ #
+    #  errors (WP2 -- ErrorCount, newly discovered)                       #
+    # ------------------------------------------------------------------ #
+    errors = {}
+    if not metrics_df.empty:
+        error_total = _metric_sum(metrics_df, 'ErrorCount', cluster_id)
+        if error_total is not None:
+            errors['error_count_total'] = int(error_total)
+
+    # ------------------------------------------------------------------ #
+    #  client_latency: two independent measurements, not a fallback pair. #
+    #  EMF (this block) comes from CloudWatch Logs ingestion of per-minute #
+    #  per-task percentiles; task_median_*/worst_task_* (below) comes from #
+    #  parsing each task's own final log line. Different collection paths, #
+    #  different failure modes -- one being unavailable says nothing about #
+    #  the other, and they answer different questions (see each block's    #
+    #  own percentile_basis).                                              #
     # ------------------------------------------------------------------ #
     client_latency = {}
     latency_df = client_latency_series(ecs_df)
     if not latency_df.empty:
+        # Mean of per-minute EMF percentiles across tasks -- an average of
+        # percentiles, which is not itself a percentile; percentile_basis
+        # says so explicitly rather than let the field name imply otherwise.
         for key in ('p50_ms', 'p99_ms', 'p999_ms'):
             vals = latency_df[key].dropna()
             if not vals.empty:
                 client_latency[key] = _safe(float(vals.mean()), 3)
-        for key in ('worst_stream_p99_ms', 'worst_stream_p999_ms'):
+        for key in ('worst_p99_ms', 'worst_p999_ms'):
             vals = latency_df[key].dropna()
             if not vals.empty:
                 client_latency[key] = _safe(float(vals.max()), 3)
+        client_latency['percentile_basis'] = 'minute_mean_of_task_percentiles'
+
+    # One aggregation (median/max across tasks) of the already-final per-task
+    # memtier Totals, instead of two (mean-of-minutes then mean/max-across-
+    # tasks). Still not a true run-wide percentile -- memtier reports no such
+    # thing without an HDR histogram merge (out of scope, see PLAN_2.md
+    # "Извън обхвата") -- hence "task_median", not "run_p*".
+    if memtier_totals_df is not None and not memtier_totals_df.empty:
+        for new_key, column, agg in (
+            ('task_median_p50_ms', 'p50_latency_ms', 'median'),
+            ('task_median_p99_ms', 'p99_latency_ms', 'median'),
+            ('task_median_p999_ms', 'p999_latency_ms', 'median'),
+            ('worst_task_p99_ms', 'p99_latency_ms', 'max'),
+            ('worst_task_p999_ms', 'p999_latency_ms', 'max'),
+        ):
+            if column not in memtier_totals_df.columns:
+                continue
+            vals = memtier_totals_df[column].dropna()
+            if vals.empty:
+                continue
+            value = vals.median() if agg == 'median' else vals.max()
+            client_latency[new_key] = _safe(float(value), 3)
+        if any(key.startswith('task_median_') or key.startswith('worst_task_') for key in client_latency):
+            client_latency['task_percentile_basis'] = 'memtier_task_totals'
 
     # ------------------------------------------------------------------ #
     #  connections                                                         #
@@ -295,6 +481,7 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         last_message_ts,
         measured_elasticache_az=config.get('elasticache_availability_zone'),
         memtier_totals_df=memtier_totals_df,
+        requested_task_count=config.get('task_count'),
     ) if first_message_ts is not None and last_message_ts is not None else {}
     if loadgen.get('expected_task_count') is not None:
         ecs['task_count'] = loadgen['expected_task_count']
@@ -308,8 +495,10 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         'memory':             memory,
         'network':            network,
         'latency_server_us':  latency_server_us,
+        'server_request_latency_us': server_request_latency_us,
         'client_latency':     client_latency,
         'connections':        connections,
         'ecs':                ecs,
+        'errors':             errors,
         'loadgen':            loadgen,
     }

@@ -85,6 +85,99 @@ class LoadgenQualityTests(unittest.TestCase):
 
         self.assertNotIn("task_count", summary["ecs"])
 
+    def test_requested_task_count_no_longer_backfills_observed_ecs_task_count(self):
+        """WP5: a requested count with no observation must land in its own
+        ecs.requested_task_count field, never silently stand in for
+        ecs.task_count (which means "observed") -- that used to be harmless
+        only because cluster_details.json was thin pre-WP0.
+        """
+        from report_common import enrich_summary_meta
+
+        summary = {"ecs": {}, "loadgen": {}}
+        cluster_details = {"memtier": {"task_count": 6}}
+
+        enrich_summary_meta(summary, cluster_details)
+
+        self.assertNotIn("task_count", summary["ecs"])
+        self.assertEqual(summary["ecs"]["requested_task_count"], 6)
+
+    def _loadgen_fixture(self, requested_task_count=None):
+        import pandas as pd
+        from loadgen_analysis import build_loadgen_summary
+
+        samples = pd.DataFrame([
+            {"Timestamp": "2026-08-01T00:01:10Z", "Stream": "a", "Ops/sec": 100},
+        ])
+        minutes = pd.DataFrame([
+            {"Timestamp": "2026-08-01T00:01:00Z", "task_count_present": 1},
+        ])
+        ci_service = pd.DataFrame([
+            {"Timestamp": "2026-08-01T00:01:00Z", "RunningTaskCount": 6},
+        ])
+        return build_loadgen_summary(
+            samples, minutes, pd.DataFrame(), pd.DataFrame(), ci_service,
+            pd.Timestamp("2026-08-01T00:01:00"), pd.Timestamp("2026-08-01T00:02:00"),
+            requested_task_count=requested_task_count,
+        )
+
+    def test_observed_matches_requested_task_count_does_not_worsen_status(self):
+        try:
+            result = self._loadgen_fixture(requested_task_count=6)
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        self.assertEqual(result["observed_task_count"], 6)
+        self.assertEqual(result["requested_task_count"], 6)
+        self.assertTrue(result["task_count_matches_request"])
+        self.assertNotIn("task_count_mismatch_with_request", result["warning_reasons"])
+
+    def test_observed_task_count_mismatch_is_flagged_as_warning_not_invalid(self):
+        try:
+            result = self._loadgen_fixture(requested_task_count=5)
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        self.assertEqual(result["observed_task_count"], 6)
+        self.assertEqual(result["requested_task_count"], 5)
+        self.assertFalse(result["task_count_matches_request"])
+        self.assertIn("task_count_mismatch_with_request", result["warning_reasons"])
+        # Soft gate (WP5 step 0): no dry-run evidence yet that this is rare
+        # enough to invalidate a run over -- "warning", never "invalid".
+        self.assertEqual(result["diagnostic_status"], "warning")
+
+    def test_empty_string_requested_task_count_is_treated_as_missing_not_zero(self):
+        try:
+            result = self._loadgen_fixture(requested_task_count="")
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        self.assertIsNone(result["requested_task_count"])
+        self.assertIsNone(result["task_count_matches_request"])
+        self.assertNotIn("task_count_mismatch_with_request", result["warning_reasons"])
+
+    def test_missing_cluster_details_leaves_request_fields_none_without_worsening_status(self):
+        """Missing cluster_details.json means the requested count is
+        genuinely unknown -- None, not 0 -- and that ignorance must not read
+        as a mismatch (task_count_matches_request stays None, no warning
+        reason added just because the request itself is unknown).
+        """
+        try:
+            result = self._loadgen_fixture(requested_task_count=None)
+        except ModuleNotFoundError as exc:
+            if exc.name == "pandas":
+                self.skipTest("pandas is not installed in this environment")
+            raise
+
+        self.assertIsNone(result["requested_task_count"])
+        self.assertIsNone(result["task_count_matches_request"])
+        self.assertNotIn("task_count_mismatch_with_request", result["warning_reasons"])
+
     def test_per_task_cpu_and_within_az_skew_ignore_incomplete_and_zero_minutes(self):
         try:
             import pandas as pd

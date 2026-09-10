@@ -1,5 +1,15 @@
 resource "time_static" "run_id" {}
 
+# Provenance of the git commit this `terraform apply` actually ran from.
+# Modeled on data.external.node_price in ecs.tf: the script always exits 0
+# ({"sha":"unknown","dirty":"unknown"} on any failure), so a missing git or
+# a non-repo checkout never blocks apply or destroy. See scripts/git_sha.sh.
+data "external" "git_sha" {
+  program = ["bash", "${path.module}/scripts/git_sha.sh"]
+
+  query = {}
+}
+
 locals {
   # Auto-determine parameter group family if not specified
   parameter_group_family = var.parameter_group_family != "" ? var.parameter_group_family : (

@@ -14,6 +14,7 @@ locals {
     "exporter.py",
     "memtier_etl.py",
     "formatting.py",
+    "comparison_contract.py",
   ])
   reporter_scripts_prefix = "scripts/${local.cluster_id}/"
 }
@@ -92,24 +93,34 @@ resource "aws_ecs_task_definition" "reporter" {
   container_definitions = jsonencode([
     {
       name      = "reporter"
-      image     = "python:3.11-slim"
+      image     = var.reporter_image
       essential = true
 
-      # NOTE: This approach installs dependencies at runtime with minimum versions.
-      # For production use, consider building a custom Docker image with pre-installed
-      # dependencies (see reporter/Dockerfile and reporter/requirements.txt) and pushing
-      # it to ECR. This eliminates supply chain risks and reduces task startup time.
+      # NOTE: This approach installs dependencies at runtime instead of a
+      # pre-built image. For production use, consider building a custom
+      # Docker image with pre-installed dependencies (see reporter/Dockerfile
+      # and reporter/requirements.txt) and pushing it to ECR. This eliminates
+      # supply chain risk from a compromised PyPI release between runs and
+      # reduces task startup time. WP3 (PLAN_2.md) narrows that risk with
+      # exact pins + a pip freeze record below; it doesn't close it.
       command = ["sh", "-c",
         <<-EOT
           set -e
 
-          # boto3/pandas: minimum versions, latest compatible release is used.
-          # plotly: exact pin -- charts.py reads its private subplot
-          # internals (fig._grid_ref, trace_kwargs, layout_keys), which can
-          # change shape on any release with no warning. Keep this in sync
-          # with reporter/requirements.txt; bump deliberately and re-verify
-          # build_infra_panels, not via a floating >= constraint.
-          pip install --no-cache-dir "boto3>=1.35.81" "pandas>=2.2.3" "plotly==6.9.0"
+          # All three exact pins, kept in sync with reporter/requirements.txt
+          # (tests/test_reporter_dependency_pins.py checks it). plotly
+          # specifically also needs re-verification on bump, not just a
+          # synced pin: charts.py reads its private subplot internals
+          # (fig._grid_ref, trace_kwargs, layout_keys), which can change
+          # shape on any release with no warning.
+          pip install --no-cache-dir "boto3==1.35.81" "pandas==2.2.3" "plotly==6.9.0"
+
+          # Provenance of the software that actually ran, not just what was
+          # requested: an exact pin still leaves the platform-specific wheel
+          # PyPI happened to resolve. Passed to exporter.py as an env var
+          # (base64 to survive shell->env transit unmangled) rather than a
+          # file, since nothing after this point shares a filesystem with it.
+          export PIP_FREEZE_B64="$(pip freeze | base64 -w0)"
 
           # Download all reporter modules from S3
           python - << 'PY'
@@ -132,6 +143,7 @@ modules = [
     "exporter.py",
     "memtier_etl.py",
     "formatting.py",
+    "comparison_contract.py",
 ]
 
 s3 = boto3.client("s3")

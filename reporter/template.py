@@ -352,11 +352,61 @@ def _render_sections(sections: list[dict[str, object]]) -> str:
     return "".join(parts)
 
 
+_CONTRACT_REASON_LABELS = {
+    "diagnostic_status_invalid": "loadgen diagnostic status is invalid",
+    "task_count_mismatch": "observed task count does not match the request",
+    "memtier_window_missing": "memtier report window is missing",
+    "truncated_run": "observed window is far shorter than the configured duration",
+    "multiple_intended_dimensions_differ": "more than one intended dimension differs",
+    "engine_version_actual_differs": "actual engine version differs",
+    "control_variables_unknown": "control variables are unknown (thin cluster_details.json)",
+    "control_variable_differs": "a control variable differs",
+    "loadgen_unknown": "loadgen validity is unknown",
+    "diagnostic_warning": "loadgen diagnostic status is a warning",
+    "schema_version_differs": "generator schema version differs",
+}
+
+
+def _contract_reason_text(reason: dict[str, object]) -> str:
+    label = _CONTRACT_REASON_LABELS.get(str(reason.get("code")), str(reason.get("code", "unknown")))
+    extras = []
+    if reason.get("role"):
+        extras.append(str(reason["role"]))
+    if reason.get("field"):
+        extras.append(str(reason["field"]))
+    if reason.get("fields"):
+        extras.append(", ".join(str(field) for field in reason["fields"]))
+    if reason.get("baseline") is not None and reason.get("candidate") is not None:
+        extras.append(f"{reason['baseline']} vs {reason['candidate']}")
+    return f"{label} ({'; '.join(extras)})" if extras else label
+
+
+def _render_contract(contract: dict[str, object] | None) -> str:
+    if not contract:
+        return ""
+    verdict = str(contract.get("verdict", "unknown"))
+    reasons = contract.get("reasons") or []
+    reasons_html = "".join(f"<li>{escape(_contract_reason_text(reason))}</li>" for reason in reasons)
+    reasons_block = (
+        f"<details class=\"contract-reasons\"><summary>{len(reasons)} reason(s)</summary>"
+        f"<ul>{reasons_html}</ul></details>"
+        if reasons else ""
+    )
+    return f"""
+    <section class="contract contract-{escape(verdict)}">
+      <span class="contract-badge">{escape(verdict.upper())}</span>
+      <span class="contract-label">Comparability contract</span>
+      {reasons_block}
+    </section>
+    """
+
+
 def render_report(payload: dict[str, object]) -> str:
     context_html = "".join(_render_run_context(run) for run in payload["runs"])
     takeaways_html = _render_takeaways(payload["takeaways"])
     topline_html = _render_topline_cards(payload["topline_cards"])
     sections_html = _render_sections(payload["sections"])
+    contract_html = _render_contract(payload.get("contract"))
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -462,6 +512,47 @@ def render_report(payload: dict[str, object]) -> str:
     .card.tone-better::before {{ background: var(--good); }}
     .card.tone-worse::before {{ background: var(--bad); }}
     .card.tone-warning::before {{ background: var(--warn); }}
+    .contract {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      padding: 10px 16px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      margin-bottom: 16px;
+    }}
+    .contract-badge {{
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      color: #fff;
+    }}
+    /* Deliberately its own class, not tone-better/warning/worse (WP4): those
+       mean "a better/worse result", and a green contract badge would read
+       as "better run" rather than "this comparison is trustworthy". */
+    .contract-comparable .contract-badge {{ background: var(--good); }}
+    .contract-conditional .contract-badge {{ background: var(--warn); }}
+    .contract-invalid .contract-badge {{ background: var(--bad); }}
+    .contract-label {{
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .contract-reasons summary {{
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--muted);
+    }}
+    .contract-reasons ul {{
+      margin: 6px 0 0;
+      padding-left: 18px;
+      font-size: 12px;
+      color: var(--ink);
+    }}
     .card-label {{
       color: var(--muted);
       font-size: 11px;
@@ -681,6 +772,7 @@ def render_report(payload: dict[str, object]) -> str:
   </header>
 
   <main class="page">
+    {contract_html}
     {topline_html}
     {takeaways_html}
 
@@ -690,6 +782,124 @@ def render_report(payload: dict[str, object]) -> str:
 
     {sections_html}
   </main>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
+# Aggregate report renderer (WP6): n repeated runs -> per-metric
+# n/median/mean/CV%/min/max plus cost-per-successful-operation.
+# ---------------------------------------------------------------------------
+
+_AGGREGATE_CSS = """\
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+       background: #eef3f8; color: #17212b; }
+.page { max-width: 1100px; margin: 0 auto; padding: 28px 20px 40px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.sub { color: #5f6b76; font-size: 13px; margin-bottom: 20px; }
+.panel { background: #fff; border: 1px solid #d9e1ea; border-radius: 10px;
+         padding: 18px 20px; margin-bottom: 18px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid #eef1f4; }
+th:first-child, td:first-child { text-align: left; }
+.n-a { color: #5f6b76; }
+.runs-list { font-size: 12px; color: #5f6b76; word-break: break-all; }
+"""
+
+
+def _render_aggregate_metric_rows(rows: list[dict[str, object]]) -> str:
+    parts = []
+    for row in rows:
+        cv = row["cv_pct"]
+        cv_text = f"{cv:.1f}%" if cv is not None else "n/a"
+        unit = f" {row['unit']}" if row.get("unit") else ""
+        parts.append(f"""
+        <tr>
+          <td>{escape(str(row['label']))}</td>
+          <td>{row['n']}</td>
+          <td>{row['median']:.3f}{escape(unit)}</td>
+          <td>{row['mean']:.3f}{escape(unit)}</td>
+          <td>{cv_text}</td>
+          <td>{row['min']:.3f}{escape(unit)}</td>
+          <td>{row['max']:.3f}{escape(unit)}</td>
+        </tr>
+        """)
+    return "".join(parts)
+
+
+def _render_cost_rows(per_run: list[dict[str, object]]) -> str:
+    parts = []
+    for row in per_run:
+        if row["value"] is None:
+            value_html = f"<span class=\"n-a\">n/a ({escape(str(row['reason']))})</span>"
+        else:
+            value_html = f"${row['value']:.6f}"
+            if row.get("errors_unknown"):
+                value_html += " <span class=\"n-a\">(errors_unknown)</span>"
+        parts.append(f"""
+        <tr>
+          <td>{escape(str(row['folder']))}</td>
+          <td>{value_html}</td>
+        </tr>
+        """)
+    return "".join(parts)
+
+
+def render_aggregate_report(payload: dict[str, object]) -> str:
+    metrics_html = _render_aggregate_metric_rows(payload.get("metrics") or [])
+    cost = payload.get("cost_per_successful_operation") or {}
+    cost_rows_html = _render_cost_rows(cost.get("per_run") or [])
+    cost_stats = cost.get("stats")
+    cost_stats_html = ""
+    if cost_stats:
+        cv = cost_stats["cv_pct"]
+        cv_text = f"{cv:.1f}%" if cv is not None else "n/a"
+        cost_stats_html = f"""
+        <p>n={cost_stats['n']} &middot; median ${cost_stats['median']:.6f}
+           &middot; mean ${cost_stats['mean']:.6f} &middot; CV {cv_text}
+           &middot; min ${cost_stats['min']:.6f} &middot; max ${cost_stats['max']:.6f}</p>
+        """
+
+    runs_html = ", ".join(escape(str(folder)) for folder in payload.get("runs") or [])
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{escape(str(payload.get('label', 'Aggregate')))}</title>
+  <style>{_AGGREGATE_CSS}</style>
+</head>
+<body>
+  <div class="page">
+    <h1>Aggregate: {escape(str(payload.get('label', '')))}</h1>
+    <div class="sub">n={payload.get('n')} runs, fingerprint {escape(str(payload.get('fingerprint_id', '')))}</div>
+
+    <section class="panel">
+      <div class="runs-list">{runs_html}</div>
+    </section>
+
+    <section class="panel">
+      <h2>Metrics</h2>
+      <table>
+        <thead>
+          <tr><th>Metric</th><th>n</th><th>Median</th><th>Mean</th><th>CV%</th><th>Min</th><th>Max</th></tr>
+        </thead>
+        <tbody>{metrics_html}</tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Cost per successful operation</h2>
+      <p class="sub">ElastiCache node hourly rate only (D11) -- never Fargate, network, or CloudWatch cost.</p>
+      {cost_stats_html}
+      <table>
+        <thead><tr><th>Run</th><th>USD / successful op</th></tr></thead>
+        <tbody>{cost_rows_html}</tbody>
+      </table>
+    </section>
+  </div>
 </body>
 </html>
 """

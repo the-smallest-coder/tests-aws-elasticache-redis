@@ -23,12 +23,23 @@ resource "aws_s3_object" "cluster_details" {
       cluster_id           = local.cluster_id
       aws_region           = var.aws_region
       run_id_discriminator = var.run_id_discriminator
+      # WP3 provenance (PLAN_2.md). git_sha.sh always exits 0; "unknown"
+      # means it couldn't determine one, not that provenance is unavailable
+      # by design -- see the exit-condition table (git_sha == "unknown" at
+      # apply from a git repo is a regression, not an expected state).
+      git_sha             = data.external.git_sha.result.sha
+      git_dirty           = data.external.git_sha.result.dirty
+      terraform_workspace = terraform.workspace
     }
 
     # ----- ElastiCache configuration (as applied) -----
     elasticache = {
-      engine                     = var.engine_type
-      engine_version_configured  = var.engine_version
+      engine                    = var.engine_type
+      engine_version_configured = var.engine_version
+      # The requested version can be a loose "7.1"; this is what actually
+      # came up ("7.1.0"). engine_version_configured is left untouched above
+      # -- the two carry different information and neither replaces the other.
+      engine_version_actual      = aws_elasticache_replication_group.main.engine_version_actual
       node_type                  = var.node_type
       availability_zone          = local.elasticache_pinned_az
       node_memory_bytes          = lookup(local._node_memory_bytes, var.node_type, 0)
@@ -87,6 +98,15 @@ resource "aws_s3_object" "cluster_details" {
       fargate_cpu             = var.loadgen_cpu
       fargate_memory          = var.loadgen_memory
       container_insights_mode = var.ecs_container_insights_mode
+      loadgen_image           = var.loadgen_image
+    }
+
+    # ----- Reporter provenance (WP3) -----
+    # Only the base image is known at apply time; the packages actually
+    # installed (pip freeze, reporter.tf) are runtime-only and travel
+    # through report_status.json / summary.meta.reporter_packages instead.
+    reporter = {
+      image = var.reporter_image
     }
 
     # ----- Node type memory reference table (all known types) -----

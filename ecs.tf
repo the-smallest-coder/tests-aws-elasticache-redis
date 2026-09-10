@@ -85,7 +85,7 @@ resource "aws_ecs_task_definition" "loadgen" {
   container_definitions = jsonencode([
     {
       name        = "memtier"
-      image       = "redislabs/memtier_benchmark:latest"
+      image       = var.loadgen_image
       essential   = true
       stopTimeout = 120
 
