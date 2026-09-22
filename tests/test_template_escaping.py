@@ -11,6 +11,23 @@ if REPORTER_DIR not in sys.path:
 
 
 class SingleReportEscapingTests(unittest.TestCase):
+    def test_test_conditions_show_as_applied_workload_and_escape_values(self):
+        from cards import test_conditions_html
+
+        html = test_conditions_html({
+            'run': {'aws_region': 'us-east-1<script>'},
+            'memtier': {
+                'task_count': 4, 'ratio': '1:10', 'threads': 2,
+                'clients': 1, 'pipeline': 1, 'data_size_bytes': 4096,
+                'key_maximum_total': 49800,
+            },
+        })
+        self.assertIn('Test Conditions', html)
+        self.assertIn('SET:GET ratio', html)
+        self.assertIn('49,800', html)
+        self.assertIn('us-east-1&lt;script&gt;', html)
+        self.assertNotIn('<script>', html)
+
     def test_render_html_escapes_plain_text_header_fields(self):
         from template import render_html
 
@@ -60,7 +77,7 @@ class SingleReportEscapingTests(unittest.TestCase):
         self.assertIn("redis&lt;script&gt;", html)
         self.assertIn("7&amp;&quot;&#x27;", html)
         self.assertIn("cache.m7g.large&lt;/span&gt;", html)
-        self.assertIn("Node memory: <span>6.38 GiB</span>", html)
+        self.assertNotIn("Node memory:", html)
         self.assertIn("hourly: <span>$0.158</span>", html)
         self.assertNotIn("redis<script>", html)
         self.assertNotIn("cache.m7g.large</span>", html)
@@ -78,7 +95,7 @@ class SingleReportEscapingTests(unittest.TestCase):
         )
 
         self.assertIn("Valkey hourly: <span>unavailable</span>", html)
-        self.assertIn('title="no known Price List location for region: xx-fake-1"', html)
+        self.assertIn('title="AWS Price List lookup was unavailable for this run."', html)
 
     def test_header_pills_explain_a_disabled_price_lookup(self):
         from cards import header_pills
@@ -92,7 +109,7 @@ class SingleReportEscapingTests(unittest.TestCase):
         )
 
         self.assertIn("Redis hourly: <span>disabled</span>", html)
-        self.assertIn("enable_price_lookup", html)
+        self.assertIn("Price lookup was disabled for this run.", html)
 
     def test_header_pills_omit_the_hourly_pill_for_legacy_runs_without_a_source(self):
         """A run from before this feature existed has no node_hourly_usd_source
@@ -134,7 +151,7 @@ class SingleReportEscapingTests(unittest.TestCase):
         self.assertIn("Engine: <span>redis</span>", html)
         self.assertIn("Nodes: <span>3</span>", html)
 
-    def test_header_pills_escape_the_unavailable_reason_tooltip(self):
+    def test_header_pills_hide_raw_aws_errors_in_unavailable_tooltip(self):
         from cards import header_pills
 
         html = header_pills(
@@ -146,10 +163,9 @@ class SingleReportEscapingTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("&quot;quoted&quot;", html)
-        self.assertIn("&amp;", html)
-        self.assertIn("&lt;script&gt;", html)
-        self.assertNotIn("<script>bad</script>", html)
+        self.assertIn("AWS Price List lookup was unavailable for this run.", html)
+        self.assertNotIn("quoted", html)
+        self.assertNotIn("<script>", html)
 
     def test_validity_is_inside_infrastructure_without_separate_latency_section(self):
         from template import render_html

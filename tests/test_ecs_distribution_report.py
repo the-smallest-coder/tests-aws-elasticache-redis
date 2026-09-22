@@ -140,6 +140,31 @@ class EcsDistributionReportTests(unittest.TestCase):
         self.assertEqual(panels_html.count("class='infra-legend'"), 7)
         self.assertIn("class='infra-legend-item'", panels_html)
 
+    def test_cache_network_tx_uses_a_separate_panel_and_scale(self):
+        import pandas as pd
+
+        from charts import build_infra_panels
+
+        timestamp = pd.Timestamp('2026-05-01T00:00:00Z')
+        ecs_df = pd.DataFrame([self._metric_row(
+            timestamp, 'NetworkTxBytes', 'Sum', 1024.0,
+            'ClusterName=c;ServiceName=s;TaskId=a',
+        )])
+        metrics_df = pd.DataFrame([{
+            'Timestamp': timestamp, 'Namespace': 'AWS/ElastiCache',
+            'MetricName': 'NetworkBytesOut', 'Stat': 'Sum',
+            'Value': 1024.0 * 600.0, 'Unit': 'Bytes',
+            'Dimensions': 'CacheClusterId=cluster-a',
+        }])
+        panels = build_infra_panels(ecs_df, metrics_df, 'cluster-a', {})
+        by_title = {panel['title']: panel for panel in panels}
+        ecs_panel = by_title['ECS Tasks — Network TX (KB/s)']
+        cache_panel = by_title['ElastiCache — Network TX (KB/min)']
+        self.assertFalse(any(t.name == 'Network TX – cache' for t in ecs_panel['figure'].data))
+        self.assertEqual(len(cache_panel['figure'].data), 1)
+        self.assertEqual(cache_panel['figure'].data[0].y[0], 600.0)
+        self.assertEqual(cache_panel['figure'].layout.yaxis.title.text, 'KB/min')
+
     def test_infrastructure_component_defines_every_emitted_class(self):
         try:
             from report_generator import _infra_panels_html
@@ -261,7 +286,7 @@ class EcsDistributionReportTests(unittest.TestCase):
         panels_by_title = {panel["title"]: panel for panel in panels}
 
         expected = {
-            "ECS Tasks — Network TX (KB/min)": "No Network TX Metrics",
+            "ECS Tasks — Network TX (KB/s)": "No Network TX Metrics",
             "ECS Tasks — Memory (MB)": "No ECS Memory Metrics",
             "ElastiCache Memory Usage (%)": "No CloudWatch Metrics",
             "ECS Task Latency (ms)": "No ECS task latency datapoints",

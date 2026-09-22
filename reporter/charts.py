@@ -21,6 +21,62 @@ from helpers import (
 
 ABS_TIME_HOVER = "%{customdata}"
 
+_DEEP_DIVE_CORE_METRICS = {
+    'CPUCreditBalance',
+    'CPUCreditUsage',
+    'GetTypeCmdsLatency',
+    'SetTypeCmdsLatency',
+    'StringBasedCmdsLatency',
+    'NetworkBandwidthInAllowanceExceeded',
+    'NetworkBandwidthOutAllowanceExceeded',
+    'NetworkPacketsPerSecondAllowanceExceeded',
+    'CurrConnections',
+    'MemoryFragmentationRatio',
+}
+
+_INFRA_METRICS = {
+    'EngineCPUUtilization',
+    'DatabaseMemoryUsageCountedForEvictPercentage',
+}
+
+_MEM_METRICS = {
+    'CacheHitRate',
+    'Evictions',
+}
+
+_PLOT_METRIC_ORDER = (
+    'Average',
+    'Sum',
+    'Maximum',
+    'Minimum',
+    'p99',
+    'p99.9',
+    'SampleCount',
+)
+
+_PLOT_METRIC_COLORS = (
+    '#1f77b4',
+    '#ff7f0e',
+    '#2ca02c',
+    '#d62728',
+    '#9467bd',
+    '#8c564b',
+    '#e377c2',
+    '#7f7f7f',
+    '#bcbd22',
+    '#17becf',
+)
+
+_PLOT_METRIC_DASH = {
+    'Average': 'solid',
+    'Sum': 'dash',
+    'Maximum': 'dot',
+    'Minimum': 'dot',
+    'p99': 'dashdot',
+    'p99.9': 'dashdot',
+    'SampleCount': 'longdash',
+}
+
 
 def _normalize_timestamp(value):
     ts = pd.Timestamp(value)
@@ -34,6 +90,12 @@ def _format_timestamp(value):
     if ts.microsecond:
         return f"{ts.strftime('%Y-%m-%d %H:%M:%S')}.{ts.microsecond:06d} UTC"
     return f"{ts.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+
+
+def _format_axis_timestamp(value):
+    """Compact absolute UTC label; hover keeps the full record timestamp."""
+    ts = _normalize_timestamp(value)
+    return f"{ts.strftime('%Y-%m-%d')}<br>{ts.strftime('%H:%M:%S')} UTC"
 
 
 def _epoch_ms(value):
@@ -72,10 +134,86 @@ def _set_absolute_xaxes(fig, rows, x_min, x_max):
             "range": tickvals,
             "tickmode": "array",
             "tickvals": tickvals,
-            "ticktext": [_format_timestamp(x_min), _format_timestamp(x_max)],
+            "ticktext": [_format_axis_timestamp(x_min), _format_axis_timestamp(x_max)],
+            "ticklabeloverflow": "allow",
         })
     for row in rows:
         fig.update_xaxes(row=row, col=1, **axis)
+
+
+def _ordered_metric_stats(df):
+    """Return deterministic stat order for a metric DataFrame."""
+    if df.empty or 'Stat' not in df.columns:
+        return []
+    available = set(df['Stat'].dropna().astype(str))
+    ordered = [stat for stat in _PLOT_METRIC_ORDER if stat in available]
+    remaining = sorted(available - set(_PLOT_METRIC_ORDER))
+    ordered.extend(remaining)
+    return ordered
+
+
+def _metric_unit(rows):
+    """Return a compact y-axis unit label from a metric subset."""
+    if rows.empty or 'Unit' not in rows.columns:
+        return ""
+    units = sorted({str(unit) for unit in rows['Unit'].dropna() if str(unit).strip()})
+    if not units:
+        return ""
+    if len(units) == 1:
+        return units[0]
+    if len(units) == 2 and "Bytes" in units and "Bytes/Second" in units:
+        return "Bytes/Second"
+    return "mixed"
+
+
+def _deep_dive_dimension_label(dim, cluster_id):
+    """Identify a node or shard without repeating the full run identifier."""
+    parts = dict(part.split('=', 1) for part in str(dim).split(';') if '=' in part)
+    cache_cluster = parts.get('CacheClusterId', '')
+    cache_suffix = cache_cluster[len(cluster_id):].lstrip('-') if cache_cluster.startswith(cluster_id) else ''
+    labels = []
+    if cache_suffix:
+        labels.append(f'cache {cache_suffix}')
+    elif parts.get('NodeGroupId'):
+        labels.append(f"shard {parts['NodeGroupId']}")
+    if parts.get('CacheNodeId'):
+        labels.append(f"node {parts['CacheNodeId']}")
+    return ' / '.join(labels) or 'cluster'
+
+
+def _collect_supplemental_elasticache_metrics(metrics_df):
+    """Collect metric names not already covered by dedicated deep-dive panels."""
+    if metrics_df.empty:
+        return []
+
+    excluded = _DEEP_DIVE_CORE_METRICS | _INFRA_METRICS | _MEM_METRICS
+    result = []
+
+    for metric_name in sorted(set(metrics_df['MetricName'].dropna().astype(str))):
+        if metric_name in excluded:
+            continue
+        rows = metrics_df[metrics_df['MetricName'] == metric_name].copy()
+        if rows.empty:
+            continue
+
+        # The exporter includes both cluster-only and node dimensions for the
+        # same datapoints. Prefer node series when present, retaining every
+        # node on multi-node runs instead of drawing duplicate curves.
+        dims = rows['Dimensions'].astype(str)
+        node_rows = rows[dims.str.contains('CacheNodeId=', regex=False)]
+        if not node_rows.empty:
+            rows = node_rows
+        else:
+            pref = rows[dims.str.startswith('CacheClusterId')]
+            rows = pref if not pref.empty else rows
+        rows = rows.copy()
+        rows = rows.sort_values('Timestamp')
+        stats = _ordered_metric_stats(rows)
+        if not stats:
+            continue
+        result.append((metric_name, rows, stats))
+
+    return result
 
 
 # ------------------------------------------------------------------ #
@@ -278,7 +416,8 @@ def build_memtier_figure(memtier_df, oom_df, metrics_df, x_min, x_max):
     fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
 
     fig.update_layout(
-        **LAYOUT_BASE, height=1380,
+        **{**LAYOUT_BASE, 'margin': {**LAYOUT_BASE['margin'], 'l': 90, 'r': 90}},
+        height=1380,
         legend =dict(**LEGEND_H, x=0.5, y=0.81),
         legend2=dict(**LEGEND_H, x=0.5, y=0.58),
         legend3=dict(**LEGEND_H, x=0.5, y=0.37),
@@ -432,7 +571,7 @@ def build_infra_figure(
                 title += " — ElastiCache AZ"
         subplot_titles.append(title)
     subplot_titles.extend((
-        "ECS Tasks — Network TX (KB/min)",
+        "ECS Tasks — Network TX (KB/s)",
         "ECS Tasks — Memory (MB)",
         "ElastiCache Memory Usage (%)",
         "ECS Task Latency (ms)",
@@ -585,7 +724,7 @@ def build_infra_figure(
                     name=label, mode='lines',
                     line=dict(**LINE_OPTS, color=color, dash=dash),
                     legend=_legend_id_for_row(network_row),
-                    hovertemplate=_task_distribution_hover('KB/min'),
+                    hovertemplate=_task_distribution_hover('KB/s'),
                 ), row=network_row, col=1, secondary_y=False)
             fig.add_trace(go.Scatter(
                 x=_plot_x(tx_dist['Timestamp']), y=tx_dist['source_count'],
@@ -606,7 +745,7 @@ def build_infra_figure(
                     name="Network TX — ECS tasks", mode='lines',
                     line=dict(**LINE_OPTS, color=C_NET_TX_ECS),
                     legend=_legend_id_for_row(network_row),
-                    hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} KB/min</b><extra></extra>"
+                    hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:.1f}} KB/s</b><extra></extra>"
                 ), row=network_row, col=1, secondary_y=False)
             else:
                 _add_empty_panel_annotation(fig, network_row, "No Network TX Metrics")
@@ -681,7 +820,7 @@ def build_infra_figure(
     fig.update_yaxes(title_text="sources", row=1, col=1, secondary_y=True, showgrid=False)
     for az_index in range(2, 2 + az_count):
         fig.update_yaxes(title_text="%", row=az_index, col=1)
-    fig.update_yaxes(title_text="KB/min", row=network_row, col=1,
+    fig.update_yaxes(title_text="KB/s", row=network_row, col=1,
                      title_font=dict(color=C_NET_TX_ECS), tickfont=dict(color=C_NET_TX_ECS),
                      secondary_y=False)
     fig.update_yaxes(title_text="sources", row=network_row, col=1, secondary_y=True, showgrid=False)
@@ -837,7 +976,7 @@ def build_infra_panels(
         panel.update_layout(
             **{
                 **LAYOUT_BASE,
-                'margin': {**LAYOUT_BASE['margin'], 'r': 30, 't': 10, 'b': 55},
+                'margin': {**LAYOUT_BASE['margin'], 'l': 90, 'r': 90, 't': 10, 'b': 65},
             },
             height=320,
             showlegend=False,
@@ -848,6 +987,29 @@ def build_infra_panels(
             'legend_items': legend_items,
         })
 
+        # Cache bytes and ECS task rates differ greatly in magnitude (and
+        # CloudWatch units). Give cache TX its own scale below the ECS plot.
+        cache_traces = [trace for trace in panel.data if trace.name == 'Network TX – cache']
+        if cache_traces:
+            panel.data = tuple(trace for trace in panel.data if trace.name != 'Network TX – cache')
+            panels[-1]['legend_items'] = [
+                item for item in legend_items if item['name'] != 'Network TX – cache'
+            ]
+            cache_panel = go.Figure(data=cache_traces)
+            cache_panel.update_layout(
+                **{**LAYOUT_BASE, 'margin': {**LAYOUT_BASE['margin'],
+                                             'l': 90, 'r': 90, 't': 10, 'b': 65}},
+                xaxis=_axis_props_for_single_panel(panel.layout.xaxis),
+                yaxis={**_axis_props_for_single_panel(panel.layout.yaxis),
+                       'title': {'text': 'KB/min'}},
+                height=320, showlegend=False,
+            )
+            panels.append({
+                'title': 'ElastiCache — Network TX (KB/min)',
+                'figure': cache_panel,
+                'legend_items': [_legend_item(trace) for trace in cache_traces],
+            })
+
     return panels
 
 
@@ -856,36 +1018,63 @@ def build_infra_panels(
 # ------------------------------------------------------------------ #
 
 def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None, x_min=None, x_max=None):
-    """Build a 4-row deep-dive figure for configuration comparison.
-
-    Rows: CPU Credits | Command Latency | Network Throttling | Connections & Fragmentation.
-    """
+    """Build the source subplots that the HTML renderer splits into panels."""
     config = config or {}
-
-    fig = make_subplots(
-        rows=4, cols=1,
-        shared_xaxes=False,
-        vertical_spacing=0.14,
-        specs=[
-            [{"secondary_y": True}],
-            [{"secondary_y": False}],
-            [{"secondary_y": False}],
-            [{"secondary_y": True}],
-        ],
-        subplot_titles=(
-            "CPU Credit Balance & Usage",
-            "Server-Side Command Latency (\u00b5s avg)",
-            "Network Throttling Events / min",
-            "Current Connections & Memory Fragmentation Ratio",
-        ),
-        row_heights=[0.25, 0.25, 0.25, 0.25],
-    )
+    supplemental_metrics = _collect_supplemental_elasticache_metrics(metrics_df)
 
     if metrics_df.empty:
+        fig = make_subplots(
+            rows=4, cols=1,
+            shared_xaxes=False,
+            vertical_spacing=0.14,
+            specs=[[{"secondary_y": True}], [{"secondary_y": False}],
+                   [{"secondary_y": False}], [{"secondary_y": True}]],
+            subplot_titles=(
+                "CPU Credit Balance & Usage",
+                "Server-Side Command Latency (\u00b5s avg)",
+                "Network Throttling Events / min",
+                "Current Connections & Memory Fragmentation Ratio",
+            ),
+            row_heights=[0.25, 0.25, 0.25, 0.25],
+        )
         fig.add_annotation(text="No ElastiCache metrics available",
                            xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
         fig.update_layout(**LAYOUT_BASE, height=1100)
         return fig
+
+    extra_rows = len(supplemental_metrics)
+    row_count = 4 + extra_rows
+    base_weights = [2.4, 2.4, 2.4, 2.4]
+    extra_weight = 1.0
+    weights = base_weights + ([extra_weight] * extra_rows)
+    total_weight = sum(weights)
+    row_heights = [weight / total_weight for weight in weights]
+    vertical_spacing = min(0.08, 0.12 / max(1, row_count - 1))
+
+    specs = [
+        [{"secondary_y": True}],
+        [{"secondary_y": False}],
+        [{"secondary_y": False}],
+        [{"secondary_y": True}],
+    ] + [[{"secondary_y": False}] for _ in range(extra_rows)]
+
+    subplot_titles = [
+        "CPU Credit Balance & Usage",
+        "Server-Side Command Latency (\u00b5s avg)",
+        "Network Throttling Events / min",
+        "Current Connections & Memory Fragmentation Ratio",
+    ]
+    for name, _metric_rows, _stats in supplemental_metrics:
+        subplot_titles.append(name)
+
+    fig = make_subplots(
+        rows=row_count, cols=1,
+        shared_xaxes=False,
+        vertical_spacing=vertical_spacing,
+        specs=specs,
+        subplot_titles=tuple(subplot_titles),
+        row_heights=row_heights,
+    )
 
     # ---- Row 1: CPU Credits ----
     bal_df = metric_filter(metrics_df, 'CPUCreditBalance', 'Average', 'CacheClusterId')
@@ -951,16 +1140,15 @@ def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None, x_mi
     ]:
         if not mdf.empty:
             agg = mdf.groupby('Timestamp')['Value'].sum().reset_index()
-            if agg['Value'].sum() > 0:
-                fig.add_trace(go.Scatter(
+            fig.add_trace(go.Scatter(
                     x=_plot_x(agg['Timestamp']), y=agg['Value'],
                     customdata=_plot_times(agg['Timestamp']),
                     name=label, mode='lines',
                     line=dict(**LINE_OPTS, color=color),
                     legend="legend3",
                     hovertemplate=f"{ABS_TIME_HOVER}<br><b>%{{y:,}}</b><extra></extra>"
-                ), row=3, col=1)
-                throttle_shown = True
+            ), row=3, col=1)
+            throttle_shown = True
     if not throttle_shown:
         fig.add_annotation(text="No network throttling detected",
                            xref="paper", yref="paper", x=0.5, y=0.375, showarrow=False)
@@ -992,6 +1180,76 @@ def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None, x_mi
         fig.add_annotation(text="No connection/fragmentation data",
                            xref="paper", yref="paper", x=0.5, y=0.125, showarrow=False)
 
+    # ---- Additional rows: all remaining ElastiCache metrics ----------------
+    for metric_index, (metric_name, metric_rows, available_stats) in enumerate(
+        supplemental_metrics,
+        start=5,
+    ):
+        metric_unit = _metric_unit(metric_rows)
+        row_has_data = False
+        plotted_stats = [stat for stat in available_stats if stat != 'SampleCount'] or available_stats
+        unit_title = 'samples' if plotted_stats == ['SampleCount'] else (metric_unit or 'value')
+        dimension_count = metric_rows['Dimensions'].nunique()
+
+        for stat_index, stat in enumerate(plotted_stats):
+            stat_rows = metric_rows[metric_rows["Stat"] == stat]
+            if stat_rows.empty:
+                continue
+            for dim_index, (dim, dim_rows) in enumerate(stat_rows.groupby("Dimensions")):
+                dim_rows = dim_rows.sort_values("Timestamp")
+                agg = dim_rows.groupby("Timestamp", as_index=False)["Value"].mean()
+                if agg.empty:
+                    continue
+                color = _PLOT_METRIC_COLORS[(stat_index + dim_index) % len(_PLOT_METRIC_COLORS)]
+                dash = _PLOT_METRIC_DASH.get(stat, 'solid')
+                row_has_data = True
+                hover_unit = ' samples' if stat == 'SampleCount' else (f" {metric_unit}" if metric_unit else '')
+                sample_rows = metric_rows[
+                    (metric_rows['Stat'] == 'SampleCount') &
+                    (metric_rows['Dimensions'] == dim)
+                ]
+                if stat != 'SampleCount' and not sample_rows.empty:
+                    sample_counts = sample_rows.groupby('Timestamp')['Value'].sum().to_dict()
+                    customdata = []
+                    for timestamp, time in zip(agg['Timestamp'], _plot_times(agg['Timestamp'])):
+                        count = sample_counts.get(timestamp)
+                        count_label = f'{count:g}' if count is not None and pd.notna(count) else 'n/a'
+                        customdata.append([time, count_label])
+                    hover_time = '%{customdata[0]}'
+                    hover_samples = '<br>Samples: %{customdata[1]}'
+                else:
+                    customdata = _plot_times(agg['Timestamp'])
+                    hover_time = ABS_TIME_HOVER
+                    hover_samples = ''
+                dimension_label = _deep_dive_dimension_label(dim, cluster_id)
+                trace_name = stat if dimension_count == 1 else f'{stat} — {dimension_label}'
+                fig.add_trace(go.Scatter(
+                    x=_plot_x(agg['Timestamp']), y=agg['Value'],
+                    customdata=customdata,
+                    name=trace_name,
+                    mode='lines',
+                    line=dict(**LINE_OPTS, color=color, dash=dash),
+                    showlegend=False,
+                    hovertemplate=(
+                        f"{hover_time}<br><b>%{{y:,.3f}}{hover_unit}</b>"
+                        f"{hover_samples}<extra>%{{fullData.name}}</extra>"
+                    ),
+                ), row=metric_index, col=1)
+
+        if not row_has_data:
+            fig.add_annotation(
+                text=f"No series available for {metric_name}",
+                xref="paper", yref="paper",
+                x=0.5, y=0.5, showarrow=False,
+            )
+        else:
+            fig.update_yaxes(
+                title_text=unit_title,
+                row=metric_index, col=1,
+                title_font=dict(color="#3b4f69"),
+                tickfont=dict(color="#3b4f69"),
+            )
+
     # ---- Axes styling ----
     fig.update_yaxes(title_text="credits",  row=1, col=1, secondary_y=False,
                      title_font=dict(color=C_CREDIT_BAL), tickfont=dict(color=C_CREDIT_BAL))
@@ -1005,14 +1263,127 @@ def build_elasticache_deep_dive_figure(metrics_df, cluster_id, config=None, x_mi
     fig.update_yaxes(title_text="ratio",    row=4, col=1, secondary_y=True,
                      title_font=dict(color=C_MEM_FRAG),  tickfont=dict(color=C_MEM_FRAG),
                      showgrid=False)
-    _set_absolute_xaxes(fig, range(1, 5), x_min, x_max)
+    _set_absolute_xaxes(fig, range(1, row_count + 1), x_min, x_max)
     fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0', zeroline=False)
 
     fig.update_layout(
-        **LAYOUT_BASE, height=1100,
+        **LAYOUT_BASE,
         legend =dict(**LEGEND_H, x=0.5, y=0.83),
         legend2=dict(**LEGEND_H, x=0.5, y=0.56),
         legend3=dict(**LEGEND_H, x=0.5, y=0.27),
         legend4=dict(**LEGEND_H, x=0.5, y=-0.03),
+        height=320 * row_count,
     )
     return fig
+
+
+def build_elasticache_deep_dive_panels(metrics_df, cluster_id, config=None, x_min=None, x_max=None):
+    """Give every downloaded metric a readable plot and an external legend."""
+    if metrics_df.empty:
+        panel = make_subplots(rows=1, cols=1)
+        panel.add_annotation(
+            text="No ElastiCache metrics available", x=0.5, y=0.5,
+            xref="paper", yref="paper", showarrow=False,
+        )
+        _set_absolute_xaxes(panel, [1], x_min, x_max)
+        panel.update_layout(**LAYOUT_BASE, height=320)
+        return [{'title': 'ElastiCache metrics', 'figure': panel, 'legend_items': []}]
+
+    combined = build_elasticache_deep_dive_figure(
+        metrics_df, cluster_id, config, x_min, x_max,
+    )
+    row_count = len(combined._grid_ref)
+    titles = [str(a.text) for a in list(combined.layout.annotations or ())[:row_count]]
+    panels = []
+    for row in range(1, row_count + 1):
+        refs = combined._grid_ref[row - 1][0]
+        primary = refs[0]
+        secondary = refs[1] if len(refs) > 1 else None
+        primary_yref = primary.trace_kwargs['yaxis']
+        secondary_yref = secondary.trace_kwargs['yaxis'] if secondary else None
+        panel = make_subplots(
+            rows=1, cols=1, specs=[[{'secondary_y': secondary is not None}]],
+        )
+        legend_items = []
+        seen_curves = set()
+        for trace in combined.data:
+            trace_yref = trace.yaxis or 'y'
+            if trace_yref not in {primary_yref, secondary_yref}:
+                continue
+            # CloudWatch often publishes identical Average/Minimum/Maximum/
+            # percentile curves. Draw each distinct curve once per dimension.
+            dimension = str(trace.name or '').partition(' — ')[2]
+            curve_key = (dimension, tuple(trace.x), tuple(trace.y))
+            if row > 4 and curve_key in seen_curves:
+                continue
+            seen_curves.add(curve_key)
+            trace_json = trace.to_plotly_json()
+            for key in ('xaxis', 'yaxis', 'legend'):
+                trace_json.pop(key, None)
+            trace_json['showlegend'] = False
+            panel.add_trace(
+                go.Figure(data=[trace_json]).data[0], row=1, col=1,
+                secondary_y=secondary_yref is not None and trace_yref == secondary_yref,
+            )
+            legend_items.append(_legend_item(trace))
+
+        source_subplot = combined.get_subplot(row, 1)
+        panel.update_xaxes(**_axis_props_for_single_panel(source_subplot.xaxis), row=1, col=1)
+        panel.update_yaxes(
+            **_axis_props_for_single_panel(source_subplot.yaxis), row=1, col=1,
+            secondary_y=False,
+        )
+        if secondary is not None:
+            source_secondary_axis = combined.layout[secondary.layout_keys[1]]
+            panel.update_yaxes(
+                **_axis_props_for_single_panel(source_secondary_axis), row=1, col=1,
+                secondary_y=True,
+            )
+        panel.update_layout(
+            **{**LAYOUT_BASE, 'margin': {**LAYOUT_BASE['margin'],
+                                         'l': 90, 'r': 90, 't': 10, 'b': 65}},
+            height=320, showlegend=False,
+        )
+        panels.append({
+            'title': titles[row - 1],
+            'figure': panel,
+            'legend_items': legend_items,
+            'group': _deep_dive_group(titles[row - 1], row),
+        })
+    group_order = {
+        'Key signals': 0,
+        'Requests and cache': 1,
+        'Memory and keys': 2,
+        'Network and connections': 3,
+        'CPU and host': 4,
+        'Replication and search': 5,
+        'Other metrics': 6,
+    }
+    return sorted(panels, key=lambda item: (group_order[item['group']], item['title']))
+
+
+def _deep_dive_group(name, row):
+    if row <= 4:
+        return 'Key signals'
+    if name.startswith(('Network', 'TrafficManagement')) or name in {
+        'BlockedConnections', 'NewConnections', 'RejectedConnections',
+    }:
+        return 'Network and connections'
+    if name.startswith(('Memory', 'Database', 'Allocator', 'ActiveDefrag',
+                        'BytesUsed', 'CurrItems', 'CurrVolatile', 'DB0',
+                        'Freeable', 'KeysTracked', 'Reclaimed', 'Swap',
+                        'UsedMemory')):
+        return 'Memory and keys'
+    if name.startswith(('CPU', 'MajorPageFaults')):
+        return 'CPU and host'
+    if name.startswith(('Replication', 'Search', 'PubSub')) or name in {
+        'IsMaster', 'MasterLinkHealthStatus', 'SaveInProgress',
+    }:
+        return 'Replication and search'
+    if name.startswith(('Authentication', 'Cache', 'ChannelAuthorization',
+                        'CommandAuthorization', 'ErrorCount', 'GetType',
+                        'IamAuthentication', 'KeyAuthorization', 'NonKeyType',
+                        'ProcessedCommands', 'SetType', 'StringBased',
+                        'Successful')):
+        return 'Requests and cache'
+    return 'Other metrics'

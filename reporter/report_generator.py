@@ -19,8 +19,8 @@ from parsers import (
     parse_memtier_logs,
 )
 from summary import build_summary
-from cards import header_pills, loadgen_quality_html, stat_cards_html
-from charts import build_memtier_figure, build_infra_panels, build_elasticache_deep_dive_figure
+from cards import header_pills, loadgen_quality_html, stat_cards_html, test_conditions_html
+from charts import build_memtier_figure, build_infra_panels, build_elasticache_deep_dive_panels
 from template import render_html
 
 
@@ -602,7 +602,7 @@ def _memtier_dfs_from_log_entries(log_entries: list[tuple[str, str]]):
     return combined_df, totals_df
 
 
-def _infra_panels_html(panels) -> str:
+def _chart_panels_html(panels, prefix: str) -> str:
     component_css = """\
 .infra-panels { width: 100%; }
 .infra-panel { height: auto; min-width: 0; }
@@ -660,26 +660,36 @@ def _infra_panels_html(panels) -> str:
         'longdashdot': 'dashdot',
     }
     rendered = []
+    component_css = component_css.replace('.infra-', f'.{prefix}-')
+    previous_group = None
     for panel in panels:
+        group = panel.get('group')
+        if group and group != previous_group:
+            rendered.append(f"<h3 class='{prefix}-group'>{escape(group)}</h3>")
+            previous_group = group
         legend_items = ''.join(
-            "<span class='infra-legend-item'>"
-            f"<span class='infra-legend-line{(' ' + dash_classes[item['dash']]) if item['dash'] in dash_classes else ''}' "
+            f"<span class='{prefix}-legend-item'>"
+            f"<span class='{prefix}-legend-line{(' ' + dash_classes[item['dash']]) if item['dash'] in dash_classes else ''}' "
             f"style='--legend-color:{escape(item['color'], quote=True)}'></span>"
             f"<span>{escape(item['name'])}</span></span>"
             for item in panel['legend_items']
         )
         title = escape(panel['title'])
         rendered.append(
-            "<div class='infra-panel'>"
-            f"<div class='infra-panel-title'>{title}</div>"
-            f"<div class='infra-plot'>{panel['figure'].to_html(include_plotlyjs=False, full_html=False)}</div>"
-            f"<div class='infra-legend'>{legend_items}</div>"
+            f"<div class='{prefix}-panel'>"
+            f"<div class='{prefix}-panel-title'>{title}</div>"
+            f"<div class='{prefix}-plot'>{panel['figure'].to_html(include_plotlyjs=False, full_html=False)}</div>"
+            f"<div class='{prefix}-legend'>{legend_items}</div>"
             "</div>"
         )
     return (
-        "<style data-component='infra-panels'>" + component_css + "</style>"
-        "<div class='infra-panels'>" + ''.join(rendered) + "</div>"
+        f"<style data-component='{prefix}-panels'>" + component_css + "</style>"
+        f"<div class='{prefix}-panels'>" + ''.join(rendered) + "</div>"
     )
+
+
+def _infra_panels_html(panels) -> str:
+    return _chart_panels_html(panels, 'infra')
 
 
 def create_report(
@@ -692,6 +702,7 @@ def create_report(
     ecs_metrics_df=None,
     config: dict | None = None,
     extra_stats: dict | None = None,
+    cluster_details: dict | None = None,
 ) -> tuple[str, str]:
     """Build the rich HTML report and matching summary JSON.
 
@@ -748,12 +759,17 @@ def create_report(
         elasticache_az=loadgen.get("elasticache_availability_zone"),
         elasticache_az_source=loadgen.get("elasticache_availability_zone_source"),
     )
-    fig_d = build_elasticache_deep_dive_figure(metrics_window_df, cluster_id, config, x_min, x_max)
+    deep_dive_panels = build_elasticache_deep_dive_panels(
+        metrics_window_df, cluster_id, config, x_min, x_max,
+    )
     summary_json = json.dumps(summary, indent=2, default=str)
+
+    run_meta = (cluster_details or {}).get('run') or {}
+    run_label = run_meta.get('run_folder') or run_meta.get('run_id') or suffix
 
     html_content = render_html(
         cluster_id=cluster_id,
-        suffix=suffix,
+        suffix=run_label,
         id_label=id_label,
         time_range=time_range,
         pills_html=header_pills(config),
@@ -768,9 +784,10 @@ def create_report(
             loadgen=summary.get("loadgen"),
         ),
         loadgen_quality_html=loadgen_quality_html(summary.get("loadgen")),
+        test_conditions_html=test_conditions_html(cluster_details),
         chart_memtier_html=fig_m.to_html(include_plotlyjs="cdn", full_html=False),
         chart_infra_html=_infra_panels_html(infra_panels),
-        chart_deep_dive_html=fig_d.to_html(include_plotlyjs=False, full_html=False),
+        chart_deep_dive_html=_chart_panels_html(deep_dive_panels, 'deep-dive'),
     )
     return html_content, summary_json
 
@@ -849,6 +866,7 @@ def run_generate_report(run_dir: str, config: dict, output_dir: str | None = Non
         ecs_metrics_df=ecs_df,
         config=config,
         extra_stats=extra_stats,
+        cluster_details=cluster_details,
     )
 
     if cluster_details:
@@ -983,6 +1001,7 @@ def run_uploaded_report() -> dict:
         ecs_metrics_df=ecs_df,
         config=report_config,
         extra_stats=extra_stats,
+        cluster_details=cluster_details,
     )
 
     from report_common import enrich_summary_meta
