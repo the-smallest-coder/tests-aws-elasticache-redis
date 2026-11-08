@@ -11,8 +11,18 @@
 #
 # On any failure (missing aws/jq, no pricing:GetProducts permission, no
 # matching SKU, region not in the location map below) this prints
-# {"hourly_usd": "", "source": "unavailable", "reason": "..."} and exits 0.
-# Callers must treat an empty hourly_usd as "not available", never as 0.
+# {"hourly_usd": "", "source": "unavailable", "reason": "<fixed code>"} and
+# exits 0. Callers must treat an empty hourly_usd as "not available", never
+# as 0.
+#
+# "reason" is ALWAYS one of the fixed codes below, never text copied from a
+# tool: it is stored in cluster_details.json and the results JSON, and `aws`
+# stderr carries the caller's STS ARN (AccessDenied) and account id. Detail
+# that helps debugging goes to this script's own stderr, which Terraform
+# discards when the script exits 0. Codes:
+#   missing_dependency_jq | missing_dependency_aws | bash_version_unsupported
+#   unknown_engine_type | unknown_region | pricing_request_failed
+#   no_ondemand_price_match | non_positive_price
 #
 # Requires `bash` (>= 4 -- see the version guard below), the `aws` CLI, and
 # `jq` on the machine running `terraform apply`/`terraform destroy` (all
@@ -35,17 +45,20 @@ set -uo pipefail
 # unparsable output, defeating the one guarantee this script makes. This
 # check is a plain printf specifically so it works with no dependencies.
 if ! command -v jq &>/dev/null; then
-    printf '{"hourly_usd":"","source":"unavailable","reason":"missing dependency: jq"}\n'
+    printf '{"hourly_usd":"","source":"unavailable","reason":"missing_dependency_jq"}\n'
     exit 0
 fi
 
+# $1 is a fixed reason code (see the list above). $2, if given, is diagnostic
+# detail for stderr only -- it never enters the JSON printed to Terraform.
 _unavailable() {
-    local reason="$1"
+    local reason="$1" detail="${2:-}"
+    [[ -n "$detail" ]] && printf 'fetch_elasticache_price: %s: %s\n' "$reason" "$detail" >&2
     jq -n --arg reason "$reason" '{hourly_usd: "", source: "unavailable", reason: $reason}'
     exit 0
 }
 
-command -v aws &>/dev/null || _unavailable "missing dependency: aws"
+command -v aws &>/dev/null || _unavailable "missing_dependency_aws"
 
 # macOS ships bash 3.2 (Apple froze it there over the GPLv3 relicense and
 # never upgraded); `declare -A` doesn't exist before bash 4 and its exact
@@ -54,7 +67,7 @@ command -v aws &>/dev/null || _unavailable "missing dependency: aws"
 # builtin present even on 3.2 -- checking it can't itself hit the bug it's
 # guarding against.
 if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
-    _unavailable "bash ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]} found; this script requires bash >= 4 for associative arrays"
+    _unavailable "bash_version_unsupported" "bash ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]} found; bash >= 4 is required for associative arrays"
 fi
 
 QUERY_JSON="$(cat)"
@@ -65,7 +78,7 @@ AWS_REGION_ARG="$(jq -r '.aws_region' <<<"$QUERY_JSON")"
 case "$ENGINE_TYPE" in
     redis) CACHE_ENGINE="Redis" ;;
     valkey) CACHE_ENGINE="Valkey" ;;
-    *) _unavailable "unknown engine_type: $ENGINE_TYPE" ;;
+    *) _unavailable "unknown_engine_type" "engine_type=$ENGINE_TYPE" ;;
 esac
 
 # AWS Price List "location" attribute string, keyed by region code. This is
@@ -106,7 +119,7 @@ declare -A REGION_LOCATIONS=(
 )
 
 LOCATION="${REGION_LOCATIONS[$AWS_REGION_ARG]:-}"
-[[ -n "$LOCATION" ]] || _unavailable "no known Price List location for region: $AWS_REGION_ARG"
+[[ -n "$LOCATION" ]] || _unavailable "unknown_region" "region=$AWS_REGION_ARG"
 
 ERR_FILE="$(mktemp)"
 trap 'rm -f "$ERR_FILE"' EXIT
@@ -123,8 +136,8 @@ RESULT_JSON="$(aws pricing get-products \
 AWS_EXIT=$?
 
 if [[ $AWS_EXIT -ne 0 ]]; then
-    REASON="aws pricing get-products failed: $(tr '\n' ' ' <"$ERR_FILE" | cut -c1-200)"
-    _unavailable "$REASON"
+    # stderr (AccessDenied text with the caller's ARN, etc.) stays on stderr.
+    _unavailable "pricing_request_failed" "$(tr '\n' ' ' <"$ERR_FILE" | cut -c1-200)"
 fi
 
 # Each PriceList entry is itself a JSON *string* that must be re-decoded.
@@ -141,7 +154,7 @@ PRICE="$(jq -r '
 ' <<<"$RESULT_JSON" 2>/dev/null)"
 
 [[ -n "$PRICE" && "$PRICE" != "null" ]] || \
-    _unavailable "no AWS Price List OnDemand match for ${NODE_TYPE}/${CACHE_ENGINE}/${LOCATION}"
+    _unavailable "no_ondemand_price_match" "${NODE_TYPE}/${CACHE_ENGINE}/${LOCATION}"
 
 # Defense in depth: a real on-demand ElastiCache rate is never $0. Reject a
 # non-positive price rather than let it flow downstream as a genuine "$0"
@@ -149,7 +162,7 @@ PRICE="$(jq -r '
 # 0 must get the same treatment, not be mistaken for a real free tier.
 IS_POSITIVE="$(jq -n --arg price "$PRICE" '(try ($price | tonumber) catch nan) > 0' 2>/dev/null)"
 [[ "$IS_POSITIVE" == "true" ]] || \
-    _unavailable "AWS Price List returned a non-positive OnDemand price ($PRICE) for ${NODE_TYPE}/${CACHE_ENGINE}/${LOCATION}"
+    _unavailable "non_positive_price" "price=$PRICE for ${NODE_TYPE}/${CACHE_ENGINE}/${LOCATION}"
 
 jq -n \
     --arg hourly_usd "$PRICE" \

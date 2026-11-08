@@ -23,6 +23,17 @@ from comparison_contract import (
     run_window_seconds,
 )
 from report_common import RunData, get_nested, load_run, metric_value
+from report_safety import (
+    WITHHELD,
+    assert_publishable_html,
+    assert_publishable_json,
+    diagnostics,
+    publication_guard,
+    public_label,
+    public_price,
+    public_run_config,
+    write_files_atomically,
+)
 
 
 def run_fingerprint(run: RunData) -> tuple[Any, ...] | None:
@@ -47,8 +58,14 @@ def run_fingerprint(run: RunData) -> tuple[Any, ...] | None:
 
 
 def _fingerprint_label(fingerprint: tuple[Any, ...]) -> str:
-    dims = fingerprint[: len(INTENDED_DIMENSIONS)]
-    return "-".join(str(part) for part in dims)
+    """The intended dimensions (node type, engine, version), each through its
+    own field contract; a value that does not conform is shown as
+    ``withheld``. The label becomes the report title and file name."""
+    node_type, engine, engine_version = fingerprint[: len(INTENDED_DIMENSIONS)]
+    config = public_run_config({"node_type": node_type, "engine_type": engine, "engine_version": engine_version})
+    return "-".join(
+        config.get(key) or WITHHELD for key in ("node_type", "engine_type", "engine_version")
+    )
 
 
 def _fingerprint_id(fingerprint: tuple[Any, ...], label: str) -> str:
@@ -180,12 +197,11 @@ def cost_per_successful_operation(run: RunData) -> dict[str, Any]:
     # a Python fallback silently resurrecting the same defect under a
     # different name). "n/a" for the whole history is the honest answer
     # until pricing:GetProducts access is granted.
-    node_hourly_usd = meta.get("node_hourly_usd")
-    if node_hourly_usd in (None, ""):
-        return {"value": None, "reason": "node_hourly_usd_unavailable", "errors_unknown": errors_unknown}
-    try:
-        node_hourly_usd = float(node_hourly_usd)
-    except (TypeError, ValueError):
+    # The same price contract as the single-run and comparison reports: a
+    # finite, positive number. "0", "nan", "inf" or negatives are unavailable
+    # (the price script treats a missing price as absent, never as $0).
+    node_hourly_usd = public_price(meta.get("node_hourly_usd"))
+    if node_hourly_usd is None:
         return {"value": None, "reason": "node_hourly_usd_unavailable", "errors_unknown": errors_unknown}
 
     if successful_ops <= 0:
@@ -210,11 +226,22 @@ def build_aggregate_payload(fingerprint_id: str, group: dict[str, Any], metrics:
     import pandas as pd
 
     runs: list[RunData] = group["runs"]
+    # Labels shown in the report must be label-shaped. The group label is
+    # built from field contracts (_fingerprint_label); a run folder name that
+    # does not fit is withheld rather than failing every group.
+    label = public_label(group["label"]) or WITHHELD
+    folders = []
+    for run in runs:
+        folder = public_label(run.folder)
+        if folder is None:
+            diagnostics.warning("aggregate group %s: a run folder name was withheld from the report", fingerprint_id)
+            folder = WITHHELD
+        folders.append(folder)
     cost_rows = []
     cost_values = []
-    for run in runs:
+    for run, folder in zip(runs, folders):
         cost = cost_per_successful_operation(run)
-        cost_rows.append({"folder": run.folder, **cost})
+        cost_rows.append({"folder": folder, **cost})
         if cost["value"] is not None:
             cost_values.append(cost["value"])
 
@@ -232,9 +259,9 @@ def build_aggregate_payload(fingerprint_id: str, group: dict[str, Any], metrics:
 
     return {
         "fingerprint_id": fingerprint_id,
-        "label": group["label"],
+        "label": label,
         "n": len(runs),
-        "runs": [run.folder for run in runs],
+        "runs": folders,
         "metrics": metric_stats(runs, metrics),
         "cost_per_successful_operation": {"per_run": cost_rows, "stats": cost_stats},
     }
@@ -260,15 +287,27 @@ def run_aggregate_report(run_dir_args: list[str], output_dir: str | None = None)
         # convention -- never inside a run folder (D9).
         first_root = Path(run_dir_args[0]).resolve().parent
         out_root = (first_root / "aggregates") if first_root.name == "results" else (Path.cwd() / "aggregates")
-    out_root.mkdir(parents=True, exist_ok=True)
 
+    # Render and check every group before writing any of them: one group that
+    # cannot be published safely fails the whole run with nothing written.
+    staged: dict[Path, str] = {}
+    written: list[tuple[Path, int]] = []
     for fingerprint_id, group in groups.items():
-        payload = build_aggregate_payload(fingerprint_id, group, METRICS)
+        with publication_guard(f"aggregate report {fingerprint_id}"):
+            payload = build_aggregate_payload(fingerprint_id, group, METRICS)
+            document = assert_publishable_html(
+                render_aggregate_report(payload), context=f"aggregate report {fingerprint_id}"
+            )
+            payload_json = assert_publishable_json(
+                json.dumps(payload, indent=2, default=str), context=f"aggregate summary {fingerprint_id}"
+            )
         json_path = out_root / f"{fingerprint_id}.json"
-        json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-        html_path = out_root / f"{fingerprint_id}.html"
-        html_path.write_text(render_aggregate_report(payload), encoding="utf-8")
-        print(f"Aggregate written: {json_path} (n={payload['n']})")
+        staged[json_path] = payload_json
+        staged[out_root / f"{fingerprint_id}.html"] = document
+        written.append((json_path, payload["n"]))
+    write_files_atomically(staged)
+    for json_path, count in written:
+        print(f"Aggregate written: {json_path} (n={count})")
 
     if unmatched:
         print(f"{len(unmatched)} run(s) did not fit any fingerprint group:")

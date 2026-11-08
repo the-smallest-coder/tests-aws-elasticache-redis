@@ -337,10 +337,12 @@ def loadgen_quality_html(loadgen):
                 az = f"{az} — ElastiCache AZ (inferred from memtier task latency)"
             else:
                 az = f"{az} — ElastiCache AZ"
+        median = row.get('median_ops_sec')
+        median_text = f"{float(median):,.0f}" if median is not None else 'n/a'
         az_rows.append(
             f"<tr><td>{_html(az)}</td>"
-            f"<td>{_html(row.get('task_count', ''))}</td>"
-            f"<td>{float(row.get('median_ops_sec', 0)):,.0f}</td>"
+            f"<td>{_html(row.get('task_count', 'n/a'))}</td>"
+            f"<td>{_html(median_text)}</td>"
             f"<td>{_html(ratio_text)}</td></tr>"
         )
 

@@ -4,7 +4,7 @@ import math
 from pathlib import Path
 from typing import Any
 
-from comparison_contract import build_comparison_contract
+from comparison_contract import CONTROL_VARIABLES, INTENDED_DIMENSIONS, VERDICTS, build_comparison_contract
 from formatting import format_gib, format_usd_hour
 from report_common import (
     MetricSpec,
@@ -18,8 +18,25 @@ from report_common import (
     metric_value,
     normalize_cluster_mode,
     percent_change,
+    public_run_warnings,
 )
-from template import render_report
+from report_safety import (  # noqa: F401  (ReportGenerationError is re-exported for callers)
+    WITHHELD,
+    ReportGenerationError,
+    assert_publishable_html,
+    diagnostics,
+    publication_guard,
+    public_cluster_details,
+    public_iso_timestamp,
+    public_label,
+    public_number,
+    public_run_config,
+    public_scalar,
+    public_time_range,
+    public_token,
+    write_files_atomically,
+)
+from template import CONTRACT_REASON_CODES, render_report
 
 
 SECTION_META: dict[str, dict[str, str]] = {
@@ -266,47 +283,79 @@ def build_sections(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sections
 
 
+def _run_label(run: RunData) -> str:
+    """The run's folder name if it is label-shaped, else its role."""
+    label = public_label(run.folder)
+    if label is None:
+        diagnostics.warning("run folder name withheld from report for role %s", run.role)
+    return label or run.role.lower()
+
+
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def build_run_context(run: RunData) -> dict[str, Any]:
-    meta = run.summary.get("meta", {})
-    elasticache = (run.cluster_details or {}).get("elasticache", {})
-    memtier = (run.cluster_details or {}).get("memtier", {})
+    """Allowlisted per-run facts for the comparison report.
+
+    Everything is taken through report_safety's field contracts: a field that
+    is not on the list is never read, and a listed field whose value does not
+    match its contract is left out. In particular no local filesystem path,
+    no exception text and no free-text pricing note can appear here.
+    """
+    meta = _dict_or_empty(run.summary.get("meta"))
+    elasticache = _dict_or_empty(_dict_or_empty(run.cluster_details).get("elasticache"))
+    workload = public_cluster_details(run.cluster_details)["memtier"]
+    config = public_run_config({
+        "engine_type": meta.get("engine_type") or elasticache.get("engine"),
+        "engine_version": meta.get("engine_version") or elasticache.get("engine_version_configured"),
+        "node_type": meta.get("node_type") or elasticache.get("node_type"),
+        "node_memory_bytes": meta.get("node_memory_bytes") or elasticache.get("node_memory_bytes"),
+        "node_hourly_usd": meta.get("node_hourly_usd") or elasticache.get("node_hourly_usd"),
+        "node_count": meta.get("node_count") or elasticache.get("num_cache_nodes"),
+        "cluster_mode": meta.get("cluster_mode"),
+    })
+    label = _run_label(run)
+    cluster_id = public_token(meta.get("cluster_id"))
     items: list[dict[str, str]] = []
 
-    def add(label: str, value: Any) -> None:
+    def add(item_label: str, value: Any) -> None:
         if value in (None, ""):
             return
-        items.append({"label": label, "value": str(value)})
+        items.append({"label": item_label, "value": str(value)})
 
-    add("Run folder", run.folder)
-    add("Source JSON", str(run.results_path))
-    add("Cluster ID", meta.get("cluster_id"))
-    add("Time range", meta.get("time_range"))
-    add("Report start", meta.get("report_start"))
-    add("Report end", meta.get("report_end"))
-    engine = meta.get("engine_type") or elasticache.get("engine")
+    add("Run folder", label)
+    # The file name only: the full path would disclose the local directory layout.
+    add("Source JSON", public_label(run.results_path.name))
+    add("Cluster ID", cluster_id)
+    add("Time range", public_time_range(meta.get("time_range")))
+    add("Report start", public_iso_timestamp(meta.get("report_start")))
+    add("Report end", public_iso_timestamp(meta.get("report_end")))
+    engine = config.get("engine_type")
     add("Engine", engine)
-    add("Engine version", meta.get("engine_version") or elasticache.get("engine_version_configured"))
-    add("Node type", meta.get("node_type") or elasticache.get("node_type"))
-    add("Node memory", _format_gib(meta.get("node_memory_bytes") or elasticache.get("node_memory_bytes")))
+    add("Engine version", config.get("engine_version"))
+    add("Node type", config.get("node_type"))
+    add("Node memory", _format_gib(config.get("node_memory_bytes")))
     add(
         f"{engine.title()} hourly" if engine else "Node hourly",
-        _format_usd_hour(meta.get("node_hourly_usd") or elasticache.get("node_hourly_usd")),
+        _format_usd_hour(config.get("node_hourly_usd")),
     )
-    add("Node count", meta.get("node_count") or elasticache.get("num_cache_nodes"))
-    add("Cluster mode", normalize_cluster_mode(meta.get("cluster_mode")))
-    add("Task count", memtier.get("task_count") or get_nested(run.summary, ("ecs", "task_count")))
-    add("Clients", memtier.get("clients"))
-    add("Threads", memtier.get("threads"))
-    add("Pipeline", memtier.get("pipeline"))
-    add("Ratio", memtier.get("ratio"))
-    add("Data size", f"{memtier.get('data_size_bytes')} bytes" if memtier.get("data_size_bytes") else None)
-    add("Key maximum", memtier.get("key_maximum"))
+    add("Node count", config.get("node_count"))
+    add("Cluster mode", normalize_cluster_mode(config.get("cluster_mode")))
+    task_count = workload.get("task_count") or public_number(get_nested(run.summary, ("ecs", "task_count")), minimum=0)
+    add("Task count", task_count)
+    add("Clients", workload.get("clients"))
+    add("Threads", workload.get("threads"))
+    add("Pipeline", workload.get("pipeline"))
+    add("Ratio", workload.get("ratio"))
+    add("Data size", f"{workload['data_size_bytes']} bytes" if workload.get("data_size_bytes") else None)
+    add("Key maximum", workload.get("key_maximum"))
     notes: list[str] = []
     if not run.cluster_details:
         notes.append("cluster_details.json is missing for this run, so config fields are partial.")
-    notes.extend(run.warnings)
+    notes.extend(public_run_warnings(run.warnings))
     note = " ".join(notes) if notes else None
-    return {"role": run.role, "folder": run.folder, "title": meta.get("cluster_id") or run.folder, "items": items, "note": note}
+    return {"role": run.role, "folder": label, "title": cluster_id or label, "items": items, "note": note}
 
 
 def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, str]]:
@@ -315,43 +364,6 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
     def number(path: tuple[str, ...]) -> tuple[float | None, float | None]:
         spec = next(metric for metric in METRICS if metric.path == path)
         return metric_value(spec, get_nested(baseline.summary, path)), metric_value(spec, get_nested(candidate.summary, path))
-
-    avg_ops_a, avg_ops_b = number(("benchmark", "avg_ops"))
-    max_latency_a, max_latency_b = number(("benchmark", "max_latency_ms"))
-
-    # Determine tone based on both throughput (higher is better) and latency (lower is better).
-    avg_ops_delta = (avg_ops_b or 0) - (avg_ops_a or 0)
-    latency_delta = (max_latency_b or 0) - (max_latency_a or 0)
-
-    throughput_better = avg_ops_delta > 0
-    throughput_worse = avg_ops_delta < 0
-    latency_better = latency_delta < 0
-    latency_worse = latency_delta > 0
-
-    if (throughput_better and not latency_worse) or (latency_better and not throughput_worse):
-        tone = "better"
-    elif (throughput_worse and not latency_better) or (latency_worse and not throughput_better):
-        tone = "worse"
-    else:
-        # Mixed tradeoff: one metric improved while the other worsened or both unchanged.
-        tone = "mixed"
-
-    items.append(
-        {
-            "tone": tone,
-            "title": "Throughput vs latency tradeoff",
-            "text": (
-                f"Avg throughput moved {format_number(avg_ops_a or 0, 1)} -> {format_number(avg_ops_b or 0, 1)} ops/sec "
-                f"({percent_change(avg_ops_a, avg_ops_b)}), while max latency moved "
-                f"{format_number(max_latency_a or 0, 2)} -> {format_number(max_latency_b or 0, 2)} ms "
-                f"({percent_change(max_latency_a, max_latency_b)})."
-            ),
-        }
-    )
-
-    max_mem_a, max_mem_b = number(("memory", "max_usage_pct"))
-    headroom_a, headroom_b = number(("memory", "headroom_pct"))
-    swap_a, swap_b = number(("memory", "swap_max_bytes"))
 
     def metric_signal(a: float | None, b: float | None, *, higher_is_better: bool) -> int:
         """
@@ -365,6 +377,47 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
             return 1 if b > a else -1
         else:
             return 1 if b < a else -1
+
+    def shown(value: float | None, decimals: int) -> str:
+        """A missing value is a fixed status in the text, never a made-up 0."""
+        return format_number(value, decimals) if value is not None else "n/a"
+
+    avg_ops_a, avg_ops_b = number(("benchmark", "avg_ops"))
+    max_latency_a, max_latency_b = number(("benchmark", "max_latency_ms"))
+
+    # Determine tone based on both throughput (higher is better) and latency
+    # (lower is better). A metric missing on either side gives no signal.
+    throughput_signal = metric_signal(avg_ops_a, avg_ops_b, higher_is_better=True)
+    latency_signal = metric_signal(max_latency_a, max_latency_b, higher_is_better=False)
+    throughput_better, throughput_worse = throughput_signal > 0, throughput_signal < 0
+    latency_better, latency_worse = latency_signal > 0, latency_signal < 0
+
+    if (throughput_better and not latency_worse) or (latency_better and not throughput_worse):
+        tone = "better"
+    elif (throughput_worse and not latency_better) or (latency_worse and not throughput_better):
+        tone = "worse"
+    elif None in (avg_ops_a, avg_ops_b, max_latency_a, max_latency_b):
+        tone = "neutral"
+    else:
+        # Mixed tradeoff: one metric improved while the other worsened or both unchanged.
+        tone = "mixed"
+
+    items.append(
+        {
+            "tone": tone,
+            "title": "Throughput vs latency tradeoff",
+            "text": (
+                f"Avg throughput moved {shown(avg_ops_a, 1)} -> {shown(avg_ops_b, 1)} ops/sec "
+                f"({percent_change(avg_ops_a, avg_ops_b)}), while max latency moved "
+                f"{shown(max_latency_a, 2)} -> {shown(max_latency_b, 2)} ms "
+                f"({percent_change(max_latency_a, max_latency_b)})."
+            ),
+        }
+    )
+
+    max_mem_a, max_mem_b = number(("memory", "max_usage_pct"))
+    headroom_a, headroom_b = number(("memory", "headroom_pct"))
+    swap_a, swap_b = number(("memory", "swap_max_bytes"))
 
     # For max memory usage and swap, lower is better; for headroom, higher is better.
     signals = [
@@ -388,11 +441,11 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
             "tone": mem_tone,
             "title": "Memory pressure",
             "text": (
-                f"Max memory usage moved {format_number(max_mem_a or 0, 2)}% -> {format_number(max_mem_b or 0, 2)}% "
+                f"Max memory usage moved {shown(max_mem_a, 2)}% -> {shown(max_mem_b, 2)}% "
                 f"({diff_points(max_mem_a, max_mem_b, 2)}), headroom moved "
-                f"{format_number(headroom_a or 0, 2)}% -> {format_number(headroom_b or 0, 2)}% "
+                f"{shown(headroom_a, 2)}% -> {shown(headroom_b, 2)}% "
                 f"({diff_points(headroom_a, headroom_b, 2)}), and peak swap moved "
-                f"{format_number(swap_a or 0, 1)} -> {format_number(swap_b or 0, 1)} MB."
+                f"{shown(swap_a, 1)} -> {shown(swap_b, 1)} MB."
             ),
         }
     )
@@ -423,10 +476,10 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
             "tone": cache_latency_tone,
             "title": "Cache efficiency and server latency",
             "text": (
-                f"Cache hit rate moved {format_number(hit_a or 0, 2)}% -> {format_number(hit_b or 0, 2)}% "
+                f"Cache hit rate moved {shown(hit_a, 2)}% -> {shown(hit_b, 2)}% "
                 f"({diff_points(hit_a, hit_b, 2)}). Server-side GET latency moved "
-                f"{format_number(get_lat_a or 0, 3)} -> {format_number(get_lat_b or 0, 3)} us and SET latency moved "
-                f"{format_number(set_lat_a or 0, 3)} -> {format_number(set_lat_b or 0, 3)} us."
+                f"{shown(get_lat_a, 3)} -> {shown(get_lat_b, 3)} us and SET latency moved "
+                f"{shown(set_lat_a, 3)} -> {shown(set_lat_b, 3)} us."
             ),
         }
     )
@@ -470,12 +523,20 @@ def collect_takeaways(baseline: RunData, candidate: RunData) -> list[dict[str, s
                 loadgen.get("warning_reasons")
                 or loadgen.get("invalid_reasons", [])
             )
+            if isinstance(reasons, str):
+                reasons = [reasons]
+            elif not isinstance(reasons, (list, tuple)):
+                reasons = []
+            # Every code build_loadgen_summary() emits has a label here.
             reason_labels = {
                 "generator_cpu_p95_above_85_pct": "ECS task CPU p95 > 85%",
                 "throughput_skew_within_az_above_1_3": "within-AZ throughput p90/p10 > 1.3",
+                "task_count_mismatch_with_request": "observed ECS task count differs from the request",
             }
+            # Unknown codes are not echoed: only the labels above are report text.
             reason_text = ", ".join(
-                reason_labels.get(reason, reason) for reason in reasons
+                reason_labels.get(reason, "other ECS task constraint") for reason in reasons
+                if isinstance(reason, str)
             ) or "ECS task constraint detected"
             constrained_runs.append(f"{run.role}: {reason_text}")
     if constrained_runs:
@@ -518,32 +579,78 @@ def infer_output_path(baseline: RunData, candidate: RunData, override: str | Non
     return output_dir / f"{baseline.folder}_vs_{candidate.folder}.html"
 
 
+#: The roles run_compare_report() loads the two runs under.
+BASELINE_ROLE, CANDIDATE_ROLE = "Baseline", "Candidate"
+_CONTRACT_ROLES = frozenset({BASELINE_ROLE, CANDIDATE_ROLE})
+_CONTRACT_FIELDS = frozenset(f"{section}.{field}" for section, field in CONTROL_VARIABLES)
+
+
+def public_contract(contract: Any) -> dict[str, Any] | None:
+    """The comparability contract as the report may show it.
+
+    Reason codes, roles and field names come from closed sets; the two values
+    in a "baseline vs candidate" reason are scalars or ``withheld`` -- they
+    originate in cluster_details.json / summaries, which are not trusted text.
+    """
+    if not isinstance(contract, dict) or not contract:
+        return None
+    verdict = contract.get("verdict")
+    reasons = []
+    for reason in contract.get("reasons") or []:
+        if not isinstance(reason, dict) or reason.get("code") not in CONTRACT_REASON_CODES:
+            diagnostics.warning("comparability reason withheld from report: unknown reason code")
+            continue
+        clean: dict[str, Any] = {"code": reason["code"]}
+        if reason.get("role") in _CONTRACT_ROLES:
+            clean["role"] = reason["role"]
+        if reason.get("field") in _CONTRACT_FIELDS:
+            clean["field"] = reason["field"]
+        fields = [field for field in (reason.get("fields") or []) if field in INTENDED_DIMENSIONS]
+        if fields:
+            clean["fields"] = fields
+        if reason.get("baseline") is not None and reason.get("candidate") is not None:
+            clean["baseline"] = public_scalar(reason["baseline"])
+            clean["candidate"] = public_scalar(reason["candidate"])
+        reasons.append(clean)
+    if verdict not in VERDICTS:
+        diagnostics.warning("comparability verdict withheld from report: unknown verdict")
+        verdict = WITHHELD
+    return {"verdict": verdict, "reasons": reasons}
+
+
 def build_compare_payload(baseline: RunData, candidate: RunData) -> dict[str, Any]:
     rows = metric_rows(baseline, candidate)
+    runs = [build_run_context(baseline), build_run_context(candidate)]
+    baseline_name, candidate_name = runs[0]["folder"], runs[1]["folder"]
     return {
-        "title": f"ElastiCache Comparison - {baseline.folder} vs {candidate.folder}",
+        "title": f"ElastiCache Comparison - {baseline_name} vs {candidate_name}",
         "heading": "ElastiCache Comparison Report",
-        "subtitle": f"{baseline.folder} vs {candidate.folder}",
-        "baseline_name": baseline.folder,
-        "candidate_name": candidate.folder,
+        "subtitle": f"{baseline_name} vs {candidate_name}",
+        "baseline_name": baseline_name,
+        "candidate_name": candidate_name,
         "comparison_direction": "candidate minus baseline",
         "topline_cards": build_topline_cards(rows),
         "takeaways": collect_takeaways(baseline, candidate),
-        "runs": [build_run_context(baseline), build_run_context(candidate)],
+        "runs": runs,
         "sections": build_sections(rows),
         # WP4: is this pair comparable at all, separate from how the metrics
         # in `sections` above happen to differ (report_compare's own
         # tone-better/worse is about a *result*, never about whether the
         # comparison itself is trustworthy).
-        "contract": build_comparison_contract(baseline, candidate),
+        "contract": public_contract(build_comparison_contract(baseline, candidate)),
     }
 
 
 def run_compare_report(baseline_path: str, candidate_path: str, output: str | None) -> None:
-    baseline = load_run("Baseline", baseline_path)
-    candidate = load_run("Candidate", candidate_path)
-    payload = build_compare_payload(baseline, candidate)
+    baseline = load_run(BASELINE_ROLE, baseline_path)
+    candidate = load_run(CANDIDATE_ROLE, candidate_path)
     output_path = infer_output_path(baseline, candidate, output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(render_report(payload), encoding="utf-8")
+    with publication_guard("comparison report rendering"):
+        document = assert_publishable_html(
+            render_report(build_compare_payload(baseline, candidate)),
+            context="comparison report",
+        )
+    # Staged and moved into place only now: a failure above never touches an
+    # existing comparison file.
+    write_files_atomically({output_path: document})
     print(f"Comparison report written to {output_path}")

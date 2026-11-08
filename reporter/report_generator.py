@@ -4,12 +4,32 @@ import argparse
 from html import escape
 from io import StringIO
 import json
+import logging
 import os
 import re
 import sys
 from pathlib import Path
 
 from report_common import ECS_ENV_VARS, inspect_run_directory
+from report_safety import (
+    WITHHELD,
+    ReportGenerationError,
+    assert_publishable_html,
+    assert_publishable_json,
+    diagnostics,
+    numeric_columns,
+    numeric_metric_values,
+    publication_guard,
+    public_cluster_details,
+    public_label,
+    public_loadgen_view,
+    public_run_config,
+    public_task_az_map,
+    public_token,
+    require_identifier,
+    sanitize_metrics_frame,
+    write_files_atomically,
+)
 from report_compare import run_compare_report
 from helpers import read_file_content
 from parsers import (
@@ -706,9 +726,38 @@ def create_report(
 ) -> tuple[str, str]:
     """Build the rich HTML report and matching summary JSON.
 
-    This follows the March 2026 local report pipeline. Cache hit rate is read
-    from CacheHitRate/Average when CloudWatch publishes it, or derived from
-    CacheHits/CacheMisses at CacheClusterId granularity when it does not.
+    This is the single-run publication boundary: it validates the report
+    window, hands the renderer only allowlisted values (report_safety), and
+    returns HTML that has passed the final diagnostic-marker check. Any
+    failure other than an invalid window surfaces as ReportGenerationError
+    with a fixed message; the cause is logged privately and no partial HTML
+    is ever returned.
+    """
+    # Outside the guard: an invalid window keeps its own ValueError text.
+    window = _validate_report_window(extra_stats or {}, "report generation")
+    with publication_guard("single-run report rendering"):
+        return _render_report_pair(
+            metrics_df, logs_df, memtier_minute_df, memtier_totals_df, cluster_id, suffix,
+            ecs_metrics_df, config, extra_stats, cluster_details, window,
+        )
+
+
+def _render_report_pair(
+    metrics_df,
+    logs_df,
+    memtier_minute_df,
+    memtier_totals_df,
+    cluster_id: str,
+    suffix: str,
+    ecs_metrics_df,
+    config: dict | None,
+    extra_stats: dict | None,
+    cluster_details: dict | None,
+    window: tuple,
+) -> tuple[str, str]:
+    """Cache hit rate is read from CacheHitRate/Average when CloudWatch
+    publishes it, or derived from CacheHits/CacheMisses at CacheClusterId
+    granularity when it does not (the March 2026 local report pipeline).
     """
     import pandas as pd
 
@@ -716,29 +765,47 @@ def create_report(
     config = config or {}
     extra_stats = extra_stats or {}
 
-    x_min, x_max = _validate_report_window(extra_stats, "report generation")
+    x_min, x_max = window
+
+    # The renderers below see allowlisted views, not raw inputs: public_config,
+    # public_details, label-checked metric frames and a numbers-only memtier
+    # frame. The summary JSON keeps its unchanged contract: it is computed
+    # from the full `config` and the unfiltered metric frames, so withholding
+    # a row's label from the page never changes a published number.
+    cluster_id = require_identifier(cluster_id, "cluster id")
+    public_config = public_run_config(config)
+    public_details = public_cluster_details(cluster_details)
+    memtier_minute_df = numeric_columns(memtier_minute_df, "memtier minute series")
+    # A row whose Value is not a number is not a datapoint, for the page or
+    # the summary: it is withheld instead of failing the whole report.
+    metrics_df = numeric_metric_values(metrics_df, "ElastiCache metrics")
+    ecs_df = numeric_metric_values(ecs_df, "ECS metrics")
+    chart_metrics_df = sanitize_metrics_frame(metrics_df, "ElastiCache metrics")
+    # ECS metrics are optional (an unreadable ECS CSV is only a warning), so
+    # losing all of them to the label contract must not block the report.
+    chart_ecs_df = sanitize_metrics_frame(ecs_df, "ECS metrics", required=False)
 
     oom_df = extra_stats.get("oom_df", pd.DataFrame())
 
-    metrics_window_df = _clip_to_time_window(metrics_df, x_min, x_max)
-    ecs_window_df = _clip_to_time_window(ecs_df, x_min, x_max)
+    metrics_window_df = _clip_to_time_window(chart_metrics_df, x_min, x_max)
+    ecs_window_df = _clip_to_time_window(chart_ecs_df, x_min, x_max)
 
     fig_m = build_memtier_figure(memtier_minute_df, oom_df, metrics_window_df, x_min, x_max)
     time_range = _format_time_range(x_min, x_max)
-    cluster_mode = str(config.get("cluster_mode", "false")).lower() == "true"
+    cluster_mode = public_config.get("cluster_mode") == "true"
     id_label = "Cluster" if cluster_mode else "Replication Group"
 
     summary = build_summary(
-        metrics_window_df,
+        _clip_to_time_window(metrics_df, x_min, x_max),
         memtier_minute_df,
         memtier_totals_df,
-        ecs_window_df,
+        _clip_to_time_window(ecs_df, x_min, x_max),
         {**extra_stats, "memtier_samples_df": logs_df},
         config,
         cluster_id,
         time_range,
     )
-    loadgen = summary.get("loadgen", {})
+    loadgen = public_loadgen_view(summary.get("loadgen"))
     task_index_by_id = {
         row["task_id"]: row["task_index"]
         for row in (
@@ -751,45 +818,51 @@ def create_report(
         ecs_window_df,
         metrics_window_df,
         cluster_id,
-        config,
+        public_config,
         x_min,
         x_max,
-        task_az_map=_task_az_map(extra_stats.get("container_insights_task_df")),
+        task_az_map=public_task_az_map(_task_az_map(extra_stats.get("container_insights_task_df"))),
         task_index_by_id=task_index_by_id,
         elasticache_az=loadgen.get("elasticache_availability_zone"),
         elasticache_az_source=loadgen.get("elasticache_availability_zone_source"),
     )
     deep_dive_panels = build_elasticache_deep_dive_panels(
-        metrics_window_df, cluster_id, config, x_min, x_max,
+        metrics_window_df, cluster_id, public_config, x_min, x_max,
     )
     summary_json = json.dumps(summary, indent=2, default=str)
 
-    run_meta = (cluster_details or {}).get('run') or {}
-    run_label = run_meta.get('run_folder') or run_meta.get('run_id') or suffix
+    run_label = (
+        public_details["run"].get("run_folder") or public_details["run"].get("run_id") or public_label(suffix)
+    )
+    if run_label is None:
+        # A folder name outside the label contract is withheld, not fatal --
+        # the same policy as the comparison report's role fallback.
+        diagnostics.warning("run label withheld from report: it does not match the label contract")
+        run_label = WITHHELD
 
     html_content = render_html(
         cluster_id=cluster_id,
         suffix=run_label,
         id_label=id_label,
         time_range=time_range,
-        pills_html=header_pills(config),
+        pills_html=header_pills(public_config),
         cards_html=stat_cards_html(
             memtier_minute_df,
             memtier_totals_df,
             metrics_window_df,
             ecs_window_df,
             extra_stats=extra_stats,
-            config=config,
+            config=public_config,
             cluster_id=cluster_id,
-            loadgen=summary.get("loadgen"),
+            loadgen=loadgen,
         ),
-        loadgen_quality_html=loadgen_quality_html(summary.get("loadgen")),
-        test_conditions_html=test_conditions_html(cluster_details),
+        loadgen_quality_html=loadgen_quality_html(loadgen),
+        test_conditions_html=test_conditions_html(public_details),
         chart_memtier_html=fig_m.to_html(include_plotlyjs="cdn", full_html=False),
         chart_infra_html=_infra_panels_html(infra_panels),
         chart_deep_dive_html=_chart_panels_html(deep_dive_panels, 'deep-dive'),
     )
-    return html_content, summary_json
+    return assert_publishable_html(html_content, context="single-run report"), summary_json
 
 
 def run_generate_report(run_dir: str, config: dict, output_dir: str | None = None) -> None:
@@ -797,12 +870,16 @@ def run_generate_report(run_dir: str, config: dict, output_dir: str | None = Non
 
     run_path = Path(run_dir)
     out_dir = Path(output_dir) if output_dir else run_path
-    out_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir = run_path / "metrics"
     logs_dir = run_path / "logs"
 
-    # Find main metrics CSV (not the -ecs one)
-    ec_csvs = [p for p in metrics_dir.glob("*.csv") if not p.name.endswith("-ecs.csv")]
+    # Find main metrics CSV (not the -ecs one). Its stem is the cluster id, so
+    # prefer a file whose stem is a valid identifier: a stray duplicate such
+    # as "<cluster> (1).csv" sorts first and would otherwise be picked.
+    ec_csvs = sorted(
+        (p for p in metrics_dir.glob("*.csv") if not p.name.endswith("-ecs.csv")),
+        key=lambda path: (public_token(path.stem) is None, path.name),
+    )
     ecs_csvs = list(metrics_dir.glob("*-ecs.csv"))
     if not ec_csvs:
         print(f"No metrics CSV found in {metrics_dir}")
@@ -883,12 +960,17 @@ def run_generate_report(run_dir: str, config: dict, output_dir: str | None = Non
     # default (backward compatible with existing callers and PLAN_2.md's own
     # verification recipe, which runs this against a throwaway copy) -- D9
     # read-only-run-dir only holds when the caller passes --output-dir.
+    #
+    # Both files are staged and moved into place together, and only after the
+    # HTML passed create_report's publication check: a failure anywhere above
+    # (or while staging) leaves the previous valid results_local.* untouched.
     out_path = out_dir / "results_local.json"
-    out_path.write_text(summary_json, encoding="utf-8")
-    print(f"Written: {out_path}")
-
     html_path = out_dir / "results_local.html"
-    html_path.write_text(html_content, encoding="utf-8")
+    write_files_atomically({
+        out_path: assert_publishable_json(summary_json, context="local summary"),
+        html_path: html_content,
+    })
+    print(f"Written: {out_path}")
     print(f"Written: {html_path}")
 
 
@@ -988,8 +1070,10 @@ def run_uploaded_report() -> dict:
         # its absence here means a failed upload or a broken apply, not an
         # optional artifact. The gap must stay visible, not fall back to
         # env-only config in silence.
-        cluster_details_status = {"present": False, "reason": str(exc)}
-        print(f"Warning: cluster_details.json unavailable at {cluster_details_uri}: {exc}")
+        # Fixed code only: this dict is written to report_status.json and
+        # into the summary's meta.warnings. The exception goes to the log.
+        diagnostics.warning("cluster_details.json unavailable at %s: %s", cluster_details_uri, exc)
+        cluster_details_status = {"present": False, "reason": "cluster_details_unavailable"}
 
     html_content, summary_json = create_report(
         metrics_df=metrics_df,
@@ -1016,24 +1100,42 @@ def run_uploaded_report() -> dict:
         print(f"Summary enriched from {cluster_details_uri}")
     else:
         summary_obj.setdefault("meta", {}).setdefault("warnings", []).append(
-            f"cluster_details.json missing or unreadable: {cluster_details_status.get('reason', 'unknown')}"
+            "cluster_details.json is missing or unreadable."
         )
-    summary_json = json.dumps(summary_obj, indent=2, default=str)
+    # create_report already checked the HTML; the summary gets its own scan.
+    summary_json = assert_publishable_json(
+        json.dumps(summary_obj, indent=2, default=str), context="uploaded summary"
+    )
 
     output_key = f"{output_prefix}{timestamp}/results_{suffix}.html"
     output_json_key = re.sub(r"\.html$", ".json", output_key)
     if output_json_key == output_key:
         output_json_key = f"{output_prefix}{timestamp}/results_{suffix}.json"
 
-    print(f"Uploading report to s3://{output_bucket}/{output_key}")
+    # JSON first, HTML last: the page only appears once its summary is in
+    # place, so a failed second upload never leaves a page without data.
     s3 = boto3.client("s3")
-    s3.put_object(Bucket=output_bucket, Key=output_key, Body=html_content, ContentType="text/html")
     print(f"Uploading summary JSON to s3://{output_bucket}/{output_json_key}")
     s3.put_object(Bucket=output_bucket, Key=output_json_key, Body=summary_json, ContentType="application/json")
+    print(f"Uploading report to s3://{output_bucket}/{output_key}")
+    s3.put_object(Bucket=output_bucket, Key=output_key, Body=html_content, ContentType="text/html")
     return cluster_details_status
 
 
 def main() -> None:
+    """CLI entry point. A report that cannot be produced safely exits
+    non-zero (3) after logging the details to the private diagnostic channel;
+    nothing is written or uploaded in that case. (On ECS the entry point is
+    exporter.py, which exits 3 the same way.)"""
+    try:
+        _main()
+    except ReportGenerationError as exc:
+        # The cause was logged where it happened; this line is the outcome.
+        diagnostics.error("Report generation failed: %s", exc)
+        sys.exit(3)
+
+
+def _main() -> None:
     if len(sys.argv) == 1 and not missing_ecs_env_vars():
         run_uploaded_report()
         return
@@ -1075,4 +1177,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     main()

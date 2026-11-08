@@ -235,11 +235,13 @@ class MissingClusterDetailsIsAVisibleDefectTests(unittest.TestCase):
                 setattr(report_generator, name, value)
 
         self.assertEqual(result["present"], False)
-        self.assertIn("NoSuchKey", result["reason"])
+        # A fixed code, not the exception text (which may name ARNs/keys).
+        self.assertEqual(result["reason"], "cluster_details_unavailable")
 
         json_key = f"{ENV['S3_PREFIX']}{ENV['REPORT_TIMESTAMP']}/results_{ENV['REPORT_TIMESTAMP']}.json"
         uploaded_summary = json.loads(fake_s3.storage[json_key])
         warnings = uploaded_summary["meta"]["warnings"]
+        self.assertNotIn("NoSuchKey", json.dumps(uploaded_summary))
         self.assertTrue(
             any("cluster_details.json" in warning for warning in warnings),
             warnings,

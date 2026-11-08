@@ -1,9 +1,10 @@
 locals {
+  # The one list of reporter modules: uploaded to S3 below and downloaded by
+  # the ECS task (the heredoc renders it with jsonencode).
   reporter_modules = toset([
     "report_generator.py",
     "report_common.py",
     "report_compare.py",
-    "report_ecs.py",
     "helpers.py",
     "parsers.py",
     "charts.py",
@@ -15,6 +16,7 @@ locals {
     "memtier_etl.py",
     "formatting.py",
     "comparison_contract.py",
+    "report_safety.py",
   ])
   reporter_scripts_prefix = "scripts/${local.cluster_id}/"
 }
@@ -35,11 +37,6 @@ moved {
 moved {
   from = aws_s3_object.report_scripts["report_compare.py"]
   to   = aws_s3_object.reporter_scripts["report_compare.py"]
-}
-
-moved {
-  from = aws_s3_object.report_scripts["report_ecs.py"]
-  to   = aws_s3_object.reporter_scripts["report_ecs.py"]
 }
 
 moved {
@@ -128,23 +125,7 @@ import boto3
 import sys
 
 bucket = "${var.metrics_export_s3_bucket}"
-modules = [
-    "report_generator.py",
-    "report_common.py",
-    "report_compare.py",
-    "report_ecs.py",
-    "helpers.py",
-    "parsers.py",
-    "charts.py",
-    "cards.py",
-    "template.py",
-    "summary.py",
-    "loadgen_analysis.py",
-    "exporter.py",
-    "memtier_etl.py",
-    "formatting.py",
-    "comparison_contract.py",
-]
+modules = ${jsonencode(sort(tolist(local.reporter_modules)))}
 
 s3 = boto3.client("s3")
 for mod in modules:

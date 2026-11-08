@@ -379,6 +379,11 @@ _CONTRACT_REASON_LABELS = {
 }
 
 
+#: Reason codes the report knows how to word; report_compare.public_contract
+#: lets nothing else through.
+CONTRACT_REASON_CODES = frozenset(_CONTRACT_REASON_LABELS)
+
+
 def _contract_reason_text(reason: dict[str, object]) -> str:
     label = _CONTRACT_REASON_LABELS.get(str(reason.get("code")), str(reason.get("code", "unknown")))
     extras = []
