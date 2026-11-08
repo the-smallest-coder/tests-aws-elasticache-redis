@@ -12,6 +12,7 @@ from helpers import (
     first_positive_timestamp,
 )
 from report_common import GENERATOR_SCHEMA_VERSION
+from report_safety import public_price_reason, public_price_source, public_summary_meta
 from loadgen_analysis import build_loadgen_summary
 
 
@@ -160,8 +161,8 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         'node_type':       config.get('node_type', ''),
         'node_memory_bytes': config.get('node_memory_bytes', ''),
         'node_hourly_usd': config.get('node_hourly_usd', ''),
-        'node_hourly_usd_source': config.get('node_hourly_usd_source', ''),
-        'node_hourly_usd_reason': config.get('node_hourly_usd_reason', ''),
+        'node_hourly_usd_source': public_price_source(config.get('node_hourly_usd_source')),
+        'node_hourly_usd_reason': public_price_reason(config.get('node_hourly_usd_reason')),
         'node_count':      config.get('node_count', ''),
         'cluster_mode':    str(config.get('cluster_mode', 'false')).lower(),
         'generator_schema_version': GENERATOR_SCHEMA_VERSION,
@@ -175,6 +176,8 @@ def build_summary(metrics_df, memtier_minute_df, memtier_totals_df, ecs_df, extr
         'loadgen_image': config.get('loadgen_image', ''),
         'reporter_packages': _reporter_packages_dict(config.get('reporter_packages')),
     }
+    # Config text is published in this JSON: fields keep their shape or are withheld.
+    public_summary_meta(meta)
     first_message_ts = extra_stats.get('first_message_ts')
     last_message_ts = extra_stats.get('last_message_ts')
     if first_message_ts is not None:

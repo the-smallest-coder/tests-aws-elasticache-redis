@@ -32,6 +32,11 @@ body {
 }
 .pill span { font-weight: 400; opacity: .85; }
 .content { max-width: 1400px; margin: 0 auto; padding: 24px 28px; }
+.test-conditions { background: #fff; border: 1px solid #e0e4ea; border-radius: 10px; padding: 16px 18px; margin-bottom: 24px; }
+.test-conditions h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: #5f6368; margin-bottom: 12px; }
+.test-conditions dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px 20px; }
+.condition dt { font-size: 11px; color: #5f6368; }
+.condition dd { font-size: 14px; font-weight: 600; margin-top: 3px; }
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
@@ -56,6 +61,8 @@ body {
   box-shadow: 0 1px 3px rgba(0,0,0,.06);
 }
 .chart-group { margin-bottom: 32px; }
+.deep-dive-group { font-size: 14px; color: #395577; padding: 18px 12px 8px; border-top: 1px solid #e0e4ea; margin-top: 16px; }
+.deep-dive-group:first-child { margin-top: 0; border-top: 0; }
 .group-header { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
 .group-header h2 { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; color: #5f6368; white-space: nowrap; }
 .group-header .group-badge { font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 12px; white-space: nowrap; }
@@ -65,7 +72,7 @@ body {
 .group-badge.deepdive { background: #f3e5f5; color: #6a1b9a; }
 .group-header::after { content: ''; flex: 1; height: 1px; background: #e0e4ea; }
 .ecs-task-quality { padding: 8px 12px 12px; }
-.quality-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr); gap: 14px; }
+.quality-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
 .quality-table { overflow-x: auto; background: #fff; border: 1px solid #e0e4ea; border-radius: 10px; padding: 12px; }
 .quality-table table { width: 100%; border-collapse: collapse; }
 .quality-table th, .quality-table td { padding: 8px; border-top: 1px solid #edf2f7; text-align: left; white-space: nowrap; }
@@ -105,9 +112,12 @@ function copyReport() {
   btn.disabled = true;
   lbl.textContent = 'Rendering\u2026';
   var plots = Array.from(document.querySelectorAll('.js-plotly-plot'));
-  Promise.all(plots.map(function(el) {
-    return Plotly.toImage(el, {format: 'png', width: el.offsetWidth || 900, height: el.offsetHeight || 500});
-  })).then(function(urls) {
+  plots.reduce(function(chain, el) {
+    return chain.then(function(urls) {
+      return Plotly.toImage(el, {format: 'png', width: el.offsetWidth || 900, height: el.offsetHeight || 500})
+        .then(function(url) { urls.push(url); return urls; });
+    });
+  }, Promise.resolve([])).then(function(urls) {
     var clone = document.body.cloneNode(true);
     var cb = clone.querySelector('#copy-btn');
     if (cb) { cb.parentNode.removeChild(cb); }
@@ -151,6 +161,7 @@ def render_html(
     chart_infra_html: str,
     chart_deep_dive_html: str,
     loadgen_quality_html: str = "",
+    test_conditions_html: str = "",
 ) -> str:
     """Assemble the full standalone single-run HTML report page."""
     escaped_cluster_id = escape(str(cluster_id), quote=True)
@@ -182,6 +193,7 @@ def render_html(
 
 <div class="content">
   {cards_html}
+  {test_conditions_html}
 
   <div class="chart-group">
     <div class="group-header">
@@ -365,6 +377,11 @@ _CONTRACT_REASON_LABELS = {
     "diagnostic_warning": "loadgen diagnostic status is a warning",
     "schema_version_differs": "generator schema version differs",
 }
+
+
+#: Reason codes the report knows how to word; report_compare.public_contract
+#: lets nothing else through.
+CONTRACT_REASON_CODES = frozenset(_CONTRACT_REASON_LABELS)
 
 
 def _contract_reason_text(reason: dict[str, object]) -> str:

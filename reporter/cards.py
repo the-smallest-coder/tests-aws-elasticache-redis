@@ -9,12 +9,37 @@ def _html(value):
     return escape(str(value), quote=True)
 
 
+def test_conditions_html(cluster_details):
+    """Render the as-applied workload inputs available for a single run."""
+    if not isinstance(cluster_details, dict):
+        return ''
+    run = cluster_details.get('run') or {}
+    memtier = cluster_details.get('memtier') or {}
+    fields = [
+        ('AWS region', run.get('aws_region')),
+        ('ECS tasks', memtier.get('task_count')),
+        ('SET:GET ratio', memtier.get('ratio')),
+        ('Threads / task', memtier.get('threads')),
+        ('Clients / thread', memtier.get('clients')),
+        ('Pipeline', memtier.get('pipeline')),
+        ('Value size', f"{memtier['data_size_bytes']:,} bytes" if isinstance(memtier.get('data_size_bytes'), int) else memtier.get('data_size_bytes')),
+        ('Total key range', f"{memtier['key_maximum_total']:,}" if isinstance(memtier.get('key_maximum_total'), int) else memtier.get('key_maximum_total')),
+    ]
+    fields = [(label, value) for label, value in fields if value is not None and value != '']
+    if not fields:
+        return ''
+    cells = ''.join(
+        f"<div class='condition'><dt>{_html(label)}</dt><dd>{_html(value)}</dd></div>"
+        for label, value in fields
+    )
+    return f"<section class='test-conditions'><h2>Test Conditions</h2><dl>{cells}</dl></section>"
+
+
 def header_pills(config):
     """Return the header pills HTML for the config badge row."""
     config = config or {}
     cluster_mode = str(config.get('cluster_mode', 'false')).lower() == 'true'
     mode_label = 'Cluster Mode' if cluster_mode else 'Non-Cluster'
-    node_memory = _format_gib(config.get('node_memory_bytes'))
     node_hourly = _format_usd_hour(config.get('node_hourly_usd'))
     engine_type = config.get('engine_type')
     hourly_label = f"{engine_type.title()} hourly" if engine_type else "Node hourly"
@@ -31,16 +56,15 @@ def header_pills(config):
         hourly_source = config.get('node_hourly_usd_source')
         if hourly_source == 'disabled':
             hourly_value = 'disabled'
-            hourly_tooltip = config.get('node_hourly_usd_reason') or 'Price lookup disabled (var.enable_price_lookup = false).'
+            hourly_tooltip = 'Price lookup was disabled for this run.'
         elif hourly_source:
             hourly_value = 'unavailable'
-            hourly_tooltip = config.get('node_hourly_usd_reason') or 'AWS Price List lookup failed.'
+            hourly_tooltip = 'AWS Price List lookup was unavailable for this run.'
 
     items = [
         ('Engine', engine_type, ''),
         ('Version', config.get('engine_version'), ''),
         ('Node type', config.get('node_type'), ''),
-        ('Node memory', f"{node_memory} GiB" if node_memory else None, ''),
         (hourly_label, hourly_value, hourly_tooltip),
         ('Nodes', config.get('node_count'), ''),
         ('Mode', mode_label, ''),
@@ -102,7 +126,7 @@ def stat_cards_html(
             cv = memtier_minute_df['throughput_sum'].std() / avg_ops * 100
             cv_color = '#188038' if cv < 10 else ('#e8710a' if cv < 25 else '#d93025')
             cards.append(('Throughput CV', f"{cv:.1f}", '%', cv_color,
-                          'Coefficient of Variation of ops/sec. Lower = more stable.'))
+                          'Coefficient of Variation of ops/sec. Green <10%; amber 10–<25%; red ≥25%.'))
 
         avg_latency = (
             (memtier_totals_df['latency_avg_ms'] * memtier_totals_df['throughput_avg']).sum()
@@ -116,8 +140,8 @@ def stat_cards_html(
             bw_str, bw_unit = f"{total_bw / 1024:.2f}", 'MB/s'
         else:
             bw_str, bw_unit = f"{total_bw:.0f}", 'KB/s'
-        cards.append(('Total Bandwidth', bw_str, bw_unit, '#0097a7',
-                      'Total network throughput reported by memtier totals artifacts.'))
+        cards.append(('Total Bandwidth Rate', bw_str, bw_unit, '#0097a7',
+                      'Combined network transfer rate reported by memtier totals artifacts.'))
 
     # ---- ECS CPU / Memory ----
     if not ecs_df.empty:
@@ -170,8 +194,9 @@ def stat_cards_html(
                 max_mem = mem_df['Value'].max()
                 headroom = 100.0 - max_mem
                 headroom_color = '#188038' if headroom > 10 else ('#e8710a' if headroom >= 0 else '#d93025')
-                cards.append(('Avg Memory', f"{mem_df['Value'].mean():.2f}", '%', '#a142f4', ''))
-                cards.append(('Max Memory', f"{max_mem:.2f}", '%', '#a142f4', ''))
+                memory_tip = f'ElastiCache {metric} from CloudWatch.'
+                cards.append(('Avg Cache Memory', f"{mem_df['Value'].mean():.2f}", '%', '#a142f4', memory_tip))
+                cards.append(('Max Cache Memory', f"{max_mem:.2f}", '%', '#a142f4', memory_tip))
                 cards.append(('Mem Headroom', f"{headroom:+.1f}", '%', headroom_color,
                               '100 − peak memory usage. Negative means eviction territory.'))
                 break
@@ -312,10 +337,12 @@ def loadgen_quality_html(loadgen):
                 az = f"{az} — ElastiCache AZ (inferred from memtier task latency)"
             else:
                 az = f"{az} — ElastiCache AZ"
+        median = row.get('median_ops_sec')
+        median_text = f"{float(median):,.0f}" if median is not None else 'n/a'
         az_rows.append(
             f"<tr><td>{_html(az)}</td>"
-            f"<td>{_html(row.get('task_count', ''))}</td>"
-            f"<td>{float(row.get('median_ops_sec', 0)):,.0f}</td>"
+            f"<td>{_html(row.get('task_count', 'n/a'))}</td>"
+            f"<td>{_html(median_text)}</td>"
             f"<td>{_html(ratio_text)}</td></tr>"
         )
 

@@ -80,11 +80,16 @@ _classify_current_run() {
     local status_complete="$8"
     local status_has_outputs="$9"
     local fatal_error="${10:-}"
+    local report_generation_failed="${11:-false}"
 
     if [[ -n "$fatal_error" ]]; then
         printf 'known fatal reporter error: %s\n' "$fatal_error"
     elif [[ "$reporter_count" -gt 0 && "$reporter_status" != "STOPPED" ]]; then
         printf 'report running\n'
+    elif [[ "$status_present" == "true" && "$report_generation_failed" == "true" ]]; then
+        # exporter.py sets complete=false when the export succeeded but the
+        # report could not be produced; that is a report failure.
+        printf 'report failed\n'
     elif [[ "$status_present" == "true" && "$status_complete" != "true" ]]; then
         printf 'export failed\n'
     elif [[ "$status_present" == "true" && "$status_complete" == "true" && "$status_has_outputs" != "true" ]]; then
@@ -183,10 +188,12 @@ _classify_current_run_from_state() {
     local status_complete=false
     local status_has_outputs=false
     local fatal_error=""
+    local report_generation_failed=false
 
     if [[ -n "$status_json" ]]; then
         status_present=true
         status_complete=$(jq -r '.complete == true' <<<"$status_json")
+        report_generation_failed=$(jq -r '.report_generation.complete == false' <<<"$status_json")
         if jq -e '(.report | type == "string" and length > 0) and (.summary | type == "string" and length > 0)' \
             >/dev/null 2>&1 <<<"$status_json"; then
             status_has_outputs=true
@@ -200,7 +207,8 @@ _classify_current_run_from_state() {
     fi
 
     _classify_current_run "$EC_STATUS" "$DESIRED" "$RUNNING" "$PENDING" \
-        "$REPORTER_COUNT" "$REPORTER_STATUS" "$status_present" "$status_complete" "$status_has_outputs" "$fatal_error"
+        "$REPORTER_COUNT" "$REPORTER_STATUS" "$status_present" "$status_complete" "$status_has_outputs" "$fatal_error" \
+        "$report_generation_failed"
 }
 
 _canonical_status_token() {

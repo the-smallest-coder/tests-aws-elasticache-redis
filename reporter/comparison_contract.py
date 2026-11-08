@@ -25,6 +25,9 @@ from report_common import RunData, get_nested, normalize_cluster_mode
 
 INTENDED_DIMENSIONS = ("node_type", "engine", "engine_version")
 
+#: Every verdict build_comparison_contract() can return.
+VERDICTS = ("comparable", "conditional", "invalid")
+
 CONTROL_VARIABLES: tuple[tuple[str, str], ...] = (
     ("memtier", "task_count"), ("memtier", "clients"), ("memtier", "threads"),
     ("memtier", "pipeline"), ("memtier", "data_size_bytes"), ("memtier", "ratio"),

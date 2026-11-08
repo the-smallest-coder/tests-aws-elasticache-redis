@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+
+from report_safety import diagnostics, public_price_reason, public_price_source, public_summary_meta
 
 
 ECS_ENV_VARS = ("S3_BUCKET", "S3_PREFIX", "REPORT_TIMESTAMP", "CLUSTER_ID")
@@ -127,17 +130,68 @@ def _parse_iso_timestamp(value: Any) -> datetime | None:
     return dt.replace(tzinfo=None) if dt.tzinfo else dt
 
 
+#: Relative-time fields older summaries carry (forbidden in reports now).
+LEGACY_RELATIVE_FIELDS = (
+    ("benchmark", "active_window_min"),
+    ("benchmark", "prefill_min"),
+    ("cache_efficiency", "first_eviction_offset_min"),
+)
+
+
 def _summary_has_legacy_relative_fields(summary: dict[str, Any]) -> list[str]:
     legacy_fields = []
-    benchmark = summary.get("benchmark", {}) if isinstance(summary.get("benchmark"), dict) else {}
-    cache_eff = summary.get("cache_efficiency", {}) if isinstance(summary.get("cache_efficiency"), dict) else {}
-    if "active_window_min" in benchmark:
-        legacy_fields.append("benchmark.active_window_min")
-    if "prefill_min" in benchmark:
-        legacy_fields.append("benchmark.prefill_min")
-    if "first_eviction_offset_min" in cache_eff:
-        legacy_fields.append("cache_efficiency.first_eviction_offset_min")
+    for section, field in LEGACY_RELATIVE_FIELDS:
+        values = summary.get(section)
+        if isinstance(values, dict) and field in values:
+            legacy_fields.append(f"{section}.{field}")
     return legacy_fields
+
+
+class RunWarning:
+    """Every fixed sentence inspect_run_directory()/load_run() may emit.
+
+    Emitters append these constants, so the text and the report allowlist
+    below can never drift apart.
+    """
+
+    STATUS_MISSING = "Missing report_status.json."
+    STATUS_UNREADABLE = "report_status.json unreadable."
+    LOCAL_SUMMARY_UNREADABLE = "results_local.json unreadable."
+    MEMTIER_LOGS_MISSING = "Missing memtier logs under logs/loadgen."
+    ETL_SIDECARS_MISSING = "Missing memtier ETL sidecars (_memtier.minute.csv and/or *.totals.json)."
+    LOCAL_SUMMARY_LEGACY = "results_local.json is legacy/incomplete for current schema/readiness checks."
+    CANONICAL_MISSING = "Missing canonical results_*.json."
+    STATUS_COMPLETE_WITHOUT_OUTPUTS = "report_status.json has complete=true but missing report/summary fields."
+    STATUS_OUTPUTS_NOT_LOCAL = "report_status.json references canonical outputs that are not present locally."
+    CANONICAL_NOT_CURRENT = "Canonical JSON exists but is not current schema; treating run as legacy/incomplete."
+    LOCAL_SUMMARY_FALLBACK = "Using results_local.json fallback because canonical current-schema JSON is unavailable."
+
+
+#: The only run warnings a report may show. Anything else (e.g. a future
+#: warning that interpolates an exception) is withheld and logged instead.
+_PUBLIC_RUN_WARNINGS = frozenset(
+    value for name, value in vars(RunWarning).items() if name.isupper()
+)
+_LEGACY_FIELD_ALTERNATION = "|".join(
+    re.escape(f"{section}.{field}") for section, field in LEGACY_RELATIVE_FIELDS
+)
+_LEGACY_FIELDS_WARNING = re.compile(
+    rf"Legacy relative fields detected: (?:{_LEGACY_FIELD_ALTERNATION})(?:, (?:{_LEGACY_FIELD_ALTERNATION}))*\.",
+    re.ASCII,
+)
+
+
+def public_run_warnings(warnings: Any) -> list[str]:
+    """The subset of ``warnings`` that is allowed into a report."""
+    kept = []
+    for warning in warnings or ():
+        if isinstance(warning, str) and (
+            warning in _PUBLIC_RUN_WARNINGS or _LEGACY_FIELDS_WARNING.fullmatch(warning)
+        ):
+            kept.append(warning)
+        else:
+            diagnostics.warning("run warning withheld from report: %r", str(warning)[:200])
+    return kept
 
 
 def summary_is_current_schema(summary: dict[str, Any]) -> bool:
@@ -185,14 +239,17 @@ def inspect_run_directory(run_dir: Path) -> dict[str, Any]:
         try:
             status = load_json(status_path)
         except Exception as exc:
-            info["warnings"].append(f"report_status.json unreadable: {exc}")
+            # Warnings can reach a comparison report, so they carry fixed text
+            # only; the parse error itself belongs on the private log.
+            diagnostics.warning("report_status.json unreadable in %s: %s", run_dir, exc)
+            info["warnings"].append(RunWarning.STATUS_UNREADABLE)
     else:
-        info["warnings"].append("Missing report_status.json.")
+        info["warnings"].append(RunWarning.STATUS_MISSING)
 
     if not info["files"]["memtier_logs"]:
-        info["warnings"].append("Missing memtier logs under logs/loadgen.")
+        info["warnings"].append(RunWarning.MEMTIER_LOGS_MISSING)
     if not info["files"]["memtier_minute_artifact"] or not info["files"]["memtier_totals_artifacts"]:
-        info["warnings"].append("Missing memtier ETL sidecars (_memtier.minute.csv and/or *.totals.json).")
+        info["warnings"].append(RunWarning.ETL_SIDECARS_MISSING)
 
     local_summary = None
     local_meta = {}
@@ -201,7 +258,8 @@ def inspect_run_directory(run_dir: Path) -> dict[str, Any]:
             local_summary = load_json(local_json_path)
             local_meta = local_summary.get("meta", {}) if isinstance(local_summary.get("meta"), dict) else {}
         except Exception as exc:
-            info["warnings"].append(f"results_local.json unreadable: {exc}")
+            diagnostics.warning("results_local.json unreadable in %s: %s", run_dir, exc)
+            info["warnings"].append(RunWarning.LOCAL_SUMMARY_UNREADABLE)
 
     legacy_fields = _summary_has_legacy_relative_fields(local_summary or {})
     if legacy_fields:
@@ -230,7 +288,7 @@ def inspect_run_directory(run_dir: Path) -> dict[str, Any]:
         and has_required_inputs
     )
     if local_summary and not info["local_ready"]:
-        info["warnings"].append("results_local.json is legacy/incomplete for current schema/readiness checks.")
+        info["warnings"].append(RunWarning.LOCAL_SUMMARY_LEGACY)
 
     # A canonical results_*.json is only ever written by the S3-upload/ECS
     # pipeline (see run_uploaded_report in report_generator.py); the local
@@ -240,7 +298,7 @@ def inspect_run_directory(run_dir: Path) -> dict[str, Any]:
     # one by design -- only warn when there's also no ready local report to
     # fall back on, i.e. when this run has nothing usable at all.
     if not canonical_jsons and not info["local_ready"]:
-        info["warnings"].append("Missing canonical results_*.json.")
+        info["warnings"].append(RunWarning.CANONICAL_MISSING)
 
     if status is not None:
         status_complete = bool(status.get("complete") is True)
@@ -253,9 +311,9 @@ def inspect_run_directory(run_dir: Path) -> dict[str, Any]:
         outputs_exist = _status_report_artifacts_exist(run_dir, status) if status_has_outputs else False
         info["uploaded_ready"] = status_complete and status_has_outputs and outputs_exist
         if status_complete and not status_has_outputs:
-            info["warnings"].append("report_status.json has complete=true but missing report/summary fields.")
+            info["warnings"].append(RunWarning.STATUS_COMPLETE_WITHOUT_OUTPUTS)
         if status_has_outputs and not outputs_exist:
-            info["warnings"].append("report_status.json references canonical outputs that are not present locally.")
+            info["warnings"].append(RunWarning.STATUS_OUTPUTS_NOT_LOCAL)
 
     if canonical_jsons:
         preferred_name = f"results_{run_dir.name}.json"
@@ -280,12 +338,18 @@ def enrich_summary_meta(summary: dict[str, Any], cluster_details: dict[str, Any]
     expected_task_count = get_nested(summary, ("loadgen", "expected_task_count"))
     if not ecs.get("task_count") and expected_task_count is not None:
         ecs["task_count"] = expected_task_count
-    if not cluster_details:
+    if not cluster_details or not isinstance(cluster_details, dict):
         return
 
-    elasticache = cluster_details.get("elasticache", {})
-    run_info = cluster_details.get("run", {})
-    memtier = cluster_details.get("memtier", {})
+    # Any section may be null or the wrong type in a hand-edited or older
+    # file; treat that as an empty section rather than crashing the reader.
+    def section(name: str) -> dict[str, Any]:
+        value = cluster_details.get(name)
+        return value if isinstance(value, dict) else {}
+
+    elasticache = section("elasticache")
+    run_info = section("run")
+    memtier = section("memtier")
 
     meta["cluster_id"] = meta.get("cluster_id") or run_info.get("cluster_id") or ""
     meta["engine_type"] = meta.get("engine_type") or elasticache.get("engine") or ""
@@ -293,8 +357,13 @@ def enrich_summary_meta(summary: dict[str, Any], cluster_details: dict[str, Any]
     meta["node_type"] = meta.get("node_type") or elasticache.get("node_type") or ""
     meta["node_memory_bytes"] = meta.get("node_memory_bytes") or elasticache.get("node_memory_bytes") or ""
     meta["node_hourly_usd"] = meta.get("node_hourly_usd") or elasticache.get("node_hourly_usd") or ""
-    meta["node_hourly_usd_source"] = meta.get("node_hourly_usd_source") or elasticache.get("node_hourly_usd_source") or ""
-    meta["node_hourly_usd_reason"] = meta.get("node_hourly_usd_reason") or elasticache.get("node_hourly_usd_reason") or ""
+    meta["node_hourly_usd_source"] = public_price_source(
+        meta.get("node_hourly_usd_source") or elasticache.get("node_hourly_usd_source")
+    )
+    # Legacy files hold free text here; only a fixed reason code survives.
+    meta["node_hourly_usd_reason"] = public_price_reason(
+        meta.get("node_hourly_usd_reason") or elasticache.get("node_hourly_usd_reason")
+    )
     meta["node_count"] = meta.get("node_count") or elasticache.get("num_cache_nodes") or ""
     if not meta.get("cluster_mode"):
         meta["cluster_mode"] = elasticache.get("cluster_mode_enabled")
@@ -304,9 +373,9 @@ def enrich_summary_meta(summary: dict[str, Any], cluster_details: dict[str, Any]
     # field because the two can legitimately differ ("7.1" vs "7.1.0").
     meta["engine_version_actual"] = meta.get("engine_version_actual") or elasticache.get("engine_version_actual") or ""
     meta["git_sha"] = meta.get("git_sha") or run_info.get("git_sha") or ""
-    meta["loadgen_image"] = meta.get("loadgen_image") or cluster_details.get("ecs", {}).get("loadgen_image") or ""
+    meta["loadgen_image"] = meta.get("loadgen_image") or section("ecs").get("loadgen_image") or ""
     if not meta.get("reporter_packages"):
-        reporter_packages = cluster_details.get("reporter", {}).get("packages")
+        reporter_packages = section("reporter").get("packages")
         if reporter_packages:
             meta["reporter_packages"] = reporter_packages
 
@@ -318,6 +387,10 @@ def enrich_summary_meta(summary: dict[str, Any], cluster_details: dict[str, Any]
     memtier_task_count = memtier.get("task_count")
     if memtier_task_count and not ecs.get("requested_task_count"):
         ecs["requested_task_count"] = memtier_task_count
+
+    # Text fields copied from cluster_details.json are published in the
+    # summary JSON: each must have its field's shape, or it is withheld.
+    public_summary_meta(meta)
 
 
 def load_run(role: str, raw_path: str) -> RunData:
@@ -334,7 +407,7 @@ def load_run(role: str, raw_path: str) -> RunData:
             results_path = Path(canonical_path)
             canonical_summary = load_json(results_path)
             if not summary_is_current_schema(canonical_summary):
-                warnings.append("Canonical JSON exists but is not current schema; treating run as legacy/incomplete.")
+                warnings.append(RunWarning.CANONICAL_NOT_CURRENT)
             summary = canonical_summary
         elif Path(local_path).is_file() and inspection.get("local_ready", False):
             results_path = Path(local_path)
@@ -342,7 +415,7 @@ def load_run(role: str, raw_path: str) -> RunData:
         elif Path(local_path).is_file():
             results_path = Path(local_path)
             summary = load_json(results_path)
-            warnings.append("Using results_local.json fallback because canonical current-schema JSON is unavailable.")
+            warnings.append(RunWarning.LOCAL_SUMMARY_FALLBACK)
         else:
             raise FileNotFoundError(f"No result JSON file found in {source_path}")
     else:
@@ -386,12 +459,24 @@ def metric_value(spec: MetricSpec, raw_value: Any) -> float | None:
     return to_number(raw_value)
 
 
+#: A number written as text: "12.5", "1,234", "1.2e+06".
+_NUMERIC_TEXT = re.compile(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][+-]?\d+)?", re.ASCII)
+
+
 def display_value(spec: MetricSpec, raw_value: Any) -> str:
     if raw_value in (None, ""):
         return spec.none_label
+    # A stringly-typed number from an old summary is still a metric value and
+    # gets the same normalizer and formatting as a real number; anything else
+    # (free text, nested JSON) is not report data.
+    if isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not _NUMERIC_TEXT.fullmatch(text):
+            return spec.none_label
+        raw_value = float(text.replace(",", ""))
     numeric = metric_value(spec, raw_value)
-    if numeric is None:
-        return str(raw_value)
+    if numeric is None or not math.isfinite(numeric):
+        return spec.none_label
     suffix = f" {spec.unit}" if spec.unit else ""
     return f"{format_number(numeric, spec.decimals)}{suffix}"
 

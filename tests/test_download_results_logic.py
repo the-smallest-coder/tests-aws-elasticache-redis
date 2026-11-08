@@ -125,6 +125,7 @@ class DownloadResultsLogicTests(unittest.TestCase):
             ("report running", '_classify_current_run available 0 0 0 1 RUNNING true false false'),
             ("export failed", '_classify_current_run available 0 0 0 1 STOPPED true false false'),
             ("report failed", '_classify_current_run available 0 0 0 1 STOPPED true true false'),
+            ("report failed", '_classify_current_run available 0 0 0 1 STOPPED true false false "" true'),
             ("known fatal reporter error: boom", '_classify_current_run available 0 0 0 1 STOPPED true true false boom'),
         ]
 

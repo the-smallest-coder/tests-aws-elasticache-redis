@@ -6,6 +6,7 @@ import csv
 import html
 import io
 import json
+import logging
 import os
 import re
 import sys
@@ -15,6 +16,7 @@ from datetime import datetime, timezone
 import boto3
 
 from report_generator import run_uploaded_report
+from report_safety import ReportGenerationError, diagnostics
 
 
 # The full CloudWatch Statistic enum (5 members, no 6th exists) -- SampleCount
@@ -28,6 +30,9 @@ STATISTICS = ["SampleCount", "Average", "Sum", "Minimum", "Maximum"]
 DEFAULT_EXTENDED_STATISTICS = ["p99"]
 CLIENT_LATENCY_PERCENTILES = ["p50", "p99", "p99.9"]
 LOG_EXPORT_PART_SIZE = 6 * 1024 * 1024
+#: awslogs-stream-prefix of the reporter task (reporter.tf), which shares the
+#: loadgen log group.
+REPORTER_LOG_STREAM_PREFIX = "reporter/"
 
 # WP2: this list no longer drives what gets fetched (discovery does, via
 # list_metrics with no metric_names filter) -- it's now half of what
@@ -154,6 +159,17 @@ def _dimensions_to_str(dimensions: list[dict[str, str]]) -> str:
 def _read_s3_text(bucket: str, key: str) -> str:
     response = s3.get_object(Bucket=bucket, Key=key)
     return response["Body"].read().decode("utf-8", "replace")
+
+
+def _error_code(exc: BaseException) -> str:
+    """A short, text-free label for an exception: the AWS error code if it has
+    one, otherwise the exception class name."""
+    response = getattr(exc, "response", None)
+    error = response.get("Error") if isinstance(response, dict) else None
+    code = error.get("Code") if isinstance(error, dict) else None
+    if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_.]{1,64}", code):
+        return code
+    return type(exc).__name__
 
 
 def _put_json(bucket: str, key: str, payload: dict) -> None:
@@ -318,8 +334,7 @@ def _is_validation_exception(exc: Exception) -> bool:
     change 4). This detects the documented behavior in case AWS ever
     enforces it, so the fallback below only fires when actually needed.
     """
-    response = getattr(exc, "response", None)
-    if isinstance(response, dict) and response.get("Error", {}).get("Code") == "ValidationException":
+    if _error_code(exc) == "ValidationException":
         return True
     return "ValidationException" in str(exc)
 
@@ -427,7 +442,9 @@ def export_metric_sources_to_s3(
             datapoints = _fetch_metric_datapoints(params, statistics, extended_statistics)
         except Exception as exc:
             print(f"Error fetching metric {namespace}/{metric_name} for {dimensions_str}: {exc}")
-            errors.append({"metric": metric_name, "dimensions": dimensions_str, "error": str(exc)})
+            # The message (AWS text, possibly naming the caller's ARN) is in
+            # the print above; the stored manifest keeps only a short code.
+            errors.append({"metric": metric_name, "dimensions": dimensions_str, "error": _error_code(exc)})
             continue
 
         if not datapoints:
@@ -637,8 +654,10 @@ def export_logs_to_s3(log_group, bucket, key, start_time=None, end_time=None, lo
                 break
             next_token = token
     except Exception as exc:
+        # The exported object gets a code only; the AWS message (which can
+        # name the caller's ARN) stays in the container log.
         print(f"Error fetching logs from {log_group}: {exc}")
-        buffer.extend(f"Error fetching logs from {log_group}: {exc}\n".encode("utf-8", "replace"))
+        buffer.extend(f"Error fetching logs from {log_group}: {_error_code(exc)}\n".encode("utf-8", "replace"))
 
     if upload_id:
         try:
@@ -834,7 +853,13 @@ def export_loadgen_logs_to_s3(log_group, bucket, key_prefix) -> dict:
     if not log_group:
         return status
 
-    streams = _list_log_stream_names(log_group)
+    # The reporter task logs to this same group (reporter.tf) and its stream
+    # carries private diagnostics -- tracebacks, AWS error text. It is never
+    # exported as run data: only the load generators' streams are.
+    streams = [
+        stream for stream in _list_log_stream_names(log_group)
+        if not stream.startswith(REPORTER_LOG_STREAM_PREFIX)
+    ]
     files = _export_log_streams_to_s3(log_group, bucket, key_prefix, streams)
     status["files"] = files
     status["stream_count"] = len(streams)
@@ -987,6 +1012,50 @@ def send_report_ready_email(cluster_id: str, report_uri: str, summary_uri: str, 
         },
     )
     print(f"Report-ready notification sent to {config['to']}, MessageId: {response['MessageId']}")
+    return True
+
+
+def send_report_failed_email(cluster_id: str, bucket: str, prefix: str, timestamp: str, error_type: str):
+    """Tell the operator the report was not produced.
+
+    verify_shutdown's earlier "[ElastiCache Test OK]" email is otherwise the
+    last word. The body is fixed text plus identifiers; the cause stays in
+    the reporter's container log.
+    """
+    config = _ses_config()
+    if not config:
+        print("Report-failed email disabled.")
+        return None
+
+    status_uri = f"s3://{bucket}/{prefix}{timestamp}/report_status.json"
+    body_text = (
+        "ElastiCache report was NOT produced.\n\n"
+        f"Cluster: {cluster_id}\n"
+        f"Failure type: {error_type}\n"
+        f"Status: {status_uri}\n\n"
+        "Exported metrics and logs are in S3; details are in the reporter task's container log.\n"
+    )
+    body_html = (
+        "<!DOCTYPE html><html><body style=\"font-family:sans-serif;\">"
+        "<h1 style=\"color:#d93025;font-size:22px;\">Report Not Produced</h1>"
+        f"<p>Report generation failed for <strong>{html.escape(cluster_id, quote=True)}</strong> "
+        f"({html.escape(error_type, quote=True)}).</p>"
+        f"<p style=\"font-family:monospace;font-size:13px;\">{html.escape(status_uri, quote=True)}</p>"
+        "<p style=\"font-size:12px;color:#80868b;\">Details are in the reporter task's container log.</p>"
+        "</body></html>"
+    )
+    response = config["client"].send_email(
+        Source=config["source"],
+        Destination={"ToAddresses": [config["to"]]},
+        Message={
+            "Subject": {"Data": f"[ElastiCache Report FAILED] {cluster_id}", "Charset": "UTF-8"},
+            "Body": {
+                "Text": {"Data": body_text, "Charset": "UTF-8"},
+                "Html": {"Data": body_html, "Charset": "UTF-8"},
+            },
+        },
+    )
+    print(f"Report-failed notification sent to {config['to']}, MessageId: {response['MessageId']}")
     return True
 
 
@@ -1180,7 +1249,24 @@ def main() -> None:
     # The exporter must never write to that key: doing so would overwrite the
     # rich Terraform artifact with a thin subset of the same fields sourced
     # from env vars, which is strictly less information. See PLAN_2.md WP0.
-    status["cluster_details"] = run_uploaded_report()
+    try:
+        status["cluster_details"] = run_uploaded_report()
+    except (Exception, SystemExit) as exc:
+        # A report that could not be produced safely must not leave the run
+        # looking complete -- including run_uploaded_report's sys.exit(2)
+        # paths (no log entries, invalid window, no ETL sidecars). Only the
+        # exception's type is recorded here; its message and traceback stay
+        # in the container's log.
+        status["complete"] = False
+        # download_results_lib.sh reads report_generation.complete to tell
+        # a report failure from an export failure.
+        status["report_generation"] = {"complete": False, "error_type": type(exc).__name__}
+        _put_json(bucket, status_key, status)
+        try:
+            send_report_failed_email(cluster_id, bucket, prefix, timestamp, type(exc).__name__)
+        except Exception as email_exc:
+            print(f"Warning: report-failed email not sent: {_error_code(email_exc)}")
+        raise
 
     report_uri = f"s3://{bucket}/{prefix}{timestamp}/results_{timestamp}.html"
     summary_uri = f"s3://{bucket}/{prefix}{timestamp}/results_{timestamp}.json"
@@ -1204,8 +1290,19 @@ def download_stream_cli(argv: list[str] | None = None) -> None:
     print(f"Wrote {result['event_count']} events from {args.log_stream} to {args.output}")
 
 
+def _run_main() -> None:
+    """ECS entry point: a report that cannot be produced safely exits 3, as
+    report_generator's CLI does, after its cause was logged privately."""
+    try:
+        main()
+    except ReportGenerationError as exc:
+        diagnostics.error("Report generation failed: %s", exc)
+        sys.exit(3)
+
+
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     if len(sys.argv) > 1 and sys.argv[1] == "download-stream":
         download_stream_cli(sys.argv[2:])
     else:
-        main()
+        _run_main()

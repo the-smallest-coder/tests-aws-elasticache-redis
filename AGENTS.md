@@ -55,7 +55,7 @@ Lambda deps are `boto3` only (built-in to Lambda runtime). Reporter deps are in 
 ```
 Timestamp,Namespace,MetricName,Stat,Value,Unit,Dimensions
 ```
-Produced by `lambda/shutdown.py`; consumed by `reporter/report_ecs.py`.
+Produced by `lambda/shutdown.py`; consumed by `parse_metrics_csv()` in `reporter/parsers.py`.
 
 ### Report time requirements
 - **All report times are absolute timestamps only.**
@@ -63,6 +63,14 @@ Produced by `lambda/shutdown.py`; consumed by `reporter/report_ecs.py`.
 - **Reporting window end** is the absolute timestamp of the very latest memtier log message across all memtier log streams.
 - Every plotted and reported datapoint must use the absolute timestamp attached to its log or metric record.
 - No relative offsets, reconstructed timestamps, duration-derived windows, "N seconds/minutes after start", prefill windows, or active-window interpretations are allowed anywhere in reports.
+
+### Report publication boundary
+Reports (single-run, comparison, aggregate) contain only explicitly allowed data, whatever failed on the way. The shared rules live in `reporter/report_safety.py`; `public_contract` is in `report_compare.py` and `public_run_warnings` in `report_common.py`, next to the sets they check:
+- **Allowlist in, not blocklist out.** Renderers receive only values that passed a per-field contract (`public_run_config`, `public_cluster_details`, `public_loadgen_view`, `sanitize_metrics_frame`, `numeric_metric_values`, `numeric_columns`, `public_contract`, `public_run_warnings`). A value that does not fit is withheld (row dropped, field omitted, or the fixed text `withheld`), not fatal. Unknown fields and free text (AWS CLI stderr, exception messages, stack traces, service error bodies — e.g. legacy `node_hourly_usd_reason`) never reach text, attributes, tooltips, comments or chart data. A missing optional value becomes a fixed status (`unavailable`, `disabled`, `n/a`, `withheld`) or the field is omitted.
+- **Diagnostics go to the `reporter.diagnostics` logger** (stderr / container log), never into a published artifact. New warnings that can reach a report must be fixed sentences.
+- **Fail closed.** `assert_publishable_html()` scans the finished page, and `assert_publishable_json()` the summary JSON, for diagnostic markers (also in their decoded form); any `ReportGenerationError` (exit code 3 from `report_generator.py` and from `exporter.py` on ECS) means nothing is written or uploaded. Files are written with `write_files_atomically()`, which rolls back a partly committed set, so a previous valid file survives a failed run. In ECS, `exporter.py` then marks `report_status.json` incomplete (`report_generation.complete: false`) and sends a report-failed email.
+- Report vocabulary such as `ErrorCount`, `Errors`, `OOM Rejections` is legitimate data; markers must stay specific (see `tests/test_report_publication_safety.py`).
+- `reporter.tf` ships a fixed module list to ECS (`local.reporter_modules`, which both the S3 upload and the task's download use): a new module imported by those modules must be added there.
 
 ### results_local.json structure
 Nested dict with top-level keys: `meta`, `benchmark`, `cache_efficiency`, `engine_cpu`, `memory`, `network`, `latency_server_us`, `connections`, `ecs`. Metric specs in `report_compare.py` use tuple paths e.g. `("benchmark", "avg_ops")` resolved via `get_nested()` in `report_common.py`.

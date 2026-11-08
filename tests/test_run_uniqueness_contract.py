@@ -26,7 +26,10 @@ class RunUniquenessContractTests(unittest.TestCase):
     def test_reporter_task_deploys_loadgen_analysis_module(self):
         reporter_tf = (ROOT / "reporter.tf").read_text(encoding="utf-8")
 
-        self.assertGreaterEqual(reporter_tf.count('"loadgen_analysis.py"'), 2)
+        # One module list (local.reporter_modules) feeds both the S3 upload and
+        # the task's download (jsonencode in the heredoc).
+        self.assertEqual(reporter_tf.count('"loadgen_analysis.py"'), 1)
+        self.assertIn("jsonencode(sort(tolist(local.reporter_modules)))", reporter_tf)
 
     def test_run_id_full_uses_24_hour_timestamp(self):
         main_tf = (ROOT / "main.tf").read_text(encoding="utf-8")
